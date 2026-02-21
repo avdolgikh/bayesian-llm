@@ -1,0 +1,42 @@
+Metadata-Version: 2.4
+Name: bayesian-llm
+Version: 0.1.0
+Summary: Minimal experiments for Bayesian methods in LLMs.
+Requires-Python: >=3.12
+Description-Content-Type: text/markdown
+Requires-Dist: numpy>=2.4.2
+Requires-Dist: torch
+
+# Bayesian LLM Experiments
+
+Minimal, hands-on experiments for Bayesian methods in LLMs. The two PDFs in `docs/` are the theory baseline and should guide implementation choices.
+
+## Quickstart (uv + Python 3.12)
+```bash
+uv venv
+uv sync
+uv run python -m bayesian_llm.experiments.a0_minigpt
+```
+
+## Framework Choice (current)
+For milestones A0-A2, the repo uses PyTorch with `torch.distributions` to keep Bayesian layers and ELBO/KL wiring simple and explicit. JAX can be revisited later if it provides lower boilerplate.
+
+## Experiments
+- A0: Deterministic mini-GPT baseline (`python -m bayesian_llm.experiments.a0_minigpt`)
+- A1: First Bayesian component (planned)
+- A2: Broader Bayesian coverage (planned)
+- B1: Bayesian LoRA on a small existing model (later)
+
+## Repo Structure (initial)
+- `docs/` theory references (source of truth)
+- `specs/` project spec and decision notes
+- `src/bayesian_llm/` code
+  - `model/` transformer + Bayesian variants
+  - `train/` training loops and objectives
+  - `data/` tiny dataset loaders
+  - `experiments/` runnable scripts
+- `tests/` unit and smoke tests
+- `data/` local datasets (gitignored)
+
+## Notes
+See `NOTES.md` for running decisions and experiment logs.

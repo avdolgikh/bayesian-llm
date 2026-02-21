@@ -1,0 +1,10 @@
+/.venv/
+/.uv-cache/
+/.claude/
+/data/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.pt
+*.ckpt
+*.log
