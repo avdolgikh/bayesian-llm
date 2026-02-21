@@ -6,7 +6,7 @@ Minimal, hands-on experiments for Bayesian methods in LLMs. The two PDFs in `doc
 ```bash
 uv venv
 uv sync
-uv run python -m bayesian_llm.experiments.a0_minigpt
+uv run python experiments/a0_baseline.py
 ```
 
 If uv reports permission errors, set a repo-local cache:
@@ -14,27 +14,45 @@ If uv reports permission errors, set a repo-local cache:
 $env:UV_CACHE_DIR=".uv-cache"; uv venv; uv sync
 ```
 
-## Framework Choice (current)
-For milestones A0-A2, the repo uses PyTorch with `torch.distributions` to keep Bayesian layers and ELBO/KL wiring simple and explicit. JAX can be revisited later if it provides lower boilerplate.
+## Dataset
+TinyShakespeare (~1.1 MB, ~304k BPE tokens) — auto-downloaded on first run to `data/tinyshakespeare.txt`.
 
-Dependencies are managed exclusively with uv (`uv add`, `uv sync`, `uv run`).
+## Tokenizer
+GPT-2 BPE via `tiktoken` (vocab_size=50,257).
+
+## Experiment Tracking (MLflow)
+All runs are logged to a local SQLite-backed MLflow store (`mlflow.db`).
+
+View results:
+```bash
+uv run mlflow ui --backend-store-uri sqlite:///mlflow.db
+```
+Then open http://127.0.0.1:5000. Use `--no-mlflow` flag on experiment scripts to disable tracking.
+
+## Framework Choice
+PyTorch with `torch.distributions` for Bayesian layers and ELBO/KL wiring. Dependencies managed with uv.
 
 ## Experiments
-- A0: Deterministic mini-GPT baseline (`python -m bayesian_llm.experiments.a0_minigpt`)
-- A1: First Bayesian component (planned)
-- A2: Broader Bayesian coverage (planned)
-- B1: Bayesian LoRA on a small existing model (later)
+- **A0:** Deterministic miniGPT baseline (`uv run python experiments/a0_baseline.py`)
+- **A1:** Bayesian output head (planned)
+- **A2:** Bayesian FFN layers + OOD evaluation (planned)
+- **B1:** Bayesian LoRA on existing model (later)
 
-## Repo Structure (initial)
-- `docs/` theory references (source of truth)
-- `specs/` project spec and decision notes
-- `src/bayesian_llm/` code
-  - `model/` transformer + Bayesian variants
-  - `train/` training loops and objectives
-  - `data/` tiny dataset loaders
-  - `experiments/` runnable scripts
-- `tests/` unit and smoke tests
-- `data/` local datasets (gitignored)
+## Repo Structure
+```
+minigpt/          # Python package
+  layers.py       # Bayesian layers (BayesianLinear, reparameterization trick, KL)
+  model.py        # MiniGPT (CausalSelfAttention, MLP, Block, MiniGPT)
+  data.py         # TinyShakespeare download + BPE tokenization
+  train.py        # Training loop with perplexity, checkpoints, MLflow
+  evaluate.py     # Perplexity computation + text generation
+  uncertainty.py  # Epistemic uncertainty (Phase 2)
+experiments/      # Runnable .py scripts
+tests/            # pytest tests
+data/             # Local datasets + checkpoints (gitignored)
+docs/             # Theory references
+specs/            # Project spec and decision notes
+```
 
 ## Notes
 See `NOTES.md` for running decisions and experiment logs.

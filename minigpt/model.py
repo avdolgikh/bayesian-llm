@@ -6,7 +6,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from bayesian_llm.model.bayes import BayesConfig, make_linear, sum_kl_loss
+from minigpt.layers import BayesConfig, make_linear, sum_kl_loss
 
 
 @dataclass

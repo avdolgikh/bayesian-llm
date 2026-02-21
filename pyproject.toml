@@ -11,10 +11,9 @@ requires-python = ">=3.12"
 dependencies = [
     "numpy>=2.4.2",
     "torch",
+    "tiktoken",
+    "mlflow",
 ]
 
-[tool.setuptools]
-package-dir = {"" = "src"}
-
 [tool.setuptools.packages.find]
-where = ["src"]
+include = ["minigpt*"]

@@ -9,21 +9,30 @@ Layout (flat, minimal — no deep nesting):
 minigpt/          # Python package — all model-related code
   model.py        # MiniGPT architecture (deterministic)
   layers.py       # Bayesian layers (BayesianLinear, etc.)
-  data.py         # Dataset loading + topic splitting
+  data.py         # Dataset loading + tokenization (BPE via tiktoken)
   train.py        # Training loop (cross-entropy + ELBO)
   evaluate.py     # Standard eval (perplexity, generation)
-  uncertainty.py  # Epistemic uncertainty measurement
+  uncertainty.py  # Epistemic uncertainty measurement (Phase 2)
 experiments/      # Runnable .py scripts (a0_baseline, a1_bayes_output, etc.)
 tests/            # pytest tests
 data/             # Local datasets (gitignored; document provenance in README.md)
 ```
 
-The old `src/bayesian_llm/` structure is deprecated and will be removed.
-
 ## Hard Rules
 - **No notebooks.** Only runnable `.py` scripts. Never create `.ipynb` files.
 - **No extra Bayesian libraries.** Use only `torch.distributions` for probabilistic layers. Manual implementation is preferred over adding dependencies.
 - **No modern transformer tricks** in miniGPT: no RoPE, SwiGLU, sliding window attention, MoE, GQA. Keep it basic — the focus is Bayesian, not architecture.
+- **Document on the fly.** Always log findings, decisions, implementation steps, and user requests in this file and NOTES.md as work progresses. Do NOT wait for user to ask.
+
+## Tokenization
+- **BPE tokenization** via `tiktoken` (GPT-2 encoding, vocab_size=50257).
+- Character-level tokenizer was used in early prototype but is now replaced.
+
+## Experiment Tracking
+- **MLflow** (local, sqlite backend: `sqlite:///mlflow.db`) for all experiment tracking.
+- Every training run logs: hyperparameters, train/val loss, perplexity, generated samples.
+- Launch MLflow UI with: `uv run mlflow ui --backend-store-uri sqlite:///mlflow.db`
+- `--no-mlflow` flag available on experiment scripts to disable tracking.
 
 ## Environment & Tooling
 - Python 3.12 with `uv` and a `pyproject.toml`
@@ -54,11 +63,13 @@ Which layers to make Bayesian, in order:
 - Primary metric: **mutual information** (MI = predictive_entropy - expected_entropy) — pure epistemic uncertainty.
 - Secondary metrics: top-k logit variance, top-1 flip rate, sequence-level MI.
 - Evaluation: train on subset of topics, measure MI on in-distribution vs OOD topics. Expect clear MI gap.
+- **Note:** The spec notation `p_t^(i) = softmax(z_t^(i))` needs clarification — discussed, to be revisited in Phase 2.
 
 ## Build, Test, and Development Commands
 - `uv venv` and `uv sync`
 - `uv run python -m pytest`
 - `uv run python experiments/a0_baseline.py` (etc.)
+- `uv run mlflow ui --backend-store-uri sqlite:///mlflow.db` (view experiment results)
 
 ## Coding Style & Naming Conventions
 - Indentation: 4 spaces; line length up to 100
@@ -75,3 +86,6 @@ Use `pytest` with `test_*.py` naming. Keep tests deterministic (seed randomness)
 
 ## Security & Data
 Do not commit secrets or large binaries. Use `.env` (ignored) and provide `.env.example` when needed. Keep `data/` out of version control and document licensing constraints in `README.md`.
+
+## Implementation Log
+- **2026-02-21:** Phase 1 restructuring complete. Flat `minigpt/` package replaces `src/bayesian_llm/`. BPE tokenization (tiktoken/GPT-2). MLflow tracking (sqlite). TinyShakespeare dataset. Checkpoints save to `data/checkpoints/`. Smoke test passed: loss decreases 10.66→7.96 in 50 steps, 13.7M params.

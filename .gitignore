@@ -8,3 +8,4 @@ __pycache__/
 *.pt
 *.ckpt
 *.log
+*.egg-info/

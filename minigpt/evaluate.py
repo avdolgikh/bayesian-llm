@@ -1,0 +1,64 @@
+from __future__ import annotations
+
+import math
+
+import tiktoken
+import torch
+
+from minigpt.model import MiniGPT
+from minigpt.train import get_batch
+
+
+@torch.no_grad()
+def compute_perplexity(
+    model: MiniGPT,
+    data: torch.Tensor,
+    block_size: int,
+    batch_size: int,
+    device: torch.device,
+    n_batches: int = 20,
+) -> float:
+    model.eval()
+    losses = []
+    for _ in range(n_batches):
+        x, y = get_batch(data, block_size, batch_size, device)
+        _, loss = model(x, y)
+        losses.append(loss.item())
+    model.train()
+    return math.exp(sum(losses) / len(losses))
+
+
+def generate_text(
+    model: MiniGPT,
+    enc: tiktoken.Encoding,
+    prompt: str = "",
+    max_new_tokens: int = 200,
+    temperature: float = 0.8,
+) -> str:
+    device = next(model.parameters()).device
+    if prompt:
+        tokens = enc.encode_ordinary(prompt)
+        idx = torch.tensor([tokens], dtype=torch.long, device=device)
+    else:
+        # Start with newline token
+        idx = torch.tensor([[enc.encode_ordinary("\n")[0]]], dtype=torch.long, device=device)
+    out = model.generate(idx, max_new_tokens=max_new_tokens, temperature=temperature)
+    return enc.decode(out[0].tolist(), errors="replace")
+
+
+def evaluate(
+    model: MiniGPT,
+    val_data: torch.Tensor,
+    enc: tiktoken.Encoding,
+    block_size: int,
+    batch_size: int,
+    device: torch.device,
+) -> dict:
+    ppl = compute_perplexity(model, val_data, block_size, batch_size, device)
+    sample = generate_text(model, enc, max_new_tokens=200)
+    print(f"\nVal perplexity: {ppl:.2f}")
+    import sys
+    enc_name = getattr(sys.stdout, "encoding", "utf-8") or "utf-8"
+    safe = sample.encode(enc_name, errors="replace").decode(enc_name)
+    print(f"\n=== generated sample ===\n{safe}\n========================")
+    return {"perplexity": ppl, "sample": sample}
