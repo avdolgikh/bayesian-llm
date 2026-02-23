@@ -1,5 +1,4 @@
 """A0 — Deterministic miniGPT baseline on TinyShakespeare (BPE)."""
-from __future__ import annotations
 
 import argparse
 
@@ -35,14 +34,14 @@ def main() -> None:
 
     # --- Data ---
     text = load_shakespeare()
-    enc = get_tokenizer()
-    train_data, val_data = prepare_data(text, enc)
-    print(f"BPE vocab size: {enc.n_vocab}")
+    tokenizer = get_tokenizer()
+    train_data, val_data = prepare_data(text, tokenizer)
+    print(f"BPE vocab size: {tokenizer.n_vocab}")
     print(f"Train tokens: {len(train_data):,}  Val tokens: {len(val_data):,}")
 
     # --- Model ---
     gpt_config = GPTConfig(
-        vocab_size=enc.n_vocab,
+        vocab_size=tokenizer.n_vocab,
         block_size=args.block_size,
         n_layer=args.n_layer,
         n_head=args.n_head,
@@ -58,6 +57,7 @@ def main() -> None:
     if device_str == "auto":
         device_str = "cuda" if torch.cuda.is_available() else "cpu"
     device = torch.device(device_str)
+    print(f"Using device: {device_str}")
 
     # --- Train config ---
     train_cfg = TrainConfig(
@@ -90,7 +90,7 @@ def main() -> None:
                     "n_head": args.n_head,
                     "n_embd": args.n_embd,
                     "lr": args.lr,
-                    "vocab_size": enc.n_vocab,
+                    "vocab_size": tokenizer.n_vocab,
                     "n_params": n_params,
                     "tokenizer": "gpt2-bpe",
                     "dataset": "tinyshakespeare",
@@ -101,7 +101,7 @@ def main() -> None:
         model = train(model, train_data, val_data, train_cfg, mlflow_run=run if use_mlflow else None)
 
         # --- Evaluate ---
-        results = evaluate(model, val_data, enc, args.block_size, args.batch_size, device)
+        results = evaluate(model, val_data, tokenizer, args.block_size, args.batch_size, device)
 
         if use_mlflow:
             mlflow.log_metric("final_val_perplexity", results["perplexity"])

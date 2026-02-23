@@ -9,10 +9,6 @@ uv sync
 uv run python experiments/a0_baseline.py
 ```
 
-If uv reports permission errors, set a repo-local cache:
-```powershell
-$env:UV_CACHE_DIR=".uv-cache"; uv venv; uv sync
-```
 
 ## Dataset
 TinyShakespeare (~1.1 MB, ~304k BPE tokens) — auto-downloaded on first run to `data/tinyshakespeare.txt`.

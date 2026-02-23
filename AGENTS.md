@@ -36,8 +36,8 @@ data/             # Local datasets (gitignored; document provenance in README.md
 - `mlflow.db` and `mlruns/` are **committed to git** (lightweight — metrics + text artifacts only, no model weights).
 
 ## Environment & Tooling
-- Python 3.12 with `uv` and a `pyproject.toml`
-- Use uv only; avoid pip (`uv add`, `uv sync`, `uv run`)
+- **Run from global Python environment** (Python 3.11, CUDA-enabled PyTorch). Install with `pip install -e .`.
+- `uv` is available for dependency management (`uv add`, `uv sync`) but experiments run via global `python`, not `uv run`.
 - Document setup in `README.md`
 - Target GPU runs (RTX 4070, ~10-12 GB VRAM)
 - If uv hits permission errors, set `UV_CACHE_DIR` to a local folder (e.g., `.uv-cache`)
@@ -67,10 +67,10 @@ Which layers to make Bayesian, in order:
 - **Note:** The spec notation `p_t^(i) = softmax(z_t^(i))` needs clarification — discussed, to be revisited in Phase 2.
 
 ## Build, Test, and Development Commands
-- `uv venv` and `uv sync`
-- `uv run python -m pytest`
-- `uv run python experiments/a0_baseline.py` (etc.)
-- `uv run mlflow ui --backend-store-uri sqlite:///mlflow.db` (view experiment results)
+- `pip install -e .` (editable install into global env)
+- `python -m pytest`
+- `python experiments/a0_baseline.py` (etc.)
+- `mlflow ui --backend-store-uri sqlite:///mlflow.db` (view experiment results)
 
 ## Coding Style & Naming Conventions
 - Indentation: 4 spaces; line length up to 100
