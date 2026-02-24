@@ -16,6 +16,10 @@ class TrainConfig:
     batch_size: int = 64
     block_size: int = 128
     lr: float = 3e-4
+    weight_decay: float = 0.1
+    warmup_steps: int = 200
+    min_lr: float = 1e-5
+    grad_clip: float = 1.0
     eval_interval: int = 200
     eval_iters: int = 20
     checkpoint_interval: int = 500
@@ -95,6 +99,27 @@ def load_checkpoint(
     return ckpt.get("step", 0)
 
 
+def _get_lr(step: int, cfg: TrainConfig) -> float:
+    """Cosine decay with linear warmup."""
+    if step < cfg.warmup_steps:
+        return cfg.lr * step / max(cfg.warmup_steps, 1)
+    if step >= cfg.steps:
+        return cfg.min_lr
+    progress = (step - cfg.warmup_steps) / max(cfg.steps - cfg.warmup_steps, 1)
+    return cfg.min_lr + 0.5 * (cfg.lr - cfg.min_lr) * (1 + math.cos(math.pi * progress))
+
+
+def _configure_optimizer(model: MiniGPT, cfg: TrainConfig) -> torch.optim.AdamW:
+    """AdamW with weight decay only on 2-D weight tensors (not biases/layernorms)."""
+    decay_params = [p for p in model.parameters() if p.requires_grad and p.dim() >= 2]
+    no_decay_params = [p for p in model.parameters() if p.requires_grad and p.dim() < 2]
+    groups = [
+        {"params": decay_params, "weight_decay": cfg.weight_decay},
+        {"params": no_decay_params, "weight_decay": 0.0},
+    ]
+    return torch.optim.AdamW(groups, lr=cfg.lr, betas=(0.9, 0.95))
+
+
 def train(
     model: MiniGPT,
     train_data: torch.Tensor,
@@ -104,16 +129,29 @@ def train(
 ) -> MiniGPT:
     device = _resolve_device(cfg.device)
     model = model.to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr)
+    optimizer = _configure_optimizer(model, cfg)
+
+    best_val_loss = float("inf")
+    best_path = CHECKPOINT_DIR / "ckpt_best.pt"
 
     start = time.time()
     for step in range(1, cfg.steps + 1):
+        # Update learning rate (cosine schedule with warmup)
+        lr = _get_lr(step, cfg)
+        for param_group in optimizer.param_groups:
+            param_group["lr"] = lr
+
         x, y = get_batch(train_data, cfg.block_size, cfg.batch_size, device)
         _, loss = model(x, y)
 
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
         optimizer.step()
+
+        if mlflow_run is not None:
+            import mlflow
+            mlflow.log_metric("lr", lr, step=step)
 
         if step % cfg.eval_interval == 0 or step == 1:
             train_metrics = estimate_loss(
@@ -123,11 +161,16 @@ def train(
                 model, val_data, cfg.block_size, cfg.batch_size, device, cfg.eval_iters,
             )
             elapsed = time.time() - start
+            is_best = val_metrics["loss"] < best_val_loss
+            if is_best:
+                best_val_loss = val_metrics["loss"]
+                save_checkpoint(model, optimizer, step, {"step": step}, path=best_path)
             print(
                 f"step {step:5d} | "
                 f"train loss {train_metrics['loss']:.4f} ppl {train_metrics['perplexity']:.1f} | "
                 f"val loss {val_metrics['loss']:.4f} ppl {val_metrics['perplexity']:.1f} | "
                 f"{elapsed:.1f}s"
+                f"{'  *best' if is_best else ''}"
             )
             if mlflow_run is not None:
                 import mlflow
@@ -145,9 +188,9 @@ def train(
             ckpt_path = save_checkpoint(model, optimizer, step, {"step": step})
             print(f"  -> checkpoint saved: {ckpt_path}")
 
-    # Final checkpoint
-    final_path = save_checkpoint(model, optimizer, cfg.steps, {"step": cfg.steps})
-    print(f"  -> final checkpoint: {final_path}")
+    # Reload best checkpoint for downstream use
+    print(f"  -> reloading best checkpoint (val loss {best_val_loss:.4f}): {best_path}")
+    load_checkpoint(best_path, model)
     return model
 
 

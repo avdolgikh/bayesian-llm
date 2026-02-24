@@ -16,11 +16,16 @@ def main() -> None:
     p = argparse.ArgumentParser(description="A0 miniGPT baseline (TinyShakespeare, BPE)")
     p.add_argument("--steps", type=int, default=2000)
     p.add_argument("--batch-size", type=int, default=64)
-    p.add_argument("--block-size", type=int, default=128)
+    p.add_argument("--block-size", type=int, default=256)
     p.add_argument("--n-layer", type=int, default=4)
     p.add_argument("--n-head", type=int, default=4)
-    p.add_argument("--n-embd", type=int, default=128)
+    p.add_argument("--n-embd", type=int, default=256)
+    p.add_argument("--dropout", type=float, default=0.2)
     p.add_argument("--lr", type=float, default=3e-4)
+    p.add_argument("--weight-decay", type=float, default=0.1)
+    p.add_argument("--warmup-steps", type=int, default=200)
+    p.add_argument("--min-lr", type=float, default=1e-5)
+    p.add_argument("--grad-clip", type=float, default=1.0)
     p.add_argument("--eval-interval", type=int, default=200)
     p.add_argument("--eval-iters", type=int, default=20)
     p.add_argument("--checkpoint-interval", type=int, default=500)
@@ -46,6 +51,7 @@ def main() -> None:
         n_layer=args.n_layer,
         n_head=args.n_head,
         n_embd=args.n_embd,
+        dropout=args.dropout,
         bayes=BayesConfig(enabled=False),
     )
     model = MiniGPT(gpt_config)
@@ -65,6 +71,10 @@ def main() -> None:
         batch_size=args.batch_size,
         block_size=args.block_size,
         lr=args.lr,
+        weight_decay=args.weight_decay,
+        warmup_steps=args.warmup_steps,
+        min_lr=args.min_lr,
+        grad_clip=args.grad_clip,
         eval_interval=args.eval_interval,
         eval_iters=args.eval_iters,
         checkpoint_interval=args.checkpoint_interval,
@@ -89,7 +99,12 @@ def main() -> None:
                     "n_layer": args.n_layer,
                     "n_head": args.n_head,
                     "n_embd": args.n_embd,
+                    "dropout": args.dropout,
                     "lr": args.lr,
+                    "weight_decay": args.weight_decay,
+                    "warmup_steps": args.warmup_steps,
+                    "min_lr": args.min_lr,
+                    "grad_clip": args.grad_clip,
                     "vocab_size": tokenizer.n_vocab,
                     "n_params": n_params,
                     "tokenizer": "gpt2-bpe",
