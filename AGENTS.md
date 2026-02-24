@@ -30,7 +30,7 @@ data/             # Local datasets (gitignored; document provenance in README.md
 
 ## Experiment Tracking
 - **MLflow** (local, sqlite backend: `sqlite:///mlflow.db`) for all experiment tracking.
-- Every training run logs: hyperparameters, train/val loss, perplexity, generated samples.
+- Every training run logs: hyperparameters, train/val loss, perplexity, generated samples, learning rate (every step).
 - Launch MLflow UI with: `uv run mlflow ui --backend-store-uri sqlite:///mlflow.db`
 - `--no-mlflow` flag available on experiment scripts to disable tracking.
 - `mlflow.db` and `mlruns/` are **committed to git** (lightweight — metrics + text artifacts only, no model weights).
@@ -90,3 +90,12 @@ Do not commit secrets or large binaries. Use `.env` (ignored) and provide `.env.
 
 ## Implementation Log
 - **2026-02-21:** Phase 1 restructuring complete. Flat `minigpt/` package replaces `src/bayesian_llm/`. BPE tokenization (tiktoken/GPT-2). MLflow tracking (sqlite, git-tracked). TinyShakespeare dataset. Checkpoints save to `data/checkpoints/`. Smoke test passed: loss decreases 10.66→7.96 in 50 steps, 13.7M params. Added `*.egg-info/` to .gitignore.
+- **2026-02-23:** Training loop hardened for A0 polish:
+  - **Weight decay 0.1** with proper param groups (decay on 2-D weights only, not biases/layernorms). AdamW betas=(0.9, 0.95).
+  - **Cosine LR schedule** with linear warmup (default 200 steps, min_lr=1e-5). LR logged to MLflow every step.
+  - **Gradient clipping** (max_norm=1.0).
+  - **Weight tying** (GPT-2 style): `lm_head.weight = token_emb.weight`. Cuts ~12.9M params with vocab 50257 and n_embd=256.
+  - **Best checkpoint tracking**: saves `ckpt_best.pt` on val loss improvement, reloads it after training for evaluation/generation.
+  - New defaults: n_embd=256, block_size=256, dropout=0.2, n_layer=4 (was already default).
+  - New CLI flags: `--dropout`, `--weight-decay`, `--warmup-steps`, `--min-lr`, `--grad-clip`.
+  - Observation: 304K BPE tokens is very small vs 50257 vocab — embedding table dominates params. Weight tying is critical.
