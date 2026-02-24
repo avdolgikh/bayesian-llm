@@ -13,6 +13,7 @@ dependencies = [
     "torch",
     "tiktoken",
     "mlflow",
+    "pyyaml",
 ]
 
 [tool.setuptools.packages.find]

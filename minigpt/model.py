@@ -92,7 +92,7 @@ class MiniGPT(nn.Module):
         self.lm_head = make_linear(config.n_embd, config.vocab_size, config.bayes, bias=False)
 
         # Weight tying (GPT-2 style) — share token_emb and lm_head weights
-        self.lm_head.weight = self.token_emb.weight
+        self.lm_head.linear.weight = self.token_emb.weight
 
         self.apply(self._init_weights)
 
