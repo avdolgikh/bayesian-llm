@@ -36,11 +36,18 @@ def prepare_data(
     text: str,
     enc: tiktoken.Encoding,
     val_fraction: float = 0.1,
-) -> tuple[torch.Tensor, torch.Tensor]:
+    test_fraction: float = 0.1,
+) -> dict[str, torch.Tensor | None]:
     tokens = enc.encode_ordinary(text)
     data = torch.tensor(tokens, dtype=torch.long)
-    n = int(len(data) * (1 - val_fraction))
-    return data[:n], data[n:]
+    train_end = int(len(data) * (1 - val_fraction - test_fraction))
+    val_end = int(len(data) * (1 - test_fraction))
+    return {
+        "train": data[:train_end],
+        "val": data[train_end:val_end],
+        "test_id": data[val_end:],
+        "test_ood": None,
+    }
 
 
 # --------------- AG News ---------------
@@ -75,9 +82,10 @@ def prepare_agnews_data(
     id_categories: list[int],
     ood_categories: list[int],
     val_fraction: float = 0.1,
+    test_fraction: float = 0.1,
     seed: int = 1337,
 ) -> dict[str, torch.Tensor | None]:
-    """Filter by category, shuffle, tokenize, split into train/val/test_ood."""
+    """Filter by category, shuffle, tokenize, split into train/val/test_id/test_ood."""
     id_articles = [f"{title} {desc}" for cat, title, desc in samples
                    if cat in id_categories]
     ood_articles = [f"{title} {desc}" for cat, title, desc in samples
@@ -96,9 +104,11 @@ def prepare_agnews_data(
     id_text = "\n\n".join(id_articles)
     id_tokens = tokenizer.encode_ordinary(id_text)
     id_data = torch.tensor(id_tokens, dtype=torch.long)
-    n = int(len(id_data) * (1 - val_fraction))
-    train_data = id_data[:n]
-    val_data = id_data[n:]
+    train_end = int(len(id_data) * (1 - val_fraction - test_fraction))
+    val_end = int(len(id_data) * (1 - test_fraction))
+    train_data = id_data[:train_end]
+    val_data = id_data[train_end:val_end]
+    test_id = id_data[val_end:]
 
     # Tokenize OOD text
     test_ood = None
@@ -109,20 +119,20 @@ def prepare_agnews_data(
         ood_tokens = tokenizer.encode_ordinary(ood_text)
         test_ood = torch.tensor(ood_tokens, dtype=torch.long)
 
-    return {"train": train_data, "val": val_data, "test_ood": test_ood}
+    return {"train": train_data, "val": val_data, "test_id": test_id, "test_ood": test_ood}
 
 
 # --------------- Dataset dispatcher ---------------
 
 def load_dataset(cfg: dict, tokenizer: tiktoken.Encoding) -> dict[str, torch.Tensor | None]:
-    """Load and prepare dataset based on config. Returns dict with train/val/test_ood tensors."""
+    """Load and prepare dataset based on config. Returns dict with train/val/test_id/test_ood tensors."""
     dataset = cfg["data"]["dataset"]
     val_fraction = cfg["data"].get("val_fraction", 0.1)
+    test_fraction = cfg["data"].get("test_fraction", 0.1)
 
     if dataset == "tinyshakespeare":
         text = load_shakespeare()
-        train_data, val_data = prepare_data(text, tokenizer, val_fraction)
-        return {"train": train_data, "val": val_data, "test_ood": None}
+        return prepare_data(text, tokenizer, val_fraction, test_fraction)
 
     elif dataset == "agnews":
         samples = load_agnews()
@@ -130,7 +140,7 @@ def load_dataset(cfg: dict, tokenizer: tiktoken.Encoding) -> dict[str, torch.Ten
         ood_cats = cfg["data"].get("ood_categories", [3, 4])
         seed = cfg["train"].get("seed", 1337)
         return prepare_agnews_data(samples, tokenizer, id_cats, ood_cats,
-                                   val_fraction, seed)
+                                   val_fraction, test_fraction, seed)
 
     else:
         raise ValueError(f"Unknown dataset: {dataset!r}. Choose 'tinyshakespeare' or 'agnews'.")

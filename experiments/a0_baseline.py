@@ -47,11 +47,13 @@ def main() -> None:
     data = load_dataset(cfg, tokenizer)
     train_data = data["train"]
     val_data = data["val"]
+    test_id = data["test_id"]
     test_ood = data["test_ood"]
     print(f"BPE vocab size: {tokenizer.n_vocab}")
     print(f"Train tokens: {len(train_data):,}  Val tokens: {len(val_data):,}")
+    print(f"Test ID tokens: {len(test_id):,}")
     if test_ood is not None:
-        print(f"OOD tokens:   {len(test_ood):,}")
+        print(f"Test OOD tokens: {len(test_ood):,}")
 
     # --- Model ---
     gpt_config = build_gpt_config(cfg, vocab_size=tokenizer.n_vocab)
@@ -116,16 +118,25 @@ def main() -> None:
             mlflow.log_metric("final_val_perplexity", results["perplexity"])
             mlflow.log_text(results["sample"], "generated_sample.txt")
 
+        # --- Test ID evaluation ---
+        test_id_ppl = compute_perplexity(
+            model, test_id,
+            cfg["train"]["block_size"], cfg["train"]["batch_size"], device,
+        )
+        print(f"\nTest ID perplexity: {test_id_ppl:.2f}")
+        if use_mlflow:
+            mlflow.log_metric("test_id_perplexity", test_id_ppl)
+
         # --- OOD evaluation ---
         if test_ood is not None:
             ood_ppl = compute_perplexity(
                 model, test_ood,
                 cfg["train"]["block_size"], cfg["train"]["batch_size"], device,
             )
-            print(f"\nOOD perplexity: {ood_ppl:.2f}")
-            print(f"ID vs OOD perplexity: {results['perplexity']:.2f} vs {ood_ppl:.2f}")
+            print(f"Test OOD perplexity: {ood_ppl:.2f}")
+            print(f"ID vs OOD perplexity: {test_id_ppl:.2f} vs {ood_ppl:.2f}")
             if use_mlflow:
-                mlflow.log_metric("ood_perplexity", ood_ppl)
+                mlflow.log_metric("test_ood_perplexity", ood_ppl)
 
     print("\nDone.")
 

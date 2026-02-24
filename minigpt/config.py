@@ -18,6 +18,7 @@ DEFAULT_CONFIG: dict = {
     "data": {
         "dataset": "tinyshakespeare",
         "val_fraction": 0.1,
+        "test_fraction": 0.1,
         "id_categories": [1, 2],
         "ood_categories": [3, 4],
     },
@@ -168,6 +169,12 @@ def validate_config(cfg: dict) -> None:
     n_head = cfg["model"]["n_head"]
     if n_embd % n_head != 0:
         raise ValueError(f"model.n_embd ({n_embd}) must be divisible by model.n_head ({n_head})")
+    val_frac = cfg["data"].get("val_fraction", 0.1)
+    test_frac = cfg["data"].get("test_fraction", 0.1)
+    if val_frac + test_frac >= 1.0:
+        raise ValueError(
+            f"val_fraction ({val_frac}) + test_fraction ({test_frac}) must be < 1.0"
+        )
 
 
 def config_to_flat_params(cfg: dict, prefix: str = "") -> dict[str, str]:

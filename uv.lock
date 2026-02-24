@@ -58,6 +58,7 @@ source = { editable = "." }
 dependencies = [
     { name = "mlflow" },
     { name = "numpy" },
+    { name = "pyyaml" },
     { name = "tiktoken" },
     { name = "torch" },
 ]
@@ -66,6 +67,7 @@ dependencies = [
 requires-dist = [
     { name = "mlflow" },
     { name = "numpy", specifier = ">=2.4.2" },
+    { name = "pyyaml" },
     { name = "tiktoken" },
     { name = "torch" },
 ]

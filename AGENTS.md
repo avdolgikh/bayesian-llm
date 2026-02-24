@@ -38,13 +38,13 @@ data/             # Local datasets (gitignored; document provenance in README.md
 - 127.6K articles (120K train + 7.6K test), 4 categories: 1=World, 2=Sports, 3=Business, 4=Sci/Tech.
 - `load_agnews()` downloads to `data/agnews/{train,test}.csv`, parses with stdlib `csv`, returns `list[tuple[int, str, str]]` (category, title, description).
 - **Topic split** (`prepare_agnews_data()`):
-  - ID categories (default: World=1, Sports=2) → shuffled (seeded), joined with `\n\n`, tokenized → train/val split (90/10).
+  - ID categories (default: World=1, Sports=2) → shuffled (seeded), joined with `\n\n`, tokenized → train/val/test_id split (80/10/10).
   - OOD categories (default: Business=3, Sci/Tech=4) → same pipeline → `test_ood` tensor.
-  - ~3M ID tokens, ~3.5M OOD tokens with default split.
+  - ~2.4M train, ~300K val, ~300K test_id, ~3.5M OOD tokens with default split.
 - Category splits configurable via config: `data.id_categories`, `data.ood_categories`.
 
 ### Dataset Dispatcher
-`load_dataset(cfg, tokenizer)` — top-level entry point. Reads `cfg["data"]["dataset"]` (`"tinyshakespeare"` or `"agnews"`), calls the appropriate loader, returns `{"train": tensor, "val": tensor, "test_ood": tensor | None}`.
+`load_dataset(cfg, tokenizer)` — top-level entry point. Reads `cfg["data"]["dataset"]` (`"tinyshakespeare"` or `"agnews"`), calls the appropriate loader, returns `{"train": tensor, "val": tensor, "test_id": tensor, "test_ood": tensor | None}`.
 
 ## Tokenization
 - **BPE tokenization** via `tiktoken` (GPT-2 encoding, vocab_size=50257).
@@ -52,7 +52,7 @@ data/             # Local datasets (gitignored; document provenance in README.md
 
 ## Experiment Tracking
 - **MLflow** (local, sqlite backend: `sqlite:///mlflow.db`) for all experiment tracking.
-- Every training run logs: hyperparameters, train/val loss, perplexity, generated samples, learning rate (every step), and `ood_perplexity` (AG News only).
+- Every training run logs: hyperparameters, train/val loss, perplexity, generated samples, learning rate (every step), `test_id_perplexity`, and `test_ood_perplexity` (AG News only).
 - Launch MLflow UI with: `uv run mlflow ui --backend-store-uri sqlite:///mlflow.db`
 - `--no-mlflow` flag available on experiment scripts to disable tracking.
 - `mlflow.db` and `mlruns/` are **committed to git** (lightweight — metrics + text artifacts only, no model weights).
@@ -93,7 +93,7 @@ Experiments use a YAML config pipeline: `DEFAULT_CONFIG → YAML file → CLI ov
 
 - **`minigpt/config.py`** — `DEFAULT_CONFIG` dict with all defaults, plus helpers: `load_yaml`, `deep_merge`, `apply_overrides` (dot-notation), `build_gpt_config`, `build_train_config`, `validate_config`, `config_to_flat_params`.
 - **`configs/a0_baseline.yaml`** — reference config for A0 baseline (TinyShakespeare, matches defaults).
-- **`configs/a0_agnews.yaml`** — AG News config (5000 steps, 500 warmup, ID=[1,2], OOD=[3,4]).
+- **`configs/a0_agnews.yaml`** — AG News config (fully explicit — all settings, 5000 steps, 500 warmup, ID=[1,2], OOD=[3,4]).
 - `vocab_size` always comes from the tokenizer, never from config files.
 - **PyYAML gotcha:** scientific notation without a decimal point (e.g. `3e-4`) is parsed as a **string**, not float. Always write `3.0e-4` or `0.0003` in YAML files.
 
@@ -167,3 +167,29 @@ Do not commit secrets or large binaries. Use `.env` (ignored) and provide `.env.
   - **Config**: `configs/a0_agnews.yaml` (5000 steps, 500 warmup). Category splits configurable via `--set data.id_categories="[1,3]"`.
   - **`_coerce_type` extended**: now parses JSON lists/objects from CLI `--set` overrides.
   - **Bug fix**: `configs/a0_baseline.yaml` had `lr: 3e-4` and `min_lr: 1e-5` — PyYAML (YAML 1.1) parses these as strings. Fixed to `3.0e-4` / `1.0e-5`.
+- **2026-02-24:** Held-out test set (ID + OOD) — methodological fix for Phase 2:
+  - **Problem:** val was used both for checkpoint selection AND as "ID test set" for final evaluation. Biased — best checkpoint was selected to minimize val loss.
+  - **Fix:** Three-way ID split: `[train 80% | val 10% | test_id 10%]`. Val is for checkpoint selection only. `test_id` is held-out for unbiased ID vs OOD comparison.
+  - Data pipeline now returns `{"train", "val", "test_id", "test_ood"}`. Both `prepare_data()` (TinyShakespeare) and `prepare_agnews_data()` (AG News) updated.
+  - New config key: `data.test_fraction` (default 0.1). Validation: `val_fraction + test_fraction < 1.0`.
+  - Experiment script evaluates and logs `test_id_perplexity` separately from `final_val_perplexity`. ID vs OOD comparison uses `test_id` vs `test_ood`.
+  - `configs/a0_agnews.yaml` made fully explicit (all settings spelled out, no reliance on defaults).
+  - Spec: `specs/held-out-test-split.md`. Vital unit tests proposed: `specs/vital-unit-tests.md`.
+
+## Future Work (Non-Bayesian — Parked)
+These are architectural improvements to revisit **after** Bayesian milestones (A1/A2) are done. Not in scope now — the current miniGPT is intentionally basic to keep focus on Bayesian aspects.
+
+- **RoPE** — Rotary Position Embeddings (replace learned positional embeddings)
+- **SwiGLU** — gated FFN activation (replace GELU)
+- **Pre-Norm vs Post-Norm** — current model uses pre-norm (GPT-2 style); evaluate post-norm or sandwich-norm
+- **KV-cache** — inference-time optimization for autoregressive generation
+- **PEFT** — Parameter-Efficient Fine-Tuning (LoRA, adapters) to squeeze more params into VRAM budget
+- **Mixed precision (FP16 / BF16)** — faster training and reduced VRAM via `torch.cuda.amp`
+
+## Papers to Consider (Parked)
+Bayesian + LLM papers for later review, likely relevant to B1 (Bayesian LoRA on open-weight LLM).
+
+- **BLoB: Bayesian Low-Rank Adaptation by Backpropagation for LLMs** (NeurIPS 2024) — jointly adjusts mean and covariance of LLM parameters during fine-tuning for better generalization and uncertainty estimation. [PDF](https://proceedings.neurips.cc/paper_files/paper/2024/file/7d53575463291ea6b5a23cf6e571f59b-Paper-Conference.pdf)
+- **Training-Free Bayesianization for Low-Rank Adapters of LLMs** (2024) — converts trained LoRA adapters into Bayesian ones without additional training by searching for optimal weight variance. [arXiv:2412.05723](https://arxiv.org/pdf/2412.05723)
+- **Bayesian Low-rank Adaptation for Large Language Models (Laplace-LoRA)** (2023) — applies Laplace approximation to LoRA parameters, improving calibration and reducing overconfidence. [arXiv:2308.13111](https://arxiv.org/pdf/2308.13111)
+- **ScalaBL: Scalable Bayesian Low-Rank Adaptation via Stochastic Variational Subspace Inference** (2025) — Bayesian inference in a low-dimensional subspace (~1000 extra params), scales to larger models than prior approaches. [arXiv:2506.21408](https://arxiv.org/pdf/2506.21408)

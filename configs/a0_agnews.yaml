@@ -7,7 +7,32 @@ data:
   id_categories: [1, 2]      # World, Sports
   ood_categories: [3, 4]     # Business, Sci/Tech
   val_fraction: 0.1
+  test_fraction: 0.1
+
+model:
+  block_size: 256
+  n_layer: 4
+  n_head: 4
+  n_embd: 256
+  dropout: 0.2
+  bias: true
+  bayes:
+    enabled: false
 
 train:
-  steps: 5000
+  steps: 1000
+  batch_size: 64
+  block_size: 256
+  lr: 3.0e-4
+  weight_decay: 0.1
   warmup_steps: 500
+  min_lr: 1.0e-5
+  grad_clip: 1.0
+  eval_interval: 200
+  eval_iters: 20
+  checkpoint_interval: 500
+  seed: 1337
+  device: auto
+
+eval:
+  sample_tokens: 200
