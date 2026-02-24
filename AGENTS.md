@@ -9,7 +9,7 @@ Layout (flat, minimal — no deep nesting):
 minigpt/          # Python package — all model-related code
   model.py        # MiniGPT architecture (deterministic)
   layers.py       # Bayesian layers (BayesianLinear, etc.)
-  data.py         # Dataset loading + tokenization (BPE via tiktoken)
+  data.py         # Dataset loading + tokenization (BPE via tiktoken) — TinyShakespeare, AG News
   train.py        # Training loop (cross-entropy + ELBO)
   evaluate.py     # Standard eval (perplexity, generation)
   config.py       # YAML config ↔ dataclass bridge
@@ -26,13 +26,33 @@ data/             # Local datasets (gitignored; document provenance in README.md
 - **No modern transformer tricks** in miniGPT: no RoPE, SwiGLU, sliding window attention, MoE, GQA. Keep it basic — the focus is Bayesian, not architecture.
 - **Document on the fly.** Always log findings, decisions, implementation steps, and user requests in this file and NOTES.md as work progresses. Do NOT wait for user to ask.
 
+## Datasets
+
+### TinyShakespeare
+- ~1MB text, ~304K BPE tokens. Single-domain (literary English).
+- `load_shakespeare()` downloads on first run to `data/tinyshakespeare.txt`.
+- No OOD split — `test_ood` is `None`.
+
+### AG News
+- Source: `mhjabreel/CharCnn_Keras` GitHub repo (CSVs, no headers).
+- 127.6K articles (120K train + 7.6K test), 4 categories: 1=World, 2=Sports, 3=Business, 4=Sci/Tech.
+- `load_agnews()` downloads to `data/agnews/{train,test}.csv`, parses with stdlib `csv`, returns `list[tuple[int, str, str]]` (category, title, description).
+- **Topic split** (`prepare_agnews_data()`):
+  - ID categories (default: World=1, Sports=2) → shuffled (seeded), joined with `\n\n`, tokenized → train/val split (90/10).
+  - OOD categories (default: Business=3, Sci/Tech=4) → same pipeline → `test_ood` tensor.
+  - ~3M ID tokens, ~3.5M OOD tokens with default split.
+- Category splits configurable via config: `data.id_categories`, `data.ood_categories`.
+
+### Dataset Dispatcher
+`load_dataset(cfg, tokenizer)` — top-level entry point. Reads `cfg["data"]["dataset"]` (`"tinyshakespeare"` or `"agnews"`), calls the appropriate loader, returns `{"train": tensor, "val": tensor, "test_ood": tensor | None}`.
+
 ## Tokenization
 - **BPE tokenization** via `tiktoken` (GPT-2 encoding, vocab_size=50257).
 - Character-level tokenizer was used in early prototype but is now replaced.
 
 ## Experiment Tracking
 - **MLflow** (local, sqlite backend: `sqlite:///mlflow.db`) for all experiment tracking.
-- Every training run logs: hyperparameters, train/val loss, perplexity, generated samples, learning rate (every step).
+- Every training run logs: hyperparameters, train/val loss, perplexity, generated samples, learning rate (every step), and `ood_perplexity` (AG News only).
 - Launch MLflow UI with: `uv run mlflow ui --backend-store-uri sqlite:///mlflow.db`
 - `--no-mlflow` flag available on experiment scripts to disable tracking.
 - `mlflow.db` and `mlruns/` are **committed to git** (lightweight — metrics + text artifacts only, no model weights).
@@ -48,9 +68,9 @@ data/             # Local datasets (gitignored; document provenance in README.md
 PyTorch + `torch.distributions` for all milestones. No JAX for now. No TensorFlow.
 
 ## Milestones (order matters)
-- **A0:** Deterministic miniGPT baseline — TinyShakespeare, cross-entropy, verify loss/generation/VRAM
+- **A0:** Deterministic miniGPT baseline — TinyShakespeare + AG News, cross-entropy, verify loss/generation/VRAM, ID vs OOD perplexity baseline
 - **A1:** Bayesian output head — BayesianLinear on final projection, ELBO training, first uncertainty metrics
-- **A2:** Bayesian FFN layers — replace FFN linears, topic-split dataset (AG News), in-distribution vs OOD epistemic uncertainty evaluation
+- **A2:** Bayesian FFN layers — replace FFN linears, in-distribution vs OOD epistemic uncertainty evaluation
 - **B1 (later, separate track):** Bayesian LoRA on an existing open-weight LLM
 
 ## Bayesian Layer Strategy
@@ -72,16 +92,23 @@ Which layers to make Bayesian, in order:
 Experiments use a YAML config pipeline: `DEFAULT_CONFIG → YAML file → CLI overrides`.
 
 - **`minigpt/config.py`** — `DEFAULT_CONFIG` dict with all defaults, plus helpers: `load_yaml`, `deep_merge`, `apply_overrides` (dot-notation), `build_gpt_config`, `build_train_config`, `validate_config`, `config_to_flat_params`.
-- **`configs/a0_baseline.yaml`** — reference config for A0 baseline (matches defaults).
+- **`configs/a0_baseline.yaml`** — reference config for A0 baseline (TinyShakespeare, matches defaults).
+- **`configs/a0_agnews.yaml`** — AG News config (5000 steps, 500 warmup, ID=[1,2], OOD=[3,4]).
 - `vocab_size` always comes from the tokenizer, never from config files.
+- **PyYAML gotcha:** scientific notation without a decimal point (e.g. `3e-4`) is parsed as a **string**, not float. Always write `3.0e-4` or `0.0003` in YAML files.
 
 ### Experiment CLI
 ```bash
-# Defaults only (no YAML needed)
+# TinyShakespeare (defaults)
 python experiments/a0_baseline.py
-
-# From config file
 python experiments/a0_baseline.py --config configs/a0_baseline.yaml
+
+# AG News (ID=World+Sports, OOD=Business+Sci/Tech)
+python experiments/a0_baseline.py --config configs/a0_agnews.yaml
+
+# AG News with custom category split
+python experiments/a0_baseline.py --config configs/a0_agnews.yaml \
+  --set data.id_categories="[1,3]" --set data.ood_categories="[2,4]"
 
 # Config + overrides
 python experiments/a0_baseline.py --config configs/a0_baseline.yaml --set train.lr=1e-3 --set model.n_layer=6
@@ -132,3 +159,11 @@ Do not commit secrets or large binaries. Use `.env` (ignored) and provide `.env.
   - **Checkpoint resume**: `--resume path` restores model, optimizer, RNG states, best_val_loss. LR schedule is stateless.
   - **Simplified CLI**: replaced 20 argparse flags with `--config`, `--resume`, `--set key=value`, `--no-mlflow`.
   - Added `pyyaml` dependency.
+- **2026-02-23:** AG News dataset (A0.1) — non-Bayesian baseline on topic-split data:
+  - **AG News loader**: `load_agnews()` downloads train+test CSVs (127.6K articles, 4 categories). Parsed with stdlib `csv`.
+  - **Topic split**: ID categories (default: World, Sports) → train/val; OOD categories (default: Business, Sci/Tech) → test_ood. Articles joined with `\n\n`, tokenized with BPE.
+  - **Dataset dispatcher**: `load_dataset(cfg, tokenizer)` returns `{"train", "val", "test_ood"}` dict. TinyShakespeare returns `test_ood=None`.
+  - **OOD evaluation**: after training, if `test_ood` exists, computes and logs `ood_perplexity` to MLflow. Prints ID vs OOD comparison.
+  - **Config**: `configs/a0_agnews.yaml` (5000 steps, 500 warmup). Category splits configurable via `--set data.id_categories="[1,3]"`.
+  - **`_coerce_type` extended**: now parses JSON lists/objects from CLI `--set` overrides.
+  - **Bug fix**: `configs/a0_baseline.yaml` had `lr: 3e-4` and `min_lr: 1e-5` — PyYAML (YAML 1.1) parses these as strings. Fixed to `3.0e-4` / `1.0e-5`.

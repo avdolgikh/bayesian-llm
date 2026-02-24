@@ -1,0 +1,13 @@
+experiment:
+  name: a0-agnews
+  run_name: a0-agnews
+
+data:
+  dataset: agnews
+  id_categories: [1, 2]      # World, Sports
+  ood_categories: [3, 4]     # Business, Sci/Tech
+  val_fraction: 0.1
+
+train:
+  steps: 5000
+  warmup_steps: 500

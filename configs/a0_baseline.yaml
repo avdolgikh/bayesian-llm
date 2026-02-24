@@ -17,13 +17,13 @@ model:
     enabled: false
 
 train:
-  steps: 2000
+  steps: 10000
   batch_size: 64
   block_size: 256
-  lr: 3e-4
+  lr: 3.0e-4
   weight_decay: 0.1
   warmup_steps: 200
-  min_lr: 1e-5
+  min_lr: 1.0e-5
   grad_clip: 1.0
   eval_interval: 200
   eval_iters: 20

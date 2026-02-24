@@ -1,6 +1,7 @@
 """YAML config ↔ dataclass bridge for miniGPT experiments."""
 
 import copy
+import json
 from pathlib import Path
 
 import yaml
@@ -17,6 +18,8 @@ DEFAULT_CONFIG: dict = {
     "data": {
         "dataset": "tinyshakespeare",
         "val_fraction": 0.1,
+        "id_categories": [1, 2],
+        "ood_categories": [3, 4],
     },
     "model": {
         "block_size": 256,
@@ -69,13 +72,19 @@ def deep_merge(base: dict, override: dict) -> dict:
 
 
 def _coerce_type(value: str):
-    """Best-effort cast from string to int / float / bool / None."""
+    """Best-effort cast from string to int / float / bool / None / JSON list."""
     if value.lower() == "true":
         return True
     if value.lower() == "false":
         return False
     if value.lower() == "none":
         return None
+    # JSON list/object (e.g. "[1,3]")
+    if value.startswith("[") or value.startswith("{"):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            pass
     try:
         return int(value)
     except ValueError:

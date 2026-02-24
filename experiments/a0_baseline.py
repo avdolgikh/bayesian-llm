@@ -1,4 +1,4 @@
-"""A0 — Deterministic miniGPT baseline on TinyShakespeare (BPE)."""
+"""A0 — Deterministic miniGPT baseline (TinyShakespeare / AG News, BPE)."""
 
 import argparse
 from pathlib import Path
@@ -16,14 +16,14 @@ from minigpt.config import (
     load_yaml,
     validate_config,
 )
-from minigpt.data import get_tokenizer, load_shakespeare, prepare_data
-from minigpt.evaluate import evaluate
+from minigpt.data import get_tokenizer, load_dataset
+from minigpt.evaluate import compute_perplexity, evaluate
 from minigpt.model import MiniGPT
 from minigpt.train import load_checkpoint, train
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description="A0 miniGPT baseline (TinyShakespeare, BPE)")
+    p = argparse.ArgumentParser(description="A0 miniGPT baseline")
     p.add_argument("--config", type=str, default=None, help="Path to YAML config file")
     p.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume from")
     p.add_argument("--set", dest="overrides", action="append", default=[],
@@ -43,11 +43,15 @@ def main() -> None:
     torch.manual_seed(cfg["train"]["seed"])
 
     # --- Data ---
-    text = load_shakespeare()
     tokenizer = get_tokenizer()
-    train_data, val_data = prepare_data(text, tokenizer)
+    data = load_dataset(cfg, tokenizer)
+    train_data = data["train"]
+    val_data = data["val"]
+    test_ood = data["test_ood"]
     print(f"BPE vocab size: {tokenizer.n_vocab}")
     print(f"Train tokens: {len(train_data):,}  Val tokens: {len(val_data):,}")
+    if test_ood is not None:
+        print(f"OOD tokens:   {len(test_ood):,}")
 
     # --- Model ---
     gpt_config = build_gpt_config(cfg, vocab_size=tokenizer.n_vocab)
@@ -111,6 +115,17 @@ def main() -> None:
         if use_mlflow:
             mlflow.log_metric("final_val_perplexity", results["perplexity"])
             mlflow.log_text(results["sample"], "generated_sample.txt")
+
+        # --- OOD evaluation ---
+        if test_ood is not None:
+            ood_ppl = compute_perplexity(
+                model, test_ood,
+                cfg["train"]["block_size"], cfg["train"]["batch_size"], device,
+            )
+            print(f"\nOOD perplexity: {ood_ppl:.2f}")
+            print(f"ID vs OOD perplexity: {results['perplexity']:.2f} vs {ood_ppl:.2f}")
+            if use_mlflow:
+                mlflow.log_metric("ood_perplexity", ood_ppl)
 
     print("\nDone.")
 
