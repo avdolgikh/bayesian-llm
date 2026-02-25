@@ -139,7 +139,7 @@ def train(
     mlflow_run=None,
     config_dict: dict | None = None,
     resume_ckpt: dict | None = None,
-) -> MiniGPT:
+) -> tuple[MiniGPT, dict]:
     device = _resolve_device(cfg.device)
     model = model.to(device)
     optimizer = _configure_optimizer(model, cfg)
@@ -164,8 +164,10 @@ def train(
 
     cfg_dict = config_dict or {}
     best_path = CHECKPOINT_DIR / "ckpt_best.pt"
+    best_val_step = 0
 
     start = time.time()
+    total_tokens = 0
     for step in range(start_step, cfg.steps + 1):
         # Update learning rate (cosine schedule with warmup)
         lr = _get_lr(step, cfg)
@@ -174,6 +176,7 @@ def train(
 
         x, y = get_batch(train_data, cfg.block_size, cfg.batch_size, device)
         _, loss = model(x, y)
+        total_tokens += x.numel()
 
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
@@ -195,6 +198,7 @@ def train(
             is_best = val_metrics["loss"] < best_val_loss
             if is_best:
                 best_val_loss = val_metrics["loss"]
+                best_val_step = step
                 save_checkpoint(
                     model, optimizer, step, cfg_dict,
                     best_val_loss=best_val_loss, path=best_path,
@@ -227,7 +231,16 @@ def train(
     # Reload best checkpoint for downstream use
     print(f"  -> reloading best checkpoint (val loss {best_val_loss:.4f}): {best_path}")
     load_checkpoint(best_path, model)
-    return model
+
+    train_time = time.time() - start
+    tokens_per_sec = total_tokens / train_time if train_time > 0 else 0.0
+    metadata = {
+        "best_val_loss": best_val_loss,
+        "best_val_step": best_val_step,
+        "train_time_sec": train_time,
+        "tokens_per_sec": tokens_per_sec,
+    }
+    return model, metadata
 
 
 def _resolve_device(device_str: str) -> torch.device:

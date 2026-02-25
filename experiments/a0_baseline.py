@@ -100,13 +100,32 @@ def main() -> None:
             flat["tokenizer"] = "gpt2-bpe"
             mlflow.log_params(flat)
 
+        # --- Tags ---
+        if use_mlflow:
+            mlflow.set_tag("dataset", cfg["data"]["dataset"])
+            mlflow.set_tag("milestone", "a0")
+            if torch.cuda.is_available():
+                mlflow.set_tag("gpu", torch.cuda.get_device_name())
+
         # --- Train ---
-        model = train(
+        model, train_meta = train(
             model, train_data, val_data, train_cfg,
             mlflow_run=run if use_mlflow else None,
             config_dict=cfg,
             resume_ckpt=resume_ckpt,
         )
+
+        print(f"\nTraining time: {train_meta['train_time_sec']:.1f}s")
+        print(f"Tokens/sec: {train_meta['tokens_per_sec']:.0f}")
+        print(f"Best val loss: {train_meta['best_val_loss']:.4f} (step {train_meta['best_val_step']})")
+
+        if use_mlflow:
+            mlflow.log_metrics({
+                "best_val_loss": train_meta["best_val_loss"],
+                "best_val_step": train_meta["best_val_step"],
+                "train_time_sec": train_meta["train_time_sec"],
+                "tokens_per_sec": train_meta["tokens_per_sec"],
+            })
 
         # --- Evaluate ---
         results = evaluate(

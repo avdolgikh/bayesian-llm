@@ -20,12 +20,12 @@ model:
     enabled: false
 
 train:
-  steps: 1000
+  steps: 400 # 5000
   batch_size: 64
   block_size: 256
   lr: 3.0e-4
   weight_decay: 0.1
-  warmup_steps: 500
+  warmup_steps: 50 # 500
   min_lr: 1.0e-5
   grad_clip: 1.0
   eval_interval: 200
