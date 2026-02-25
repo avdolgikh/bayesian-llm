@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 import torch
@@ -10,6 +11,7 @@ class BayesConfig:
     enabled: bool = False
     prior_std: float = 1.0
     kl_weight: float = 1.0
+    init_rho: float = -5.0
 
 
 class BayesianModule(nn.Module):
@@ -33,12 +35,14 @@ class BayesianLinear(BayesianModule):
         in_features: int,
         out_features: int,
         prior_std: float = 1.0,
+        init_rho: float = -5.0,
         bias: bool = True,
     ) -> None:
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
         self.prior_std = prior_std
+        self.init_rho = init_rho
 
         self.weight_mu = nn.Parameter(torch.empty(out_features, in_features))
         self.weight_rho = nn.Parameter(torch.empty(out_features, in_features))
@@ -49,16 +53,20 @@ class BayesianLinear(BayesianModule):
             self.register_parameter("bias_mu", None)
             self.register_parameter("bias_rho", None)
 
+        self._frozen_weight: torch.Tensor | None = None
+        self._frozen_bias: torch.Tensor | None = None
+        self._use_mean: bool = False
+
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
         nn.init.kaiming_uniform_(self.weight_mu, a=5**0.5)
-        nn.init.constant_(self.weight_rho, -5.0)
+        nn.init.constant_(self.weight_rho, self.init_rho)
         if self.bias_mu is not None:
             fan_in = self.in_features
             bound = 1 / (fan_in**0.5)
             nn.init.uniform_(self.bias_mu, -bound, bound)
-            nn.init.constant_(self.bias_rho, -5.0)
+            nn.init.constant_(self.bias_rho, self.init_rho)
 
     def _sample(self, mu: torch.Tensor, rho: torch.Tensor) -> torch.Tensor:
         sigma = F.softplus(rho)
@@ -66,12 +74,45 @@ class BayesianLinear(BayesianModule):
         return mu + sigma * eps
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self._use_mean:
+            return self.mean_forward(x)
+        if self._frozen_weight is not None:
+            return F.linear(x, self._frozen_weight, self._frozen_bias)
         weight = self._sample(self.weight_mu, self.weight_rho)
         if self.bias_mu is not None:
             bias = self._sample(self.bias_mu, self.bias_rho)
         else:
             bias = None
         return F.linear(x, weight, bias)
+
+    def mean_forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass using posterior mean (mu) only — deterministic."""
+        return F.linear(x, self.weight_mu, self.bias_mu)
+
+    def mean_forward_with_variance(
+        self, x: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Forward pass with mu weights + closed-form per-output variance.
+
+        Returns (output, variance) where variance[..., k] = sum_j sigma_kj^2 * x_j^2.
+        """
+        output = F.linear(x, self.weight_mu, self.bias_mu)
+        sigma = F.softplus(self.weight_rho)
+        variance = F.linear(x**2, sigma**2)
+        return output, variance
+
+    def freeze_sample(self) -> None:
+        """Sample weights once and cache for subsequent forward calls."""
+        self._frozen_weight = self._sample(self.weight_mu, self.weight_rho)
+        if self.bias_mu is not None:
+            self._frozen_bias = self._sample(self.bias_mu, self.bias_rho)
+        else:
+            self._frozen_bias = None
+
+    def unfreeze_sample(self) -> None:
+        """Clear cached weights — resume fresh sampling on every forward call."""
+        self._frozen_weight = None
+        self._frozen_bias = None
 
     def _kl_normal(self, mu: torch.Tensor, rho: torch.Tensor) -> torch.Tensor:
         sigma = F.softplus(rho)
@@ -97,7 +138,10 @@ def make_linear(
     bias: bool = True,
 ) -> BayesianModule:
     if bayes.enabled:
-        return BayesianLinear(in_features, out_features, prior_std=bayes.prior_std, bias=bias)
+        return BayesianLinear(
+            in_features, out_features,
+            prior_std=bayes.prior_std, init_rho=bayes.init_rho, bias=bias,
+        )
     return DeterministicLinear(in_features, out_features, bias=bias)
 
 
@@ -108,3 +152,29 @@ def sum_kl_loss(module: nn.Module) -> torch.Tensor:
         if isinstance(child, BayesianModule):
             total = total + child.kl_loss()
     return total
+
+
+@contextmanager
+def frozen_bayesian_sample(module: nn.Module):
+    """Context manager: freeze all BayesianLinear layers for coherent generation."""
+    bayesian_layers = [m for m in module.modules() if isinstance(m, BayesianLinear)]
+    for layer in bayesian_layers:
+        layer.freeze_sample()
+    try:
+        yield
+    finally:
+        for layer in bayesian_layers:
+            layer.unfreeze_sample()
+
+
+@contextmanager
+def use_mean_weights(module: nn.Module):
+    """Context manager: use mean weights for all BayesianLinear layers."""
+    bayesian_layers = [m for m in module.modules() if isinstance(m, BayesianLinear)]
+    for layer in bayesian_layers:
+        layer._use_mean = True
+    try:
+        yield
+    finally:
+        for layer in bayesian_layers:
+            layer._use_mean = False

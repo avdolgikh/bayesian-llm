@@ -14,6 +14,7 @@ DEFAULT_CONFIG: dict = {
     "experiment": {
         "name": "a0-baseline",
         "run_name": "a0-baseline",
+        "mlflow_uri": "sqlite:///mlflow.db",
     },
     "data": {
         "dataset": "tinyshakespeare",
@@ -33,6 +34,7 @@ DEFAULT_CONFIG: dict = {
             "enabled": False,
             "prior_std": 1.0,
             "kl_weight": 1.0,
+            "init_rho": -5.0,
         },
     },
     "train": {
@@ -47,11 +49,21 @@ DEFAULT_CONFIG: dict = {
         "eval_interval": 200,
         "eval_iters": 20,
         "checkpoint_interval": 500,
+        "checkpoint_dir": "data/checkpoints",
+        "kl_annealing_steps": 0,
+        "adam_beta1": 0.9,
+        "adam_beta2": 0.95,
         "seed": 1337,
         "device": "auto",
     },
     "eval": {
         "sample_tokens": 200,
+        "temperature": 0.8,
+        "num_samples": 30,
+        "n_perplexity_batches": 20,
+        "qualitative_prompts_per_category": 5,
+        "qualitative_max_new_tokens": 100,
+        "qualitative_seed": 42,
     },
 }
 
@@ -132,6 +144,7 @@ def build_gpt_config(cfg: dict, vocab_size: int) -> GPTConfig:
             enabled=bayes_d.get("enabled", False),
             prior_std=bayes_d.get("prior_std", 1.0),
             kl_weight=bayes_d.get("kl_weight", 1.0),
+            init_rho=bayes_d.get("init_rho", -5.0),
         ),
     )
 
@@ -150,6 +163,10 @@ def build_train_config(cfg: dict) -> TrainConfig:
         eval_interval=t["eval_interval"],
         eval_iters=t["eval_iters"],
         checkpoint_interval=t["checkpoint_interval"],
+        checkpoint_dir=t.get("checkpoint_dir", "data/checkpoints"),
+        kl_annealing_steps=t.get("kl_annealing_steps", 0),
+        adam_beta1=t.get("adam_beta1", 0.9),
+        adam_beta2=t.get("adam_beta2", 0.95),
         seed=t["seed"],
         device=t["device"],
     )

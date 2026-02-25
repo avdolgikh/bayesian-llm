@@ -4,7 +4,13 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from minigpt.layers import BayesConfig, make_linear, sum_kl_loss
+from minigpt.layers import (
+    BayesConfig,
+    frozen_bayesian_sample,
+    make_linear,
+    sum_kl_loss,
+    use_mean_weights,
+)
 
 
 @dataclass
@@ -20,13 +26,13 @@ class GPTConfig:
 
 
 class CausalSelfAttention(nn.Module):
-    def __init__(self, config: GPTConfig) -> None:
+    def __init__(self, config: GPTConfig, bayes: BayesConfig) -> None:
         super().__init__()
         assert config.n_embd % config.n_head == 0
         self.config = config
         self.head_size = config.n_embd // config.n_head
-        self.qkv = make_linear(config.n_embd, 3 * config.n_embd, config.bayes, bias=config.bias)
-        self.proj = make_linear(config.n_embd, config.n_embd, config.bayes, bias=config.bias)
+        self.qkv = make_linear(config.n_embd, 3 * config.n_embd, bayes, bias=config.bias)
+        self.proj = make_linear(config.n_embd, config.n_embd, bayes, bias=config.bias)
         self.attn_dropout = nn.Dropout(config.dropout)
         self.resid_dropout = nn.Dropout(config.dropout)
 
@@ -53,10 +59,10 @@ class CausalSelfAttention(nn.Module):
 
 
 class MLP(nn.Module):
-    def __init__(self, config: GPTConfig) -> None:
+    def __init__(self, config: GPTConfig, bayes: BayesConfig) -> None:
         super().__init__()
-        self.fc = make_linear(config.n_embd, 4 * config.n_embd, config.bayes, bias=config.bias)
-        self.proj = make_linear(4 * config.n_embd, config.n_embd, config.bayes, bias=config.bias)
+        self.fc = make_linear(config.n_embd, 4 * config.n_embd, bayes, bias=config.bias)
+        self.proj = make_linear(4 * config.n_embd, config.n_embd, bayes, bias=config.bias)
         self.dropout = nn.Dropout(config.dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -67,12 +73,12 @@ class MLP(nn.Module):
 
 
 class Block(nn.Module):
-    def __init__(self, config: GPTConfig) -> None:
+    def __init__(self, config: GPTConfig, bayes: BayesConfig) -> None:
         super().__init__()
         self.ln1 = nn.LayerNorm(config.n_embd)
-        self.attn = CausalSelfAttention(config)
+        self.attn = CausalSelfAttention(config, bayes)
         self.ln2 = nn.LayerNorm(config.n_embd)
-        self.mlp = MLP(config)
+        self.mlp = MLP(config, bayes)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = x + self.attn(self.ln1(x))
@@ -87,12 +93,19 @@ class MiniGPT(nn.Module):
         self.token_emb = nn.Embedding(config.vocab_size, config.n_embd)
         self.pos_emb = nn.Embedding(config.block_size, config.n_embd)
         self.drop = nn.Dropout(config.dropout)
-        self.blocks = nn.ModuleList([Block(config) for _ in range(config.n_layer)])
+
+        # Transformer blocks: always deterministic (A1 — only lm_head is Bayesian)
+        no_bayes = BayesConfig(enabled=False)
+        self.blocks = nn.ModuleList([Block(config, no_bayes) for _ in range(config.n_layer)])
+
         self.ln_f = nn.LayerNorm(config.n_embd)
+
+        # Output head: gets the real bayes config
         self.lm_head = make_linear(config.n_embd, config.vocab_size, config.bayes, bias=False)
 
-        # Weight tying (GPT-2 style) — share token_emb and lm_head weights
-        self.lm_head.linear.weight = self.token_emb.weight
+        # Weight tying (GPT-2 style) — only when lm_head is deterministic
+        if not config.bayes.enabled:
+            self.lm_head.linear.weight = self.token_emb.weight
 
         self.apply(self._init_weights)
 
@@ -104,7 +117,8 @@ class MiniGPT(nn.Module):
         if isinstance(module, nn.Embedding):
             nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx: torch.Tensor, targets: torch.Tensor | None = None):
+    def forward_body(self, idx: torch.Tensor) -> torch.Tensor:
+        """Run transformer body up to (but not including) lm_head. Returns hidden states."""
         bsz, seq_len = idx.size()
         assert seq_len <= self.config.block_size
         pos = torch.arange(0, seq_len, device=idx.device)
@@ -115,6 +129,10 @@ class MiniGPT(nn.Module):
         for block in self.blocks:
             x = block(x)
         x = self.ln_f(x)
+        return x
+
+    def forward(self, idx: torch.Tensor, targets: torch.Tensor | None = None):
+        x = self.forward_body(idx)
         logits = self.lm_head(x)
 
         loss = None
@@ -127,13 +145,31 @@ class MiniGPT(nn.Module):
 
     @torch.no_grad()
     def generate(
-        self, idx: torch.Tensor, max_new_tokens: int, temperature: float = 1.0,
+        self,
+        idx: torch.Tensor,
+        max_new_tokens: int,
+        temperature: float = 1.0,
+        use_mean: bool = False,
     ) -> torch.Tensor:
-        for _ in range(max_new_tokens):
-            idx_cond = idx[:, -self.config.block_size :]
-            logits, _ = self(idx_cond)
-            logits = logits[:, -1, :] / max(temperature, 1e-6)
-            probs = F.softmax(logits, dim=-1)
-            next_idx = torch.multinomial(probs, num_samples=1)
-            idx = torch.cat((idx, next_idx), dim=1)
+        ctx = use_mean_weights(self) if use_mean else _nullcontext()
+        with ctx:
+            for _ in range(max_new_tokens):
+                idx_cond = idx[:, -self.config.block_size :]
+                logits, _ = self(idx_cond)
+                logits = logits[:, -1, :] / max(temperature, 1e-6)
+                probs = F.softmax(logits, dim=-1)
+                next_idx = torch.multinomial(probs, num_samples=1)
+                idx = torch.cat((idx, next_idx), dim=1)
         return idx
+
+    def frozen_bayesian_sample(self):
+        """Context manager: freeze all BayesianLinear layers for coherent generation."""
+        return frozen_bayesian_sample(self)
+
+
+class _nullcontext:
+    def __enter__(self):
+        return None
+
+    def __exit__(self, *args):
+        pass

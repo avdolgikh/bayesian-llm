@@ -51,9 +51,14 @@ def evaluate(
     block_size: int,
     batch_size: int,
     device: torch.device,
+    max_new_tokens: int = 200,
+    temperature: float = 0.8,
+    n_perplexity_batches: int = 20,
 ) -> dict:
-    ppl = compute_perplexity(model, val_data, block_size, batch_size, device)
-    sample = generate_text(model, enc, max_new_tokens=200)
+    ppl = compute_perplexity(
+        model, val_data, block_size, batch_size, device, n_batches=n_perplexity_batches,
+    )
+    sample = generate_text(model, enc, max_new_tokens=max_new_tokens, temperature=temperature)
     print(f"\nVal perplexity: {ppl:.2f}")
     import sys
     enc_name = getattr(sys.stdout, "encoding", "utf-8") or "utf-8"

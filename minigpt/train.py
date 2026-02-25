@@ -7,8 +7,6 @@ import torch
 
 from minigpt.model import MiniGPT
 
-CHECKPOINT_DIR = Path("data/checkpoints")
-
 
 @dataclass
 class TrainConfig:
@@ -23,6 +21,10 @@ class TrainConfig:
     eval_interval: int = 200
     eval_iters: int = 20
     checkpoint_interval: int = 500
+    checkpoint_dir: str = "data/checkpoints"
+    kl_annealing_steps: int = 0
+    adam_beta1: float = 0.9
+    adam_beta2: float = 0.95
     seed: int = 1337
     device: str = "auto"
 
@@ -53,16 +55,29 @@ def estimate_loss(
     batch_size: int,
     device: torch.device,
     eval_iters: int,
+    kl_scale: float = 0.0,
 ) -> dict[str, float]:
+    """Estimate CE loss (and ELBO if Bayesian).
+
+    Args:
+        kl_scale: effective KL contribution = kl_scale * raw_kl.
+            For Bayesian models: kl_scale = effective_kl_weight / num_train_tokens.
+            For deterministic models: kl_scale = 0 (default).
+    """
     model.eval()
-    losses = []
+    ce_losses = []
     for _ in range(eval_iters):
         x, y = get_batch(data, block_size, batch_size, device)
-        _, loss = model(x, y)
-        losses.append(loss.item())
+        _, ce_loss = model(x, y)
+        ce_losses.append(ce_loss.item())
     model.train()
-    avg_loss = sum(losses) / len(losses)
-    return {"loss": avg_loss, "perplexity": math.exp(avg_loss)}
+    avg_ce = sum(ce_losses) / len(ce_losses)
+    result = {"loss": avg_ce, "perplexity": math.exp(avg_ce)}
+    kl = model.kl_loss().item()
+    if kl > 0:
+        result["kl_loss"] = kl
+        result["elbo_loss"] = avg_ce + kl_scale * kl
+    return result
 
 
 def save_checkpoint(
@@ -73,9 +88,10 @@ def save_checkpoint(
     best_val_loss: float = float("inf"),
     path: Path | None = None,
 ) -> Path:
-    CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+    checkpoint_dir = Path(config_dict.get("train", {}).get("checkpoint_dir", "data/checkpoints"))
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
     if path is None:
-        path = CHECKPOINT_DIR / f"ckpt_step{step}.pt"
+        path = checkpoint_dir / f"ckpt_step{step}.pt"
     ckpt = {
         "step": step,
         "model_state_dict": model.state_dict(),
@@ -128,7 +144,7 @@ def _configure_optimizer(model: MiniGPT, cfg: TrainConfig) -> torch.optim.AdamW:
         {"params": decay_params, "weight_decay": cfg.weight_decay},
         {"params": no_decay_params, "weight_decay": 0.0},
     ]
-    return torch.optim.AdamW(groups, lr=cfg.lr, betas=(0.9, 0.95))
+    return torch.optim.AdamW(groups, lr=cfg.lr, betas=(cfg.adam_beta1, cfg.adam_beta2))
 
 
 def train(
@@ -139,7 +155,16 @@ def train(
     mlflow_run=None,
     config_dict: dict | None = None,
     resume_ckpt: dict | None = None,
+    kl_weight: float = 0.0,
+    num_train_tokens: int = 0,
 ) -> tuple[MiniGPT, dict]:
+    """Train the model.
+
+    Args:
+        kl_weight: Bayesian KL penalty weight (0 = deterministic, no KL term).
+        num_train_tokens: Total training tokens for ELBO normalization.
+            Required when kl_weight > 0 (Bayesian mode).
+    """
     device = _resolve_device(cfg.device)
     model = model.to(device)
     optimizer = _configure_optimizer(model, cfg)
@@ -162,8 +187,17 @@ def train(
             torch.cuda.set_rng_state(resume_ckpt["cuda_rng_state"])
         print(f"Resuming from step {resume_ckpt['step']} (best val loss {best_val_loss:.4f})")
 
+    # Bayesian mode: validate that num_train_tokens is provided
+    is_bayesian = kl_weight > 0
+    if is_bayesian and num_train_tokens <= 0:
+        raise ValueError(
+            "num_train_tokens must be > 0 for Bayesian training (kl_weight > 0)"
+        )
+
     cfg_dict = config_dict or {}
-    best_path = CHECKPOINT_DIR / "ckpt_best.pt"
+    ckpt_dir = Path(cfg.checkpoint_dir)
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    best_path = ckpt_dir / "ckpt_best.pt"
     best_val_step = 0
 
     start = time.time()
@@ -175,8 +209,24 @@ def train(
             param_group["lr"] = lr
 
         x, y = get_batch(train_data, cfg.block_size, cfg.batch_size, device)
-        _, loss = model(x, y)
+        _, ce_loss = model(x, y)
         total_tokens += x.numel()
+
+        # ELBO: loss = CE + kl_scale * KL.
+        # Deterministic (kl_weight=0): pure CE, no KL term.
+        # Bayesian (kl_weight>0): KL annealing ramps effective weight from 0 → kl_weight.
+        if is_bayesian:
+            if cfg.kl_annealing_steps > 0:
+                anneal = min(step / cfg.kl_annealing_steps, 1.0)
+            else:
+                anneal = 1.0
+            effective_kl_weight = kl_weight * anneal
+            kl_scale = effective_kl_weight / num_train_tokens
+            kl = model.kl_loss()
+            loss = ce_loss + kl_scale * kl
+        else:
+            effective_kl_weight = 0.0
+            loss = ce_loss
 
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
@@ -186,13 +236,18 @@ def train(
         if mlflow_run is not None:
             import mlflow
             mlflow.log_metric("lr", lr, step=step)
+            if is_bayesian:
+                mlflow.log_metric("effective_kl_weight", effective_kl_weight, step=step)
 
         if step % cfg.eval_interval == 0 or step == start_step:
+            eval_kl_scale = kl_scale if is_bayesian else 0.0
             train_metrics = estimate_loss(
                 model, train_data, cfg.block_size, cfg.batch_size, device, cfg.eval_iters,
+                kl_scale=eval_kl_scale,
             )
             val_metrics = estimate_loss(
                 model, val_data, cfg.block_size, cfg.batch_size, device, cfg.eval_iters,
+                kl_scale=eval_kl_scale,
             )
             elapsed = time.time() - start
             is_best = val_metrics["loss"] < best_val_loss
@@ -203,24 +258,34 @@ def train(
                     model, optimizer, step, cfg_dict,
                     best_val_loss=best_val_loss, path=best_path,
                 )
-            print(
+
+            # Print status
+            status = (
                 f"step {step:5d} | "
                 f"train loss {train_metrics['loss']:.4f} ppl {train_metrics['perplexity']:.1f} | "
                 f"val loss {val_metrics['loss']:.4f} ppl {val_metrics['perplexity']:.1f} | "
                 f"{elapsed:.1f}s"
-                f"{'  *best' if is_best else ''}"
             )
+            if "kl_loss" in val_metrics:
+                status += f" | kl {val_metrics['kl_loss']:.1f}"
+            if is_best:
+                status += "  *best"
+            print(status)
+
             if mlflow_run is not None:
                 import mlflow
-                mlflow.log_metrics(
-                    {
-                        "train_loss": train_metrics["loss"],
-                        "train_perplexity": train_metrics["perplexity"],
-                        "val_loss": val_metrics["loss"],
-                        "val_perplexity": val_metrics["perplexity"],
-                    },
-                    step=step,
-                )
+                metrics_to_log = {
+                    "train_loss": train_metrics["loss"],
+                    "train_perplexity": train_metrics["perplexity"],
+                    "val_loss": val_metrics["loss"],
+                    "val_perplexity": val_metrics["perplexity"],
+                }
+                if "kl_loss" in val_metrics:
+                    metrics_to_log["kl_loss"] = val_metrics["kl_loss"]
+                    metrics_to_log["val_elbo_loss"] = val_metrics["elbo_loss"]
+                if "kl_loss" in train_metrics:
+                    metrics_to_log["train_elbo_loss"] = train_metrics["elbo_loss"]
+                mlflow.log_metrics(metrics_to_log, step=step)
 
         if cfg.checkpoint_interval and step % cfg.checkpoint_interval == 0:
             ckpt_path = save_checkpoint(

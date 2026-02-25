@@ -24,7 +24,8 @@ data/             # Local datasets (gitignored; document provenance in README.md
 - **No notebooks.** Only runnable `.py` scripts. Never create `.ipynb` files.
 - **No extra Bayesian libraries.** Use only `torch.distributions` for probabilistic layers. Manual implementation is preferred over adding dependencies.
 - **No modern transformer tricks** in miniGPT: no RoPE, SwiGLU, sliding window attention, MoE, GQA. Keep it basic — the focus is Bayesian, not architecture.
-- **Document on the fly.** Always log findings, decisions, implementation steps, and user requests in this file and NOTES.md as work progresses. Do NOT wait for user to ask.
+- **Document on the fly.** Always log findings, decisions, implementation steps, and user requests in this file (AGENTS.md) as work progresses — DURING implementation, not at the end. Each meaningful change should be documented immediately after it's made. Do NOT batch documentation to the end of a session.
+- **Explicit configs.** YAML config files must list every parameter explicitly — never rely on silent code defaults. When a new config key is added, it must appear in all relevant YAML files. The config is the single source of truth for experiment reproducibility.
 
 ## Datasets
 
@@ -73,7 +74,11 @@ PyTorch + `torch.distributions` for all milestones. No JAX for now. No TensorFlo
 
 ## Milestones (order matters)
 - **A0: DONE** — Deterministic miniGPT baseline on AG News. Reference: test_id_ppl=49.11, test_ood_ppl=540.28 (run `5dc45450e7b6458fbad2ec07dfd91ce3`). See `specs/a0-baseline-checklist.md`.
-- **A1: IN PROGRESS** — Bayesian output head — BayesianLinear on lm_head, ELBO training, first uncertainty metrics (MI). Must match A0 test_id_ppl <=49.11 and show MI separation ID vs OOD.
+- **A1: CODE COMPLETE** — Bayesian output head — BayesianLinear on lm_head, ELBO training, first uncertainty metrics (MI). Code, tests (24 new, 38 total), config, experiment script all done. Pending: GPU training run + results. Must match A0 test_id_ppl <=49.11 and show MI separation ID vs OOD.
+  - **First run (2026-02-25)**: OOM crash during uncertainty eval — fixed by streaming MC sampling (`_stream_metrics`). KL dominated training: 57M KL / 2.7M tokens = 21 nats swamping CE of ~6 (root cause: `weight_rho=-5` → σ≈0.007 vs `prior_std=1.0` → 4.5 nats/param × 12.8M params). Fix: cold posterior (`kl_weight=0.01`) + optional linear KL annealing (`kl_annealing_steps=200`). Sanity run with fixes confirmed: ELBO = CE(5.96) + weighted_KL(0.21) — 100x reduction. Results identical at 400 steps (too few to differentiate); bumped to 5000 steps for real run.
+  - **MLflow fix**: stepless `log_metric` calls created single-point bar charts in UI. Moved all summary values (best_val_loss, perplexities, MI metrics, etc.) to `log_param` in both A0 and A1 scripts. Only step-aware time-series (train_loss, val_loss, lr, effective_kl_weight, etc.) stay as metrics.
+  - **Config audit**: moved 8 categories of hardcoded values to YAML config: `eval.temperature`, `eval.sample_tokens` (wiring gap), `model.bayes.init_rho`, `eval.n_perplexity_batches`, `experiment.mlflow_uri`, `train.adam_beta1/adam_beta2`, `eval.qualitative_*` (prompts_per_category, max_new_tokens, seed), `train.checkpoint_dir`. All experiment scripts now read from config, no magic numbers.
+  - **train.py refactor**: replaced vague `num_train_tokens > 0` guard with explicit `is_bayesian = kl_weight > 0` flag. Collapsed `kl_weight/num_train_tokens` into `kl_scale` in `estimate_loss`. Added validation: `num_train_tokens` must be > 0 when `kl_weight > 0`. Deterministic path (A0) now has zero KL overhead — no `model.kl_loss()` call.
 - **A2:** Bayesian FFN layers — replace FFN linears, in-distribution vs OOD epistemic uncertainty evaluation
 - **B1 (later, separate track):** Bayesian LoRA on an existing open-weight LLM
 
@@ -154,12 +159,10 @@ tests/
   test_data.py           # P0: category isolation — AG News (4 tests)
                          # P1: split sizes sum to total (3 tests)
   test_reproducibility.py # P2: same seed = identical losses (2 tests)
+  test_bayesian.py       # A1: KL non-negativity (4), sampling variance (4),
+                         #     frozen sampling (4), selective Bayesian (6),
+                         #     MI invariants (6) — 24 tests total
 ```
-
-**Deferred to Phase 2** (needs `uncertainty.py`):
-- P0: MI = 0 for deterministic model
-- P1: Bayesian sampling produces variance
-- P2: KL/MI non-negativity
 
 ## Commit & Pull Request Guidelines
 - Commit messages: **one line only**, concise. Use Conventional Commits prefix (e.g., `feat:`, `fix:`, `docs:`, `chore:`, `test:`).
@@ -224,6 +227,16 @@ Do not commit secrets or large binaries. Use `.env` (ignored) and provide `.env.
   - Full analysis: `specs/a0-baseline-checklist.md`.
   - Utility script: `scripts/dump_mlflow_run.py <run_id>` — dumps params/metrics/tags.
   - **Ready for A1** (Bayesian output head).
+- **2026-02-25:** A1 Bayesian output head — code infrastructure complete (pending training run):
+  - **`layers.py`**: `BayesianLinear` extended with `freeze_sample()`/`unfreeze_sample()` (cached weights for coherent autoregressive generation), `mean_forward()` (deterministic μ-only), `mean_forward_with_variance()` (μ + closed-form logit variance). Context managers: `frozen_bayesian_sample(model)`, `use_mean_weights(model)`.
+  - **`model.py`**: Selective Bayesian via Option A — `Block`/`CausalSelfAttention`/`MLP` take explicit `bayes: BayesConfig` param. `MiniGPT` passes `BayesConfig(enabled=False)` to all blocks, `config.bayes` only to `lm_head`. Weight tying skipped when `bayes.enabled=True`. Added `forward_body()` for A1 efficiency (run transformer once, `lm_head` N times). `generate()` gains `use_mean` param.
+  - **`train.py`**: ELBO training with auto-detection — `loss = ce + kl_weight * kl / num_train_tokens`. When no BayesianLinear layers, KL=0 → pure CE path. Logs `kl_loss`, `ce_loss`, `elbo_loss` to MLflow when KL > 0. Same `train()` function for A0 and A1.
+  - **`uncertainty.py`**: Full implementation — `compute_uncertainty_metrics()` (aggregate MI/entropy/flip_rate over batches, uses `forward_body` + N `lm_head` calls for A1 efficiency), `score_sequence()` (per-token MI for a single sequence), `_compute_token_metrics()` (core MI/entropy/flip_rate computation from stacked probs).
+  - **`experiments/a1_bayes_output.py`**: Train with ELBO, eval perplexity (mean weights, ID+OOD), uncertainty eval (MI/entropy/flip_rate on test_id+test_ood), qualitative prompt panel (curated AG News article openings, generate+score per-token MI), log everything to MLflow.
+  - **`configs/a1_agnews.yaml`**: Same as a0_agnews but `bayes.enabled: true`, `prior_std: 1.0`, `kl_weight: 1.0`, `eval.num_samples: 30`.
+  - **`tests/test_bayesian.py`**: 24 new tests — KL non-negativity (4), sampling variance (4), frozen sampling (4), selective Bayesian architecture (6), MI invariants (6). All 38 tests passing (14 old + 24 new).
+  - **Spec**: `specs/a1-bayesian-output-head.md` — full design doc (16 sections, LaTeX math, code mappings).
+  - **Next**: GPU training run on AG News, compare test_id_ppl to A0 reference (49.11), measure MI gap.
 
 ## Future Work (Non-Bayesian — Parked)
 These are architectural improvements to revisit **after** Bayesian milestones (A1/A2) are done. Not in scope now — the current miniGPT is intentionally basic to keep focus on Bayesian aspects.

@@ -86,7 +86,7 @@ def main() -> None:
     # --- MLflow ---
     use_mlflow = not args.no_mlflow
     if use_mlflow:
-        mlflow.set_tracking_uri("sqlite:///mlflow.db")
+        mlflow.set_tracking_uri(cfg["experiment"].get("mlflow_uri", "sqlite:///mlflow.db"))
         mlflow.set_experiment(cfg["experiment"]["name"])
 
     run_ctx = (
@@ -124,36 +124,43 @@ def main() -> None:
         print(f"Best val loss: {best_loss:.4f} (step {best_step})")
 
         if use_mlflow:
-            mlflow.log_metrics({
-                "best_val_loss": train_meta["best_val_loss"],
-                "best_val_step": train_meta["best_val_step"],
-                "train_time_sec": train_meta["train_time_sec"],
-                "tokens_per_sec": train_meta["tokens_per_sec"],
+            mlflow.log_params({
+                "best_val_loss": f"{train_meta['best_val_loss']:.4f}",
+                "best_val_step": str(int(train_meta["best_val_step"])),
+                "train_time_sec": f"{train_meta['train_time_sec']:.1f}",
+                "tokens_per_sec": f"{train_meta['tokens_per_sec']:.0f}",
             })
 
         # --- Evaluate ---
+        eval_cfg = cfg["eval"]
         results = evaluate(
             model, val_data, tokenizer,
             cfg["train"]["block_size"], cfg["train"]["batch_size"], device,
+            max_new_tokens=eval_cfg.get("sample_tokens", 200),
+            temperature=eval_cfg.get("temperature", 0.8),
+            n_perplexity_batches=eval_cfg.get("n_perplexity_batches", 20),
         )
 
         if use_mlflow:
-            mlflow.log_metric("final_val_perplexity", results["perplexity"])
+            mlflow.log_param("final_val_perplexity", f"{results['perplexity']:.2f}")
             mlflow.log_text(results["sample"], "generated_sample.txt")
 
         # --- Test ID evaluation ---
+        n_ppl_batches = eval_cfg.get("n_perplexity_batches", 20)
         test_id_ppl = compute_perplexity(
             model, test_id,
             cfg["train"]["block_size"], cfg["train"]["batch_size"], device,
+            n_batches=n_ppl_batches,
         )
         print(f"\nTest ID perplexity: {test_id_ppl:.2f}")
         if use_mlflow:
-            mlflow.log_metric("test_id_perplexity", test_id_ppl)
+            mlflow.log_param("test_id_perplexity", f"{test_id_ppl:.2f}")
 
         # --- Log model + checkpoint to MLflow (opt-in) ---
         if use_mlflow and args.log_model:
             mlflow.pytorch.log_model(model, "model")
-            best_ckpt = Path("data/checkpoints/ckpt_best.pt")
+            ckpt_dir = cfg["train"].get("checkpoint_dir", "data/checkpoints")
+            best_ckpt = Path(ckpt_dir) / "ckpt_best.pt"
             if best_ckpt.exists():
                 mlflow.log_artifact(str(best_ckpt))
 
@@ -172,11 +179,12 @@ def main() -> None:
             ood_ppl = compute_perplexity(
                 model, test_ood,
                 cfg["train"]["block_size"], cfg["train"]["batch_size"], device,
+                n_batches=n_ppl_batches,
             )
             print(f"Test OOD perplexity: {ood_ppl:.2f}")
             print(f"ID vs OOD perplexity: {test_id_ppl:.2f} vs {ood_ppl:.2f}")
             if use_mlflow:
-                mlflow.log_metric("test_ood_perplexity", ood_ppl)
+                mlflow.log_param("test_ood_perplexity", f"{ood_ppl:.2f}")
 
     print("\nDone.")
 
