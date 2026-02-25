@@ -1,7 +1,8 @@
 """P0/P1 data pipeline guardrails — category isolation, split sizes."""
 
 import tiktoken
-from minigpt.data import prepare_data, prepare_agnews_data
+
+from minigpt.data import prepare_agnews_data, prepare_data
 
 
 def _tokenizer():
@@ -34,7 +35,6 @@ class TestCategoryIsolation:
         samples = self._make_samples()
         id_cats = [1, 2]
         ood_cats = [3, 4]
-        enc = _tokenizer()
 
         # Verify filtering at the article level (before tokenization)
         id_articles = [s for s in samples if s[0] in id_cats]

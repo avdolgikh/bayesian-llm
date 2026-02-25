@@ -57,11 +57,13 @@ data/             # Local datasets (gitignored; document provenance in README.md
 - `train()` returns `tuple[MiniGPT, dict]` — metadata dict with `best_val_loss`, `best_val_step`, `train_time_sec`, `tokens_per_sec`.
 - Launch MLflow UI with: `uv run mlflow ui --backend-store-uri sqlite:///mlflow.db`
 - `--no-mlflow` flag available on experiment scripts to disable tracking.
+- **Model artifacts**: `mlflow.pytorch.log_model(model, "model")` + `mlflow.log_artifact("ckpt_best.pt")` logged per run. Run summary stored in `mlflow.note.content` tag.
 - `mlflow.db` and `mlruns/` are **committed to git** (lightweight — metrics + text artifacts only, no model weights).
 
 ## Environment & Tooling
-- **Run from global Python environment** (Python 3.11, CUDA-enabled PyTorch). Install with `pip install -e .`.
-- `uv` is available for dependency management (`uv add`, `uv sync`) but experiments run via global `python`, not `uv run`.
+- **`uv`** for all dev tooling: linting, testing, dependency management. Use `uv run` for pytest, ruff, etc.
+- **Global Python environment** (Python 3.11, CUDA-enabled PyTorch) **only for GPU training**. Training scripts use `python experiments/...` from global env because CUDA/PyTorch must be installed globally.
+- Dev dependencies (pytest, ruff) are in `[dependency-groups] dev` in `pyproject.toml`.
 - Document setup in `README.md`
 - Target GPU runs (RTX 4070, ~10-12 GB VRAM)
 - If uv hits permission errors, set `UV_CACHE_DIR` to a local folder (e.g., `.uv-cache`)
@@ -123,13 +125,19 @@ python experiments/a0_baseline.py --config configs/a0_baseline.yaml --resume dat
 Checkpoints save full config dict, `best_val_loss`, torch/CUDA RNG states. On resume, training continues from `ckpt["step"] + 1` with restored RNG and optimizer state. The LR schedule is stateless (computed from step number) so it resumes automatically. Old checkpoints (pre-config) are backward-compatible via `.get()` defaults.
 
 ## Build, Test, and Development Commands
-- `pip install -e .` (editable install into global env)
-- `python -m pytest tests/ -v` (run all unit tests)
-- `python experiments/a0_baseline.py` (etc.)
+- `uv sync` (install/update all dependencies including dev)
+- `uv run pytest tests/ -v` (run all unit tests)
+- `uv run ruff check minigpt/ experiments/ tests/` (lint)
+- `python experiments/a0_baseline.py` (training — global env, GPU)
 - `mlflow ui --backend-store-uri sqlite:///mlflow.db` (view experiment results)
 
+## CI/CD
+- **GitHub Actions** (`.github/workflows/ci.yml`): runs on push/PR. Uses `astral-sh/setup-uv@v5`.
+- Pipeline: `uv run ruff check` → `uv run pytest tests/ -v`. No GPU, no training in CI.
+- **Ruff** for linting (replaces flake8 + isort). Config in `pyproject.toml` under `[tool.ruff.lint]`.
+
 ## Coding Style & Naming Conventions
-- Indentation: 4 spaces; line length up to 100
+- Indentation: 4 spaces; line length up to 100 (enforced by ruff)
 - Naming: `snake_case` for modules/functions, `PascalCase` for classes, `UPPER_SNAKE_CASE` for constants
 - Prefer type hints and short docstrings for public APIs and experiment entry points
 
@@ -203,6 +211,11 @@ Do not commit secrets or large binaries. Use `.env` (ignored) and provide `.env.
   - `tests/test_data.py` — P0 category isolation (4 tests), P1 split sizes sum to total (3 tests).
   - `tests/test_reproducibility.py` — P2 same seed = identical losses.
   - Phase 2 tests deferred: MI=0 for deterministic, Bayesian sampling variance, KL/MI non-negativity.
+- **2026-02-24:** ML infrastructure — model artifacts, CI/CD, linting:
+  - **Model artifacts**: experiment script logs `mlflow.pytorch.log_model()` + `mlflow.log_artifact(ckpt_best.pt)` + `mlflow.note.content` run summary.
+  - **GitHub Actions CI**: `.github/workflows/ci.yml` — `astral-sh/setup-uv@v5`, runs ruff + pytest. No GPU in CI.
+  - **Ruff linting**: config in `pyproject.toml`, dev deps in `[dependency-groups] dev`.
+  - **Environment rule**: `uv` for all dev tooling (lint, test, deps). Global Python env only for GPU training.
 
 ## Future Work (Non-Bayesian — Parked)
 These are architectural improvements to revisit **after** Bayesian milestones (A1/A2) are done. Not in scope now — the current miniGPT is intentionally basic to keep focus on Bayesian aspects.

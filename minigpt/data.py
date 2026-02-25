@@ -125,7 +125,10 @@ def prepare_agnews_data(
 # --------------- Dataset dispatcher ---------------
 
 def load_dataset(cfg: dict, tokenizer: tiktoken.Encoding) -> dict[str, torch.Tensor | None]:
-    """Load and prepare dataset based on config. Returns dict with train/val/test_id/test_ood tensors."""
+    """Load and prepare dataset based on config.
+
+    Returns dict with train/val/test_id/test_ood tensors.
+    """
     dataset = cfg["data"]["dataset"]
     val_fraction = cfg["data"].get("val_fraction", 0.1)
     test_fraction = cfg["data"].get("test_fraction", 0.1)

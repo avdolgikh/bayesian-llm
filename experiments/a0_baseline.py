@@ -117,7 +117,9 @@ def main() -> None:
 
         print(f"\nTraining time: {train_meta['train_time_sec']:.1f}s")
         print(f"Tokens/sec: {train_meta['tokens_per_sec']:.0f}")
-        print(f"Best val loss: {train_meta['best_val_loss']:.4f} (step {train_meta['best_val_step']})")
+        best_loss = train_meta['best_val_loss']
+        best_step = train_meta['best_val_step']
+        print(f"Best val loss: {best_loss:.4f} (step {best_step})")
 
         if use_mlflow:
             mlflow.log_metrics({
@@ -145,6 +147,21 @@ def main() -> None:
         print(f"\nTest ID perplexity: {test_id_ppl:.2f}")
         if use_mlflow:
             mlflow.log_metric("test_id_perplexity", test_id_ppl)
+
+        # --- Log model + checkpoint to MLflow ---
+        if use_mlflow:
+            mlflow.pytorch.log_model(model, "model")
+            best_ckpt = Path("data/checkpoints/ckpt_best.pt")
+            if best_ckpt.exists():
+                mlflow.log_artifact(str(best_ckpt))
+            summary = (
+                f"{cfg['experiment']['name']}, "
+                f"{cfg['model']['n_layer']}L/{cfg['model']['n_head']}H/{cfg['model']['n_embd']}d, "
+                f"{cfg['data']['dataset']}, "
+                f"best_val={train_meta['best_val_loss']:.4f}, "
+                f"test_id_ppl={test_id_ppl:.2f}"
+            )
+            mlflow.set_tag("mlflow.note.content", summary)
 
         # --- OOD evaluation ---
         if test_ood is not None:

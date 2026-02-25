@@ -2,9 +2,9 @@
 
 import torch
 
+from minigpt.evaluate import compute_perplexity
 from minigpt.layers import BayesConfig
 from minigpt.model import GPTConfig, MiniGPT
-from minigpt.evaluate import compute_perplexity
 
 
 def _small_config() -> GPTConfig:

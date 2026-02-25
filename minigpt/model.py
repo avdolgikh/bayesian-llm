@@ -126,7 +126,9 @@ class MiniGPT(nn.Module):
         return sum_kl_loss(self)
 
     @torch.no_grad()
-    def generate(self, idx: torch.Tensor, max_new_tokens: int, temperature: float = 1.0) -> torch.Tensor:
+    def generate(
+        self, idx: torch.Tensor, max_new_tokens: int, temperature: float = 1.0,
+    ) -> torch.Tensor:
         for _ in range(max_new_tokens):
             idx_cond = idx[:, -self.config.block_size :]
             logits, _ = self(idx_cond)
