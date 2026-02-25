@@ -2,7 +2,7 @@
 
 ## Project Structure & Source of Truth
 `docs/` holds PDF papers — the theory baseline. Implementations should align with those docs.
-`specs/` holds planning documents. The active spec is `specs/refined-spec-feb2026.md`.
+`specs/` holds planning documents. The active spec is `specs/refined-spec-feb2026.md`. Other specs: `held-out-test-split.md`, `vital-unit-tests.md`, `a0-baseline-checklist.md`, `ml-infrastructure.md`.
 
 Layout (flat, minimal — no deep nesting):
 ```
@@ -52,7 +52,9 @@ data/             # Local datasets (gitignored; document provenance in README.md
 
 ## Experiment Tracking
 - **MLflow** (local, sqlite backend: `sqlite:///mlflow.db`) for all experiment tracking.
-- Every training run logs: hyperparameters, train/val loss, perplexity, generated samples, learning rate (every step), `test_id_perplexity`, and `test_ood_perplexity` (AG News only).
+- Every training run logs: hyperparameters, train/val loss, perplexity, generated samples, learning rate (every step), `test_id_perplexity`, `test_ood_perplexity` (AG News only), `best_val_loss`, `best_val_step`, `train_time_sec`, `tokens_per_sec`.
+- Tags: `dataset` (tinyshakespeare/agnews), `milestone` (a0/a1/a2), `gpu` (device name).
+- `train()` returns `tuple[MiniGPT, dict]` — metadata dict with `best_val_loss`, `best_val_step`, `train_time_sec`, `tokens_per_sec`.
 - Launch MLflow UI with: `uv run mlflow ui --backend-store-uri sqlite:///mlflow.db`
 - `--no-mlflow` flag available on experiment scripts to disable tracking.
 - `mlflow.db` and `mlruns/` are **committed to git** (lightweight — metrics + text artifacts only, no model weights).
@@ -122,7 +124,7 @@ Checkpoints save full config dict, `best_val_loss`, torch/CUDA RNG states. On re
 
 ## Build, Test, and Development Commands
 - `pip install -e .` (editable install into global env)
-- `python -m pytest`
+- `python -m pytest tests/ -v` (run all unit tests)
 - `python experiments/a0_baseline.py` (etc.)
 - `mlflow ui --backend-store-uri sqlite:///mlflow.db` (view experiment results)
 
@@ -133,6 +135,23 @@ Checkpoints save full config dict, `best_val_loss`, torch/CUDA RNG states. On re
 
 ## Testing & Evaluation Guidelines
 Use `pytest` with `test_*.py` naming. Keep tests deterministic (seed randomness). For experiments, report calibration error, NLL, Brier score, and OOD detection; note whether results target epistemic vs aleatoric uncertainty.
+
+### Vital Unit Tests (ML Guardrails)
+Sanity checks on mathematical and methodological invariants. Spec: `specs/vital-unit-tests.md`.
+
+```
+tests/
+  test_model.py          # P0: weight tying pointer equality (3 tests)
+                         # P1: perplexity bounds at init (2 tests)
+  test_data.py           # P0: category isolation — AG News (4 tests)
+                         # P1: split sizes sum to total (3 tests)
+  test_reproducibility.py # P2: same seed = identical losses (2 tests)
+```
+
+**Deferred to Phase 2** (needs `uncertainty.py`):
+- P0: MI = 0 for deterministic model
+- P1: Bayesian sampling produces variance
+- P2: KL/MI non-negativity
 
 ## Commit & Pull Request Guidelines
 - Commit messages: **one line only**, concise. Use Conventional Commits prefix (e.g., `feat:`, `fix:`, `docs:`, `chore:`, `test:`).
@@ -175,6 +194,15 @@ Do not commit secrets or large binaries. Use `.env` (ignored) and provide `.env.
   - Experiment script evaluates and logs `test_id_perplexity` separately from `final_val_perplexity`. ID vs OOD comparison uses `test_id` vs `test_ood`.
   - `configs/a0_agnews.yaml` made fully explicit (all settings spelled out, no reliance on defaults).
   - Spec: `specs/held-out-test-split.md`. Vital unit tests proposed: `specs/vital-unit-tests.md`.
+- **2026-02-24:** MLflow tracking improvements:
+  - `train()` now returns `tuple[MiniGPT, dict]` — metadata dict with `best_val_loss`, `best_val_step`, `train_time_sec`, `tokens_per_sec`.
+  - Experiment script logs 4 new metrics (`best_val_loss`, `best_val_step`, `train_time_sec`, `tokens_per_sec`) and 3 tags (`dataset`, `milestone`, `gpu`).
+  - Spec: `specs/a0-baseline-checklist.md` — what to verify before moving to A1. Spec: `specs/ml-infrastructure.md` — tracking, model registry, HPO pipeline, CI/CD plans.
+- **2026-02-24:** Vital unit tests implemented (14 tests, all passing):
+  - `tests/test_model.py` — P0 weight tying pointer equality (init/forward/backward), P1 perplexity bounds at init.
+  - `tests/test_data.py` — P0 category isolation (4 tests), P1 split sizes sum to total (3 tests).
+  - `tests/test_reproducibility.py` — P2 same seed = identical losses.
+  - Phase 2 tests deferred: MI=0 for deterministic, Bayesian sampling variance, KL/MI non-negativity.
 
 ## Future Work (Non-Bayesian — Parked)
 These are architectural improvements to revisit **after** Bayesian milestones (A1/A2) are done. Not in scope now — the current miniGPT is intentionally basic to keep focus on Bayesian aspects.
