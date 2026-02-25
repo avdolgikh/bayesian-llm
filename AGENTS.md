@@ -57,7 +57,7 @@ data/             # Local datasets (gitignored; document provenance in README.md
 - `train()` returns `tuple[MiniGPT, dict]` — metadata dict with `best_val_loss`, `best_val_step`, `train_time_sec`, `tokens_per_sec`.
 - Launch MLflow UI with: `uv run mlflow ui --backend-store-uri sqlite:///mlflow.db`
 - `--no-mlflow` flag available on experiment scripts to disable tracking.
-- **Model artifacts**: `mlflow.pytorch.log_model(model, "model")` + `mlflow.log_artifact("ckpt_best.pt")` logged per run. Run summary stored in `mlflow.note.content` tag.
+- **Model artifacts**: opt-in via `--log-model` flag (off by default — heavy). Logs `mlflow.pytorch.log_model()` + `mlflow.log_artifact(ckpt_best.pt)`. Run summary note (`mlflow.note.content`) always logged.
 - `mlflow.db` and `mlruns/` are **committed to git** (lightweight — metrics + text artifacts only, no model weights).
 
 ## Environment & Tooling
@@ -72,8 +72,8 @@ data/             # Local datasets (gitignored; document provenance in README.md
 PyTorch + `torch.distributions` for all milestones. No JAX for now. No TensorFlow.
 
 ## Milestones (order matters)
-- **A0:** Deterministic miniGPT baseline — TinyShakespeare + AG News, cross-entropy, verify loss/generation/VRAM, ID vs OOD perplexity baseline
-- **A1:** Bayesian output head — BayesianLinear on final projection, ELBO training, first uncertainty metrics
+- **A0: DONE** — Deterministic miniGPT baseline on AG News. Reference: test_id_ppl=49.11, test_ood_ppl=540.28 (run `5dc45450e7b6458fbad2ec07dfd91ce3`). See `specs/a0-baseline-checklist.md`.
+- **A1: IN PROGRESS** — Bayesian output head — BayesianLinear on lm_head, ELBO training, first uncertainty metrics (MI). Must match A0 test_id_ppl <=49.11 and show MI separation ID vs OOD.
 - **A2:** Bayesian FFN layers — replace FFN linears, in-distribution vs OOD epistemic uncertainty evaluation
 - **B1 (later, separate track):** Bayesian LoRA on an existing open-weight LLM
 
@@ -216,6 +216,14 @@ Do not commit secrets or large binaries. Use `.env` (ignored) and provide `.env.
   - **GitHub Actions CI**: `.github/workflows/ci.yml` — `astral-sh/setup-uv@v5`, runs ruff + pytest. No GPU in CI.
   - **Ruff linting**: config in `pyproject.toml`, dev deps in `[dependency-groups] dev`.
   - **Environment rule**: `uv` for all dev tooling (lint, test, deps). Global Python env only for GPU training.
+- **2026-02-24:** A0 baseline DONE — AG News 10K steps, reference metrics locked:
+  - MLflow run: `5dc45450e7b6458fbad2ec07dfd91ce3`. Config: `configs/a0_agnews.yaml`.
+  - **Reference:** test_id_ppl=49.11, test_ood_ppl=540.28, OOD/ID=11.0x, best_val_loss=3.8874 (step 9400).
+  - Model: 4L/4H/256d, 16M params, 2.7M train tokens, 2.8hrs on RTX 4070.
+  - Convergence: plateau by ~8K steps, train-val gap 0.75 (moderate overfitting, expected).
+  - Full analysis: `specs/a0-baseline-checklist.md`.
+  - Utility script: `scripts/dump_mlflow_run.py <run_id>` — dumps params/metrics/tags.
+  - **Ready for A1** (Bayesian output head).
 
 ## Future Work (Non-Bayesian — Parked)
 These are architectural improvements to revisit **after** Bayesian milestones (A1/A2) are done. Not in scope now — the current miniGPT is intentionally basic to keep focus on Bayesian aspects.

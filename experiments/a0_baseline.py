@@ -29,6 +29,8 @@ def main() -> None:
     p.add_argument("--set", dest="overrides", action="append", default=[],
                    metavar="key=value", help="Dot-notation config override (repeatable)")
     p.add_argument("--no-mlflow", action="store_true", help="Disable MLflow logging")
+    p.add_argument("--log-model", action="store_true",
+                   help="Log model artifact + checkpoint to MLflow (heavy, off by default)")
     args = p.parse_args()
 
     # --- Build config: defaults → YAML → CLI overrides ---
@@ -148,12 +150,14 @@ def main() -> None:
         if use_mlflow:
             mlflow.log_metric("test_id_perplexity", test_id_ppl)
 
-        # --- Log model + checkpoint to MLflow ---
-        if use_mlflow:
+        # --- Log model + checkpoint to MLflow (opt-in) ---
+        if use_mlflow and args.log_model:
             mlflow.pytorch.log_model(model, "model")
             best_ckpt = Path("data/checkpoints/ckpt_best.pt")
             if best_ckpt.exists():
                 mlflow.log_artifact(str(best_ckpt))
+
+        if use_mlflow:
             summary = (
                 f"{cfg['experiment']['name']}, "
                 f"{cfg['model']['n_layer']}L/{cfg['model']['n_head']}H/{cfg['model']['n_embd']}d, "
