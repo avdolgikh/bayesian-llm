@@ -2,7 +2,7 @@
 
 ## Project Structure & Source of Truth
 `docs/` holds PDF papers — the theory baseline. Implementations should align with those docs.
-`specs/` holds planning documents. The active spec is `specs/refined-spec-feb2026.md`. Other specs: `held-out-test-split.md`, `vital-unit-tests.md`, `a0-baseline-checklist.md`, `ml-infrastructure.md`.
+`specs/` holds planning documents. The active spec is `specs/refined-spec-feb2026.md`. Other specs: `held-out-test-split.md`, `vital-unit-tests.md`, `a0-baseline-checklist.md`, `ml-infrastructure.md`, `a1-bayesian-output-head.md`, `a1-kl-tuning.md`, `gpu-acceleration.md`.
 
 Layout (flat, minimal — no deep nesting):
 ```
@@ -16,6 +16,7 @@ minigpt/          # Python package — all model-related code
   uncertainty.py  # Epistemic uncertainty measurement (Phase 2)
 configs/          # YAML config files for experiments
 experiments/      # Runnable .py scripts (a0_baseline, a1_bayes_output, etc.)
+scripts/          # Utility scripts (dump_mlflow_run, profile_gpu, etc.)
 tests/            # pytest tests
 data/             # Local datasets (gitignored; document provenance in README.md)
 ```
@@ -55,6 +56,7 @@ data/             # Local datasets (gitignored; document provenance in README.md
 - **MLflow** (local, sqlite backend: `sqlite:///mlflow.db`) for all experiment tracking.
 - Every training run logs: hyperparameters, train/val loss, perplexity, generated samples, learning rate (every step), `test_id_perplexity`, `test_ood_perplexity` (AG News only), `best_val_loss`, `best_val_step`, `train_time_sec`, `tokens_per_sec`.
 - Tags: `dataset` (tinyshakespeare/agnews), `milestone` (a0/a1/a2), `gpu` (device name).
+- A1 runs additionally log: `mi_id_mean`, `mi_ood_mean`, `mi_ood_id_ratio`, `flip_rate_id`, `flip_rate_ood`, `pred_entropy_id_mean`, `pred_entropy_ood_mean`, `expected_entropy_id_mean`, `expected_entropy_ood_mean`, `final_kl_loss`, `n_bayes_params`.
 - `train()` returns `tuple[MiniGPT, dict]` — metadata dict with `best_val_loss`, `best_val_step`, `train_time_sec`, `tokens_per_sec`.
 - Launch MLflow UI with: `uv run mlflow ui --backend-store-uri sqlite:///mlflow.db`
 - `--no-mlflow` flag available on experiment scripts to disable tracking.
@@ -74,7 +76,7 @@ PyTorch + `torch.distributions` for all milestones. No JAX for now. No TensorFlo
 
 ## Milestones (order matters)
 - **A0: DONE** — Deterministic miniGPT baseline on AG News. Reference: test_id_ppl=49.11, test_ood_ppl=540.28 (run `5dc45450e7b6458fbad2ec07dfd91ce3`). See `specs/a0-baseline-checklist.md`.
-- **A1: CODE COMPLETE** — Bayesian output head — BayesianLinear on lm_head, ELBO training, first uncertainty metrics (MI). Code, tests (24 new, 38 total), config, experiment script all done. Pending: GPU training run + results. Must match A0 test_id_ppl <=49.11 and show MI separation ID vs OOD.
+- **A1: TUNING** — Bayesian output head — BayesianLinear on lm_head, ELBO training, uncertainty metrics (MI). Code + tests done (24 new, 38 total). Model: 41.8M params (25.7M Bayesian) — larger than A0 (16M) due to no weight tying + μ/ρ doubling. First run (kl_weight=0.01) showed posterior collapse → MI ratio 1.07x (no signal). Next: kl_weight=0.1 + AMP for faster iteration. Specs: `a1-bayesian-output-head.md`, `a1-kl-tuning.md`, `gpu-acceleration.md`.
   - **First run (2026-02-25)**: OOM crash during uncertainty eval — fixed by streaming MC sampling (`_stream_metrics`). KL dominated training: 57M KL / 2.7M tokens = 21 nats swamping CE of ~6 (root cause: `weight_rho=-5` → σ≈0.007 vs `prior_std=1.0` → 4.5 nats/param × 12.8M params). Fix: cold posterior (`kl_weight=0.01`) + optional linear KL annealing (`kl_annealing_steps=200`). Sanity run with fixes confirmed: ELBO = CE(5.96) + weighted_KL(0.21) — 100x reduction. Results identical at 400 steps (too few to differentiate); bumped to 5000 steps for real run.
   - **MLflow fix**: stepless `log_metric` calls created single-point bar charts in UI. Moved all summary values (best_val_loss, perplexities, MI metrics, etc.) to `log_param` in both A0 and A1 scripts. Only step-aware time-series (train_loss, val_loss, lr, effective_kl_weight, etc.) stay as metrics.
   - **Config audit**: moved 8 categories of hardcoded values to YAML config: `eval.temperature`, `eval.sample_tokens` (wiring gap), `model.bayes.init_rho`, `eval.n_perplexity_batches`, `experiment.mlflow_uri`, `train.adam_beta1/adam_beta2`, `eval.qualitative_*` (prompts_per_category, max_new_tokens, seed), `train.checkpoint_dir`. All experiment scripts now read from config, no magic numbers.
@@ -103,6 +105,7 @@ Experiments use a YAML config pipeline: `DEFAULT_CONFIG → YAML file → CLI ov
 - **`minigpt/config.py`** — `DEFAULT_CONFIG` dict with all defaults, plus helpers: `load_yaml`, `deep_merge`, `apply_overrides` (dot-notation), `build_gpt_config`, `build_train_config`, `validate_config`, `config_to_flat_params`.
 - **`configs/a0_baseline.yaml`** — reference config for A0 baseline (TinyShakespeare, matches defaults).
 - **`configs/a0_agnews.yaml`** — AG News config (fully explicit — all settings, 5000 steps, 500 warmup, ID=[1,2], OOD=[3,4]).
+- **`configs/a1_agnews.yaml`** — A1 Bayesian output head on AG News. Same as a0_agnews but `bayes.enabled: true`, `prior_std: 1.0`, `kl_weight: 0.01` (to be increased to 0.1), `eval.num_samples: 30`, `kl_annealing_steps: 2000`.
 - `vocab_size` always comes from the tokenizer, never from config files.
 - **PyYAML gotcha:** scientific notation without a decimal point (e.g. `3e-4`) is parsed as a **string**, not float. Always write `3.0e-4` or `0.0003` in YAML files.
 
@@ -134,6 +137,9 @@ Checkpoints save full config dict, `best_val_loss`, torch/CUDA RNG states. On re
 - `uv run pytest tests/ -v` (run all unit tests)
 - `uv run ruff check minigpt/ experiments/ tests/` (lint)
 - `python experiments/a0_baseline.py` (training — global env, GPU)
+- `python experiments/a1_bayes_output.py --config configs/a1_agnews.yaml` (A1 Bayesian training)
+- `python scripts/profile_gpu.py --config configs/a1_agnews.yaml` (GPU throughput profiling)
+- `python scripts/dump_mlflow_run.py <run_id>` (inspect MLflow run)
 - `mlflow ui --backend-store-uri sqlite:///mlflow.db` (view experiment results)
 
 ## CI/CD
@@ -237,6 +243,15 @@ Do not commit secrets or large binaries. Use `.env` (ignored) and provide `.env.
   - **`tests/test_bayesian.py`**: 24 new tests — KL non-negativity (4), sampling variance (4), frozen sampling (4), selective Bayesian architecture (6), MI invariants (6). All 38 tests passing (14 old + 24 new).
   - **Spec**: `specs/a1-bayesian-output-head.md` — full design doc (16 sections, LaTeX math, code mappings).
   - **Next**: GPU training run on AG News, compare test_id_ppl to A0 reference (49.11), measure MI gap.
+- **2026-02-25:** A1 first full run — posterior collapse diagnosed (MLflow `686e3201`):
+  - **Config**: `kl_weight=0.01`, `kl_annealing_steps=2000`, `batch_size=64`, 5K steps, fp32.
+  - **Results**: test_id_ppl=65.62, test_ood_ppl=630.46 (9.6x ratio). MI_id=0.0236, MI_ood=0.0253, **MI ratio=1.07x** — no separation. Flip rate: ID=12.7%, OOD=13.0% — also flat.
+  - **Diagnosis**: `kl_weight=0.01` is too cold. Effective KL per token = `0.01 * 52.4M / 2.7M` = 0.19 nats — only 4.5% of ELBO. Posterior σ collapsed to near-zero → MC samples are near-identical → MI ≈ 0.
+  - **Fix**: increase `kl_weight` from 0.01 → 0.1 (32% of ELBO). Keep annealing at 2000 steps. Spec: `specs/a1-kl-tuning.md`.
+- **2026-02-25:** GPU profiling — silent VRAM overflow discovered:
+  - **Problem**: A1 model is 41.8M params (no weight tying + μ/ρ doubling in BayesianLinear). At `batch_size=64` fp32, peak VRAM = 14.9 GB — exceeds RTX 4070's 12.3 GB. CUDA on Windows silently spills to system RAM → **10x throughput collapse** (8K tok/s vs 82K tok/s at B=32).
+  - **Profiling script**: `scripts/profile_gpu.py`. Best config: AMP + B=32 → 111K tok/s, 48% VRAM.
+  - **Plan**: add AMP (mixed precision) to train.py + reduce batch_size to 32. Spec: `specs/gpu-acceleration.md`.
 
 ## Future Work (Non-Bayesian — Parked)
 These are architectural improvements to revisit **after** Bayesian milestones (A1/A2) are done. Not in scope now — the current miniGPT is intentionally basic to keep focus on Bayesian aspects.
@@ -246,7 +261,7 @@ These are architectural improvements to revisit **after** Bayesian milestones (A
 - **Pre-Norm vs Post-Norm** — current model uses pre-norm (GPT-2 style); evaluate post-norm or sandwich-norm
 - **KV-cache** — inference-time optimization for autoregressive generation
 - **PEFT** — Parameter-Efficient Fine-Tuning (LoRA, adapters) to squeeze more params into VRAM budget
-- **Mixed precision (FP16 / BF16)** — faster training and reduced VRAM via `torch.cuda.amp`
+- **Mixed precision (FP16 / BF16)** — faster training and reduced VRAM via `torch.cuda.amp` (**actively planned** — see `specs/gpu-acceleration.md`)
 
 ## Papers to Consider (Parked)
 Bayesian + LLM papers for later review, likely relevant to B1 (Bayesian LoRA on open-weight LLM).
