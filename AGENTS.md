@@ -2,7 +2,7 @@
 
 ## Project Structure & Source of Truth
 `docs/` holds PDF papers — the theory baseline. Implementations should align with those docs.
-`specs/` holds planning documents. The active spec is `specs/refined-spec-feb2026.md`. Other specs: `held-out-test-split.md`, `vital-unit-tests.md`, `a0-baseline-checklist.md`, `ml-infrastructure.md`, `a1-bayesian-output-head.md`, `a1-kl-tuning.md`, `gpu-acceleration.md`.
+`specs/` holds planning documents. The active spec is `specs/refined-spec-feb2026.md`. Other specs: `held-out-test-split.md`, `vital-unit-tests.md`, `a0-baseline-checklist.md`, `ml-infrastructure.md`, `a1-bayesian-output-head.md`, `a1-kl-tuning.md`, `a1-tuning-round2.md`, `gpu-acceleration.md`.
 
 Layout (flat, minimal — no deep nesting):
 ```
@@ -56,7 +56,7 @@ data/             # Local datasets (gitignored; document provenance in README.md
 - **MLflow** (local, sqlite backend: `sqlite:///mlflow.db`) for all experiment tracking.
 - Every training run logs: hyperparameters, train/val loss, perplexity, generated samples, learning rate (every step), `test_id_perplexity`, `test_ood_perplexity` (AG News only), `best_val_loss`, `best_val_step`, `train_time_sec`, `tokens_per_sec`.
 - Tags: `dataset` (tinyshakespeare/agnews), `milestone` (a0/a1/a2), `gpu` (device name).
-- A1 runs additionally log: `mi_id_mean`, `mi_ood_mean`, `mi_ood_id_ratio`, `flip_rate_id`, `flip_rate_ood`, `pred_entropy_id_mean`, `pred_entropy_ood_mean`, `expected_entropy_id_mean`, `expected_entropy_ood_mean`, `final_kl_loss`, `n_bayes_params`.
+- A1 runs additionally log: `mi_id_mean`, `mi_ood_mean`, `mi_ood_id_ratio`, `flip_rate_id`, `flip_rate_ood`, `pred_entropy_id_mean`, `pred_entropy_ood_mean`, `expected_entropy_id_mean`, `expected_entropy_ood_mean`, `final_kl_loss`, `n_bayes_params`, sigma stats (`sigma_mean`, `sigma_std`, `sigma_min`, `sigma_max`, `sigma_median`, `sigma_p5/p25/p75/p95`).
 - `train()` returns `tuple[MiniGPT, dict]` — metadata dict with `best_val_loss`, `best_val_step`, `train_time_sec`, `tokens_per_sec`.
 - Launch MLflow UI with: `uv run mlflow ui --backend-store-uri sqlite:///mlflow.db`
 - `--no-mlflow` flag available on experiment scripts to disable tracking.
@@ -76,7 +76,7 @@ PyTorch + `torch.distributions` for all milestones. No JAX for now. No TensorFlo
 
 ## Milestones (order matters)
 - **A0: DONE** — Deterministic miniGPT baseline on AG News. Reference: test_id_ppl=49.11, test_ood_ppl=540.28 (run `5dc45450e7b6458fbad2ec07dfd91ce3`). See `specs/a0-baseline-checklist.md`.
-- **A1: TUNING** — Bayesian output head — BayesianLinear on lm_head, ELBO training, uncertainty metrics (MI). Code + tests done (24 new, 38 total). Model: 41.8M params (25.7M Bayesian). Second run (`kl_weight=0.2`, 40K steps, AMP): MI ratio 1.36x (up from 1.07x), sigmas growing 0.007→0.224 but still small. **Next levers**: (1) `init_rho=-1` to skip softplus saturation, (2) best-ELBO checkpoint selection, (3) sigma distribution analysis. Specs: `a1-bayesian-output-head.md`, `a1-kl-tuning.md`, `gpu-acceleration.md`.
+- **A1: TUNING** — Bayesian output head — BayesianLinear on lm_head, ELBO training, uncertainty metrics (MI). Code + tests done (24 new, 38 total). Model: 41.8M params (25.7M Bayesian). Round 1 (`init_rho=-5`, 40K steps): MI ratio 1.36x but sigma grew slowly (0.007→0.224). Round 2 code ready: best-ELBO checkpoint, qualitative MI fix, sigma logging, `init_rho=-2` (σ=0.127). Config: 50K steps, kl_annealing=10K. Specs: `a1-bayesian-output-head.md`, `a1-kl-tuning.md`, `a1-tuning-round2.md`, `gpu-acceleration.md`.
   - **First run (2026-02-25)**: OOM crash during uncertainty eval — fixed by streaming MC sampling (`_stream_metrics`). KL dominated training: 57M KL / 2.7M tokens = 21 nats swamping CE of ~6 (root cause: `weight_rho=-5` → σ≈0.007 vs `prior_std=1.0` → 4.5 nats/param × 12.8M params). Fix: cold posterior (`kl_weight=0.01`) + optional linear KL annealing (`kl_annealing_steps=200`). Sanity run with fixes confirmed: ELBO = CE(5.96) + weighted_KL(0.21) — 100x reduction. Results identical at 400 steps (too few to differentiate); bumped to 5000 steps for real run.
   - **MLflow fix**: stepless `log_metric` calls created single-point bar charts in UI. Moved all summary values (best_val_loss, perplexities, MI metrics, etc.) to `log_param` in both A0 and A1 scripts. Only step-aware time-series (train_loss, val_loss, lr, effective_kl_weight, etc.) stay as metrics.
   - **Config audit**: moved 8 categories of hardcoded values to YAML config: `eval.temperature`, `eval.sample_tokens` (wiring gap), `model.bayes.init_rho`, `eval.n_perplexity_batches`, `experiment.mlflow_uri`, `train.adam_beta1/adam_beta2`, `eval.qualitative_*` (prompts_per_category, max_new_tokens, seed), `train.checkpoint_dir`. All experiment scripts now read from config, no magic numbers.
@@ -105,7 +105,7 @@ Experiments use a YAML config pipeline: `DEFAULT_CONFIG → YAML file → CLI ov
 - **`minigpt/config.py`** — `DEFAULT_CONFIG` dict with all defaults, plus helpers: `load_yaml`, `deep_merge`, `apply_overrides` (dot-notation), `build_gpt_config`, `build_train_config`, `validate_config`, `config_to_flat_params`.
 - **`configs/a0_baseline.yaml`** — reference config for A0 baseline (TinyShakespeare, matches defaults).
 - **`configs/a0_agnews.yaml`** — AG News config (fully explicit — all settings, 5000 steps, 500 warmup, ID=[1,2], OOD=[3,4]).
-- **`configs/a1_agnews.yaml`** — A1 Bayesian output head on AG News. Same as a0_agnews but `bayes.enabled: true`, `prior_std: 1.0`, `kl_weight: 0.1`, `eval.num_samples: 30`, `kl_annealing_steps: 400`. Best run used CLI overrides: `kl_weight=0.2`, `steps=40000`, `kl_annealing_steps=5000`.
+- **`configs/a1_agnews.yaml`** — A1 Bayesian output head on AG News. `bayes.enabled: true`, `prior_std: 1.0`, `kl_weight: 0.2`, `init_rho: -2.0`, `steps: 50000`, `kl_annealing_steps: 10000`, `eval.num_samples: 30`, `eval_interval: 2000`, `checkpoint_interval: 5000`.
 - `vocab_size` always comes from the tokenizer, never from config files.
 - **PyYAML gotcha:** scientific notation without a decimal point (e.g. `3e-4`) is parsed as a **string**, not float. Always write `3.0e-4` or `0.0003` in YAML files.
 
@@ -282,8 +282,10 @@ Do not commit secrets or large binaries. Use `.env` (ignored) and provide `.env.
 - **2026-02-26:** A1 tuning round 2 — four fixes implemented (spec: `specs/a1-tuning-round2.md`):
   - **Change 1 — qualitative MI fix**: `_run_qualitative_eval` now scores MI on **prompt tokens** (the real ID/OOD text), not on model-generated continuations. Generation still displayed for human inspection but no longer used for MI scoring. Variable naming: `cont_mi` → `prompt_mi`, `sequence_mi` → `prompt_mi` in results dict.
   - **Change 2 — best-ELBO checkpoint**: `train.py` now selects best checkpoint by `elbo_loss` when `is_bayesian=True`, by `loss` (CE) otherwise. Prints criterion at training start. `best_val_loss` in checkpoint dict holds ELBO for Bayesian runs (consistent within same run + resume).
-  - **Change 3 — init_rho=-1**: Default changed from `-5.0` to `-1.0` in `BayesConfig`, `BayesianLinear.__init__`, `DEFAULT_CONFIG`, and `configs/a1_agnews.yaml`. σ starts at 0.313 (vs 0.007), sigmoid gradient 0.269 (vs 0.007) — 3.7x attenuation instead of 143x.
+  - **Change 3 — init_rho default**: Code default changed from `-5.0` to `-1.0` in `BayesConfig`, `BayesianLinear.__init__`, `DEFAULT_CONFIG`. Toy run with `-1.0` showed mean-weight ppl=4004 at 1K steps — σ=0.313 is too noisy for mu to learn CE task. **Config shipped with init_rho=-2.0** (σ=0.127, 8.4x attenuation) as the compromise.
   - **Change 4 — sigma logging**: New `sigma_summary(model)` function in `layers.py` — returns 9 aggregate stats (mean/std/min/max/median/p5/p25/p75/p95). Called from `a1_bayes_output.py` after training, logged to MLflow as params. `scripts/eval_checkpoint.py::_sigma_stats()` refactored to use `sigma_summary()` internally (per-layer detail still printed).
+  - **Qualitative eval output**: console now prints summary line only (`Qualitative MI — ID: ... OOD: ... Ratio: ...`). Full per-prompt report still saved to MLflow artifact `qualitative_eval.txt`.
+  - **Config for round 2** (`configs/a1_agnews.yaml`): `init_rho=-2.0`, `steps=50000`, `eval_interval=2000`, `checkpoint_interval=5000`, `kl_annealing_steps=10000`. Rest unchanged from round 1.
   - All 38 tests passing, ruff clean. **Ready for round 2 training run**.
 
 ## Future Work (Non-Bayesian — Parked)
