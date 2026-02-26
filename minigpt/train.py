@@ -22,6 +22,7 @@ class TrainConfig:
     eval_iters: int = 20
     checkpoint_interval: int = 500
     checkpoint_dir: str = "data/checkpoints"
+    gradient_accumulation_steps: int = 1
     kl_annealing_steps: int = 0
     adam_beta1: float = 0.9
     adam_beta2: float = 0.95
@@ -65,10 +66,12 @@ def estimate_loss(
             For deterministic models: kl_scale = 0 (default).
     """
     model.eval()
+    use_amp = next(model.parameters()).device.type == "cuda"
     ce_losses = []
     for _ in range(eval_iters):
         x, y = get_batch(data, block_size, batch_size, device)
-        _, ce_loss = model(x, y)
+        with torch.amp.autocast(device_type=device.type, dtype=torch.float16, enabled=use_amp):
+            _, ce_loss = model(x, y)
         ce_losses.append(ce_loss.item())
     model.train()
     avg_ce = sum(ce_losses) / len(ce_losses)
@@ -200,6 +203,13 @@ def train(
     best_path = ckpt_dir / "ckpt_best.pt"
     best_val_step = 0
 
+    # AMP: auto-enable on CUDA for mixed-precision training
+    use_amp = device.type == "cuda"
+    scaler = torch.amp.GradScaler() if use_amp else None
+
+    # Gradient accumulation
+    accum_steps = cfg.gradient_accumulation_steps
+
     start = time.time()
     total_tokens = 0
     for step in range(start_step, cfg.steps + 1):
@@ -208,13 +218,7 @@ def train(
         for param_group in optimizer.param_groups:
             param_group["lr"] = lr
 
-        x, y = get_batch(train_data, cfg.block_size, cfg.batch_size, device)
-        _, ce_loss = model(x, y)
-        total_tokens += x.numel()
-
-        # ELBO: loss = CE + kl_scale * KL.
-        # Deterministic (kl_weight=0): pure CE, no KL term.
-        # Bayesian (kl_weight>0): KL annealing ramps effective weight from 0 → kl_weight.
+        # KL annealing (computed once per optimizer step, not per micro-batch)
         if is_bayesian:
             if cfg.kl_annealing_steps > 0:
                 anneal = min(step / cfg.kl_annealing_steps, 1.0)
@@ -222,16 +226,39 @@ def train(
                 anneal = 1.0
             effective_kl_weight = kl_weight * anneal
             kl_scale = effective_kl_weight / num_train_tokens
-            kl = model.kl_loss()
-            loss = ce_loss + kl_scale * kl
         else:
             effective_kl_weight = 0.0
-            loss = ce_loss
 
         optimizer.zero_grad(set_to_none=True)
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
-        optimizer.step()
+        for micro_step in range(accum_steps):
+            x, y = get_batch(train_data, cfg.block_size, cfg.batch_size, device)
+            total_tokens += x.numel()
+
+            with torch.amp.autocast(device_type=device.type, dtype=torch.float16, enabled=use_amp):
+                _, ce_loss = model(x, y)
+
+                # ELBO: loss = CE + kl_scale * KL.
+                # KL is a property of weights, not data — add once per optimizer step.
+                # We add it only on the last micro-step to avoid double-counting.
+                if is_bayesian and micro_step == accum_steps - 1:
+                    kl = model.kl_loss()
+                    loss = ce_loss / accum_steps + kl_scale * kl
+                else:
+                    loss = ce_loss / accum_steps
+
+            if scaler is not None:
+                scaler.scale(loss).backward()
+            else:
+                loss.backward()
+
+        if scaler is not None:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
+            optimizer.step()
 
         if mlflow_run is not None:
             import mlflow

@@ -20,23 +20,24 @@ model:
   bayes:
     enabled: true
     prior_std: 1.0
-    kl_weight: 0.01
+    kl_weight: 0.2
     init_rho: -5.0
 
 train:
-  steps: 10000
+  steps: 40000
   batch_size: 32
   block_size: 256
   lr: 3.0e-4
   weight_decay: 0.1
-  warmup_steps: 500
+  warmup_steps: 1000
   min_lr: 1.0e-5
   grad_clip: 1.0
-  eval_interval: 500
+  eval_interval: 1000
   eval_iters: 20
-  checkpoint_interval: 1000
+  checkpoint_interval: 2000
   checkpoint_dir: "data/checkpoints"
-  kl_annealing_steps: 4000
+  gradient_accumulation_steps: 1
+  kl_annealing_steps: 5000
   adam_beta1: 0.9
   adam_beta2: 0.95
   seed: 1337

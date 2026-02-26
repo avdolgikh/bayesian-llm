@@ -33,6 +33,7 @@ train:
   eval_iters: 20
   checkpoint_interval: 500
   checkpoint_dir: "data/checkpoints"
+  gradient_accumulation_steps: 1
   adam_beta1: 0.9
   adam_beta2: 0.95
   seed: 1337

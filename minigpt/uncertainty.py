@@ -37,9 +37,11 @@ def _stream_metrics(
     entropy_sum = torch.zeros(seq_len, device=device)
     argmaxes = torch.zeros(n_samples, seq_len, dtype=torch.long, device=device)
 
+    use_amp = h.device.type == "cuda"
     for s in range(n_samples):
-        logits = model.lm_head(h)  # (1, seq_len, vocab)
-        probs = F.softmax(logits[0], dim=-1)  # (seq_len, vocab)
+        with torch.amp.autocast(device_type=h.device.type, dtype=torch.float16, enabled=use_amp):
+            logits = model.lm_head(h)  # (1, seq_len, vocab)
+        probs = F.softmax(logits[0].float(), dim=-1)  # (seq_len, vocab) — fp32 for entropy
         p_sum.add_(probs)
         entropy_sum.add_(-(probs * torch.log(probs + eps)).sum(dim=-1))
         argmaxes[s] = probs.argmax(dim=-1)
@@ -85,11 +87,13 @@ def compute_uncertainty_metrics(
     all_exp_ent = []
     all_flip = []
 
+    use_amp = device.type == "cuda"
     for _ in range(n_batches):
         x, _ = get_batch(data, block_size, batch_size, device)
 
         # A1 efficiency: run transformer body once (full batch)
-        h = model.forward_body(x)  # (batch, seq_len, n_embd)
+        with torch.amp.autocast(device_type=device.type, dtype=torch.float16, enabled=use_amp):
+            h = model.forward_body(x)  # (batch, seq_len, n_embd)
 
         # MC sampling per element to avoid OOM
         for b in range(x.size(0)):
@@ -129,5 +133,7 @@ def score_sequence(
     x = token_ids.unsqueeze(0).to(device)  # (1, seq_len)
 
     # A1 efficiency: body once, head N times (streaming to avoid OOM)
-    h = model.forward_body(x)  # (1, seq_len, n_embd)
+    use_amp = device.type == "cuda"
+    with torch.amp.autocast(device_type=device.type, dtype=torch.float16, enabled=use_amp):
+        h = model.forward_body(x)  # (1, seq_len, n_embd)
     return _stream_metrics(model, h, n_samples)

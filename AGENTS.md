@@ -76,7 +76,7 @@ PyTorch + `torch.distributions` for all milestones. No JAX for now. No TensorFlo
 
 ## Milestones (order matters)
 - **A0: DONE** — Deterministic miniGPT baseline on AG News. Reference: test_id_ppl=49.11, test_ood_ppl=540.28 (run `5dc45450e7b6458fbad2ec07dfd91ce3`). See `specs/a0-baseline-checklist.md`.
-- **A1: TUNING** — Bayesian output head — BayesianLinear on lm_head, ELBO training, uncertainty metrics (MI). Code + tests done (24 new, 38 total). Model: 41.8M params (25.7M Bayesian) — larger than A0 (16M) due to no weight tying + μ/ρ doubling. First run (kl_weight=0.01) showed posterior collapse → MI ratio 1.07x (no signal). Next: kl_weight=0.1 + AMP for faster iteration. Specs: `a1-bayesian-output-head.md`, `a1-kl-tuning.md`, `gpu-acceleration.md`.
+- **A1: TUNING** — Bayesian output head — BayesianLinear on lm_head, ELBO training, uncertainty metrics (MI). Code + tests done (24 new, 38 total). Model: 41.8M params (25.7M Bayesian). Second run (`kl_weight=0.2`, 40K steps, AMP): MI ratio 1.36x (up from 1.07x), sigmas growing 0.007→0.224 but still small. **Next levers**: (1) `init_rho=-1` to skip softplus saturation, (2) best-ELBO checkpoint selection, (3) sigma distribution analysis. Specs: `a1-bayesian-output-head.md`, `a1-kl-tuning.md`, `gpu-acceleration.md`.
   - **First run (2026-02-25)**: OOM crash during uncertainty eval — fixed by streaming MC sampling (`_stream_metrics`). KL dominated training: 57M KL / 2.7M tokens = 21 nats swamping CE of ~6 (root cause: `weight_rho=-5` → σ≈0.007 vs `prior_std=1.0` → 4.5 nats/param × 12.8M params). Fix: cold posterior (`kl_weight=0.01`) + optional linear KL annealing (`kl_annealing_steps=200`). Sanity run with fixes confirmed: ELBO = CE(5.96) + weighted_KL(0.21) — 100x reduction. Results identical at 400 steps (too few to differentiate); bumped to 5000 steps for real run.
   - **MLflow fix**: stepless `log_metric` calls created single-point bar charts in UI. Moved all summary values (best_val_loss, perplexities, MI metrics, etc.) to `log_param` in both A0 and A1 scripts. Only step-aware time-series (train_loss, val_loss, lr, effective_kl_weight, etc.) stay as metrics.
   - **Config audit**: moved 8 categories of hardcoded values to YAML config: `eval.temperature`, `eval.sample_tokens` (wiring gap), `model.bayes.init_rho`, `eval.n_perplexity_batches`, `experiment.mlflow_uri`, `train.adam_beta1/adam_beta2`, `eval.qualitative_*` (prompts_per_category, max_new_tokens, seed), `train.checkpoint_dir`. All experiment scripts now read from config, no magic numbers.
@@ -105,7 +105,7 @@ Experiments use a YAML config pipeline: `DEFAULT_CONFIG → YAML file → CLI ov
 - **`minigpt/config.py`** — `DEFAULT_CONFIG` dict with all defaults, plus helpers: `load_yaml`, `deep_merge`, `apply_overrides` (dot-notation), `build_gpt_config`, `build_train_config`, `validate_config`, `config_to_flat_params`.
 - **`configs/a0_baseline.yaml`** — reference config for A0 baseline (TinyShakespeare, matches defaults).
 - **`configs/a0_agnews.yaml`** — AG News config (fully explicit — all settings, 5000 steps, 500 warmup, ID=[1,2], OOD=[3,4]).
-- **`configs/a1_agnews.yaml`** — A1 Bayesian output head on AG News. Same as a0_agnews but `bayes.enabled: true`, `prior_std: 1.0`, `kl_weight: 0.01` (to be increased to 0.1), `eval.num_samples: 30`, `kl_annealing_steps: 2000`.
+- **`configs/a1_agnews.yaml`** — A1 Bayesian output head on AG News. Same as a0_agnews but `bayes.enabled: true`, `prior_std: 1.0`, `kl_weight: 0.1`, `eval.num_samples: 30`, `kl_annealing_steps: 400`. Best run used CLI overrides: `kl_weight=0.2`, `steps=40000`, `kl_annealing_steps=5000`.
 - `vocab_size` always comes from the tokenizer, never from config files.
 - **PyYAML gotcha:** scientific notation without a decimal point (e.g. `3e-4`) is parsed as a **string**, not float. Always write `3.0e-4` or `0.0003` in YAML files.
 
@@ -140,6 +140,7 @@ Checkpoints save full config dict, `best_val_loss`, torch/CUDA RNG states. On re
 - `python experiments/a1_bayes_output.py --config configs/a1_agnews.yaml` (A1 Bayesian training)
 - `python scripts/profile_gpu.py --config configs/a1_agnews.yaml` (GPU throughput profiling)
 - `python scripts/dump_mlflow_run.py <run_id>` (inspect MLflow run)
+- `python scripts/eval_checkpoint.py <ckpt_path> --config <yaml>` (uncertainty + sigma stats on any checkpoint)
 - `mlflow ui --backend-store-uri sqlite:///mlflow.db` (view experiment results)
 
 ## CI/CD
@@ -252,6 +253,32 @@ Do not commit secrets or large binaries. Use `.env` (ignored) and provide `.env.
   - **Problem**: A1 model is 41.8M params (no weight tying + μ/ρ doubling in BayesianLinear). At `batch_size=64` fp32, peak VRAM = 14.9 GB — exceeds RTX 4070's 12.3 GB. CUDA on Windows silently spills to system RAM → **10x throughput collapse** (8K tok/s vs 82K tok/s at B=32).
   - **Profiling script**: `scripts/profile_gpu.py`. Best config: AMP + B=32 → 111K tok/s, 48% VRAM.
   - **Plan**: add AMP (mixed precision) to train.py + reduce batch_size to 32. Spec: `specs/gpu-acceleration.md`.
+- **2026-02-25:** GPU acceleration implemented + KL weight tuning applied:
+  - **AMP (mixed precision)**: `torch.amp.autocast` + `GradScaler` added to `train.py` (training loop + `estimate_loss`), `uncertainty.py` (`_stream_metrics`, `compute_uncertainty_metrics`, `score_sequence`). Auto-enabled on CUDA (`use_amp = device.type == "cuda"`). Entropy accumulation stays in fp32 to avoid numerical issues.
+  - **Gradient accumulation**: `gradient_accumulation_steps` added to `TrainConfig` (default 1) and `DEFAULT_CONFIG`. Training loop runs `accum_steps` micro-batches per optimizer step with CE scaled by `1/accum_steps`. KL added only on the last micro-step (KL is a weight property, not data-dependent — adding per micro-batch would double-count). Infrastructure for A2 when model grows larger.
+  - **Batch size**: `a1_agnews.yaml` already had `batch_size: 32` (updated in previous session). No change needed.
+  - **KL weight tuning**: `kl_weight` bumped from `0.01` → `0.1` in `configs/a1_agnews.yaml`. Expected to fix posterior collapse (MI ratio 1.07x → target >1.5x). KL annealing kept at 4000 steps (was 2000, config already had 4000).
+  - **Config audit**: `gradient_accumulation_steps: 1` added to all YAML configs (`a0_baseline.yaml`, `a0_agnews.yaml`, `a1_agnews.yaml`) per explicit-config rule.
+  - All 38 tests passing, ruff clean. No changes to model architecture or test code.
+- **2026-02-26:** A1 second run analysis (MLflow `4e1662e6`, 40K steps):
+  - **Actual config** (via CLI overrides): `kl_weight=0.2`, `kl_annealing_steps=5000`, `steps=40000`, `batch_size=32`, `eval_interval=1000`, `checkpoint_interval=2000`, `warmup_steps=1000`. AMP active, 105K tok/s on RTX 4070 (~52 min).
+  - **Best val loss at step 8000** (CE=4.18). Val loss plateau after 8K, train continues to ~2.82. Classic overfitting after step 8K.
+  - **KL trajectory**: Monotonically decreasing 58M→15.7M. NOT collapse — sigmas are GROWING (from 0.007→0.224), approaching prior (σ=1.0). KL gradient `-1/σ + σ` pushes small sigmas up.
+  - **Sigma statistics** (step 40K): mean=0.224, median=0.239, range=[0.015, 0.441]. Bimodal: 5th pct=0.064, 95th pct=0.370. Some vocab tokens retain low sigma (confident), others high.
+  - **Checkpoint comparison** (via `scripts/eval_checkpoint.py`):
+
+    | Step | KL | σ mean | MI (ID) | MI (OOD) | Ratio | ID ppl | OOD ppl |
+    |------|-----|--------|---------|----------|-------|--------|---------|
+    | 8000 (best CE) | 34.1M | 0.049 | 0.146 | 0.188 | 1.29x | 60.1 | 733 |
+    | 20000 | 19.8M | 0.161 | 0.274 | 0.362 | 1.32x | — | — |
+    | 40000 (final) | 15.7M | 0.224 | 0.293 | 0.398 | 1.36x | 56.3 | 1477 |
+
+  - **Step 40K is the better Bayesian model**: MI 2x higher, ratio 1.36x (vs 1.29x), ID ppl slightly better (56 vs 60), OOD ppl higher (more separation).
+  - **MI discrepancy (1.29x global vs 1.02x qualitative)**: Global MI scores real OOD text (Business/Sci-Tech). Qualitative MI scores model-generated continuations (with `use_mean=True`), which are always in-distribution regardless of prompt topic. The model ignores OOD prompts and generates what it knows → MI is flat. **Global ratio is the real OOD signal; qualitative ratio is a methodological artifact.**
+  - **Checkpoint selection issue**: Best-val-loss criterion selects step 8000 (best CE), but Bayesian quality improves through step 40K (sigma grows, MI improves, ELBO improves). **Recommendation**: select by best val ELBO when `is_bayesian=True`. The ELBO was still improving at 40K (5.44 vs 6.70 at step 8K).
+  - **init_rho=-5 problem**: Starting sigma=0.007 means 40K steps just to reach σ≈0.22. Softplus gradient through `sigmoid(rho)` at rho=-5 is 0.007 — 143x attenuated. This is the **softplus saturation bottleneck**. Starting with `init_rho=-2` (σ≈0.13) or `-1` (σ≈0.31) would skip the slow climb and let training focus on the right sigma region immediately.
+  - **Scripts**: `scripts/eval_checkpoint.py` — loads any checkpoint, prints sigma stats + perplexity + MI. Usage: `python scripts/eval_checkpoint.py data/checkpoints/ckpt_stepN.pt --config configs/a1_agnews.yaml --set train.batch_size=32`.
+  - **Open questions for next run**: (1) Try `init_rho=-1` or `-2`; (2) Switch checkpoint selection to best ELBO; (3) Investigate sigma distribution per vocab token — do rare tokens have higher σ? (4) Grad clipping impact: `grad_clip=1.0` clips total norm, per-param gradient is tiny with 41.8M params, but softplus saturation is the bigger bottleneck.
 
 ## Future Work (Non-Bayesian — Parked)
 These are architectural improvements to revisit **after** Bayesian milestones (A1/A2) are done. Not in scope now — the current miniGPT is intentionally basic to keep focus on Bayesian aspects.
@@ -261,7 +288,7 @@ These are architectural improvements to revisit **after** Bayesian milestones (A
 - **Pre-Norm vs Post-Norm** — current model uses pre-norm (GPT-2 style); evaluate post-norm or sandwich-norm
 - **KV-cache** — inference-time optimization for autoregressive generation
 - **PEFT** — Parameter-Efficient Fine-Tuning (LoRA, adapters) to squeeze more params into VRAM budget
-- **Mixed precision (FP16 / BF16)** — faster training and reduced VRAM via `torch.cuda.amp` (**actively planned** — see `specs/gpu-acceleration.md`)
+- **Mixed precision (FP16 / BF16)** — **DONE** (AMP auto-enabled on CUDA in train.py + uncertainty.py)
 
 ## Papers to Consider (Parked)
 Bayesian + LLM papers for later review, likely relevant to B1 (Bayesian LoRA on open-weight LLM).
