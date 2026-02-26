@@ -81,40 +81,38 @@ def _run_qualitative_eval(
         continuation_ids = generated_ids[0, len(tokens):].tolist()
         continuation = tokenizer.decode(continuation_ids, errors="replace")
 
-        # Score the full generated sequence for uncertainty
-        full_ids = generated_ids[0]
-        # Only score if sequence is long enough
-        if len(full_ids) > 1:
-            metrics = score_sequence(model, full_ids, device, n_samples=n_samples)
-            # MI on the continuation part only
-            cont_mi = metrics["mi"][len(tokens):].mean().item()
-            cont_flip = metrics["flip_rate"][len(tokens):].mean().item()
-            cont_pred_ent = metrics["predictive_entropy"][len(tokens):].mean().item()
+        # Score the prompt tokens for uncertainty (not the generated continuation)
+        prompt_ids = idx[0]  # original prompt tensor
+        if len(prompt_ids) > 1:
+            metrics = score_sequence(model, prompt_ids, device, n_samples=n_samples)
+            prompt_mi = metrics["mi"].mean().item()
+            prompt_flip = metrics["flip_rate"].mean().item()
+            prompt_pred_ent = metrics["predictive_entropy"].mean().item()
         else:
-            cont_mi = 0.0
-            cont_flip = 0.0
-            cont_pred_ent = 0.0
+            prompt_mi = 0.0
+            prompt_flip = 0.0
+            prompt_pred_ent = 0.0
 
         prompt_text = tokenizer.decode(tokens, errors="replace")
         lines.append(f"[{split} — {p['category']}] \"{prompt_text[:100]}...\"")
         lines.append(f"  -> \"{continuation[:150]}...\"")
         lines.append(
-            f"  -> MI: {cont_mi:.4f}  |  Flip rate: {cont_flip:.3f}"
-            f"  |  Pred entropy: {cont_pred_ent:.3f}"
+            f"  -> MI: {prompt_mi:.4f}  |  Flip rate: {prompt_flip:.3f}"
+            f"  |  Pred entropy: {prompt_pred_ent:.3f}"
         )
         lines.append("")
 
         results.append({
             "category": p["category"],
             "split": split,
-            "sequence_mi": cont_mi,
-            "flip_rate": cont_flip,
-            "predictive_entropy": cont_pred_ent,
+            "prompt_mi": prompt_mi,
+            "flip_rate": prompt_flip,
+            "predictive_entropy": prompt_pred_ent,
         })
 
     # Summary
-    id_mis = [r["sequence_mi"] for r in results if r["split"] == "ID"]
-    ood_mis = [r["sequence_mi"] for r in results if r["split"] == "OOD"]
+    id_mis = [r["prompt_mi"] for r in results if r["split"] == "ID"]
+    ood_mis = [r["prompt_mi"] for r in results if r["split"] == "OOD"]
     if id_mis and ood_mis:
         avg_id = sum(id_mis) / len(id_mis)
         avg_ood = sum(ood_mis) / len(ood_mis)
@@ -248,8 +246,18 @@ def main() -> None:
                 "tokens_per_sec": f"{train_meta['tokens_per_sec']:.0f}",
             })
 
+        # --- Sigma statistics ---
+        from minigpt.layers import sigma_summary, use_mean_weights
+
+        stats = sigma_summary(model)
+        if stats:
+            print(f"\nSigma stats: mean={stats['sigma_mean']:.4f} "
+                  f"std={stats['sigma_std']:.4f} "
+                  f"min={stats['sigma_min']:.4f} max={stats['sigma_max']:.4f}")
+            if use_mlflow:
+                mlflow.log_params({k: f"{v:.6f}" for k, v in stats.items()})
+
         # --- Perplexity evaluation (with mean weights for fair comparison to A0) ---
-        from minigpt.layers import use_mean_weights
 
         eval_cfg = cfg["eval"]
         n_ppl_batches = eval_cfg.get("n_perplexity_batches", 20)
@@ -354,7 +362,15 @@ def main() -> None:
             n_samples=n_samples,
             max_new_tokens=eval_cfg.get("qualitative_max_new_tokens", 100),
         )
-        print(report)
+        # Print summary only (full per-prompt report goes to MLflow artifact)
+        id_mis = [r["prompt_mi"] for r in qual_results if r["split"] == "ID"]
+        ood_mis = [r["prompt_mi"] for r in qual_results if r["split"] == "OOD"]
+        if id_mis and ood_mis:
+            avg_id = sum(id_mis) / len(id_mis)
+            avg_ood = sum(ood_mis) / len(ood_mis)
+            ratio = avg_ood / max(avg_id, 1e-10)
+            print(f"  Qualitative MI — ID: {avg_id:.4f}  OOD: {avg_ood:.4f}  "
+                  f"Ratio: {ratio:.2f}x")
 
         if use_mlflow:
             mlflow.log_text(report, "qualitative_eval.txt")

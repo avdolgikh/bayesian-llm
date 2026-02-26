@@ -21,19 +21,18 @@ from minigpt.config import (
 )
 from minigpt.data import get_tokenizer, load_dataset
 from minigpt.evaluate import compute_perplexity
-from minigpt.layers import BayesianLinear, use_mean_weights
+from minigpt.layers import BayesianLinear, sigma_summary, use_mean_weights
 from minigpt.model import MiniGPT
 from minigpt.train import load_checkpoint
 from minigpt.uncertainty import compute_uncertainty_metrics
 
 
 def _sigma_stats(model: MiniGPT) -> dict:
-    """Compute sigma statistics for all BayesianLinear layers."""
-    all_sigmas = []
+    """Compute and print sigma statistics for all BayesianLinear layers."""
+    # Per-layer detail
     for name, module in model.named_modules():
         if isinstance(module, BayesianLinear):
             sigma = torch.nn.functional.softplus(module.weight_rho).detach().cpu()
-            all_sigmas.append(sigma.flatten())
             print(f"\n  [{name}] weight sigma stats:")
             print(f"    shape: {list(module.weight_rho.shape)}")
             print(f"    min:    {sigma.min().item():.6f}")
@@ -42,7 +41,6 @@ def _sigma_stats(model: MiniGPT) -> dict:
             print(f"    median: {sigma.median().item():.6f}")
             print(f"    std:    {sigma.std().item():.6f}")
 
-            # Percentiles
             pcts = [1, 5, 10, 25, 50, 75, 90, 95, 99]
             vals = torch.quantile(sigma.flatten().float(), torch.tensor([p / 100 for p in pcts]))
             print(f"    percentiles: {dict(zip(pcts, [f'{v:.6f}' for v in vals.tolist()]))}")
@@ -54,20 +52,16 @@ def _sigma_stats(model: MiniGPT) -> dict:
                     f"  max: {b_sigma.max():.6f}  mean: {b_sigma.mean():.6f}"
                 )
 
-    if all_sigmas:
-        combined = torch.cat(all_sigmas)
+    # Aggregate via reusable function
+    stats = sigma_summary(model)
+    if stats:
         print("\n  [ALL] combined weight sigmas:")
-        print(f"    total params: {combined.numel():,}")
-        print(f"    mean: {combined.mean():.6f}  std: {combined.std():.6f}")
-        print(f"    min: {combined.min():.6f}  max: {combined.max():.6f}")
-        return {
-            "mean": combined.mean().item(),
-            "std": combined.std().item(),
-            "min": combined.min().item(),
-            "max": combined.max().item(),
-            "median": combined.median().item(),
-        }
-    return {}
+        print(f"    mean: {stats['sigma_mean']:.6f}  std: {stats['sigma_std']:.6f}")
+        print(f"    min: {stats['sigma_min']:.6f}  max: {stats['sigma_max']:.6f}")
+        print(f"    median: {stats['sigma_median']:.6f}")
+        print(f"    p5: {stats['sigma_p5']:.6f}  p25: {stats['sigma_p25']:.6f}"
+              f"  p75: {stats['sigma_p75']:.6f}  p95: {stats['sigma_p95']:.6f}")
+    return stats
 
 
 def main() -> None:

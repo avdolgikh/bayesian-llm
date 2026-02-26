@@ -203,6 +203,10 @@ def train(
     best_path = ckpt_dir / "ckpt_best.pt"
     best_val_step = 0
 
+    # Checkpoint selection criterion
+    ckpt_criterion = "ELBO" if is_bayesian else "CE"
+    print(f"Best-checkpoint criterion: {ckpt_criterion}")
+
     # AMP: auto-enable on CUDA for mixed-precision training
     use_amp = device.type == "cuda"
     scaler = torch.amp.GradScaler() if use_amp else None
@@ -277,9 +281,13 @@ def train(
                 kl_scale=eval_kl_scale,
             )
             elapsed = time.time() - start
-            is_best = val_metrics["loss"] < best_val_loss
+            if is_bayesian:
+                val_criterion = val_metrics.get("elbo_loss", val_metrics["loss"])
+            else:
+                val_criterion = val_metrics["loss"]
+            is_best = val_criterion < best_val_loss
             if is_best:
-                best_val_loss = val_metrics["loss"]
+                best_val_loss = val_criterion
                 best_val_step = step
                 save_checkpoint(
                     model, optimizer, step, cfg_dict,

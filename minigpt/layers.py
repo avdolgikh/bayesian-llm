@@ -11,7 +11,7 @@ class BayesConfig:
     enabled: bool = False
     prior_std: float = 1.0
     kl_weight: float = 1.0
-    init_rho: float = -5.0
+    init_rho: float = -1.0
 
 
 class BayesianModule(nn.Module):
@@ -35,7 +35,7 @@ class BayesianLinear(BayesianModule):
         in_features: int,
         out_features: int,
         prior_std: float = 1.0,
-        init_rho: float = -5.0,
+        init_rho: float = -1.0,
         bias: bool = True,
     ) -> None:
         super().__init__()
@@ -152,6 +152,36 @@ def sum_kl_loss(module: nn.Module) -> torch.Tensor:
         if isinstance(child, BayesianModule):
             total = total + child.kl_loss()
     return total
+
+
+def sigma_summary(model: nn.Module) -> dict[str, float]:
+    """Compute aggregate sigma statistics across all BayesianLinear layers.
+
+    Returns dict with keys: sigma_mean, sigma_std, sigma_min, sigma_max,
+    sigma_median, sigma_p5, sigma_p25, sigma_p75, sigma_p95.
+    Returns empty dict if no BayesianLinear layers found.
+    """
+    all_sigmas = []
+    for module in model.modules():
+        if isinstance(module, BayesianLinear):
+            sigma = F.softplus(module.weight_rho).detach()
+            all_sigmas.append(sigma.flatten())
+    if not all_sigmas:
+        return {}
+    combined = torch.cat(all_sigmas)
+    pcts = torch.tensor([0.05, 0.25, 0.75, 0.95], device=combined.device)
+    quantiles = torch.quantile(combined.float(), pcts)
+    return {
+        "sigma_mean": combined.mean().item(),
+        "sigma_std": combined.std().item(),
+        "sigma_min": combined.min().item(),
+        "sigma_max": combined.max().item(),
+        "sigma_median": combined.median().item(),
+        "sigma_p5": quantiles[0].item(),
+        "sigma_p25": quantiles[1].item(),
+        "sigma_p75": quantiles[2].item(),
+        "sigma_p95": quantiles[3].item(),
+    }
 
 
 @contextmanager

@@ -34,7 +34,7 @@ DEFAULT_CONFIG: dict = {
             "enabled": False,
             "prior_std": 1.0,
             "kl_weight": 1.0,
-            "init_rho": -5.0,
+            "init_rho": -1.0,
         },
     },
     "train": {
