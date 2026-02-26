@@ -2,7 +2,7 @@
 
 ## Project Structure & Source of Truth
 `docs/` holds PDF papers — the theory baseline. Implementations should align with those docs.
-`specs/` holds planning documents. The active spec is `specs/refined-spec-feb2026.md`. Other specs: `held-out-test-split.md`, `vital-unit-tests.md`, `a0-baseline-checklist.md`, `ml-infrastructure.md`, `a1-bayesian-output-head.md`, `a1-kl-tuning.md`, `a1-tuning-round2.md`, `gpu-acceleration.md`.
+`specs/` holds planning documents. The active spec is `specs/refined-spec-feb2026.md`. Other specs: `held-out-test-split.md`, `vital-unit-tests.md`, `a0-baseline-checklist.md`, `ml-infrastructure.md`, `a1-bayesian-output-head.md`, `a1-kl-tuning.md`, `a1-tuning-round2.md`, `gpu-acceleration.md`, `a2-bayesian-ffn.md`.
 
 Layout (flat, minimal — no deep nesting):
 ```
@@ -76,7 +76,7 @@ PyTorch + `torch.distributions` for all milestones. No JAX for now. No TensorFlo
 
 ## Milestones (order matters)
 - **A0: DONE** — Deterministic miniGPT baseline on AG News. Reference: test_id_ppl=49.11, test_ood_ppl=540.28 (run `5dc45450e7b6458fbad2ec07dfd91ce3`). See `specs/a0-baseline-checklist.md`.
-- **A1: TUNING** — Bayesian output head — BayesianLinear on lm_head, ELBO training, uncertainty metrics (MI). Code + tests done (24 new, 38 total). Model: 41.8M params (25.7M Bayesian). Round 1 (`init_rho=-5`, 40K steps): MI ratio 1.36x but sigma grew slowly (0.007→0.224). Round 2 code ready: best-ELBO checkpoint, qualitative MI fix, sigma logging, `init_rho=-2` (σ=0.127). Config: 50K steps, kl_annealing=10K. Specs: `a1-bayesian-output-head.md`, `a1-kl-tuning.md`, `a1-tuning-round2.md`, `gpu-acceleration.md`.
+- **A1: DONE** — Bayesian output head — BayesianLinear on lm_head, ELBO training, uncertainty metrics (MI). Model: 41.8M params (25.7M Bayesian). Three training runs explored kl_weight (0.01–0.2), init_rho (-5 to -2), steps (5K–50K). **Best MI ratio: 1.36x** (R1 step 40K, σ=0.22). Conclusion: output head detects OOD at vocabulary level (1.2–1.4x MI ratio ceiling); FFN layers needed for semantic OOD detection. All infrastructure (ELBO, MC sampling, MI eval, sigma logging) validated and reusable. Specs: `a1-bayesian-output-head.md`, `a1-kl-tuning.md`, `a1-tuning-round2.md`, `gpu-acceleration.md`.
   - **First run (2026-02-25)**: OOM crash during uncertainty eval — fixed by streaming MC sampling (`_stream_metrics`). KL dominated training: 57M KL / 2.7M tokens = 21 nats swamping CE of ~6 (root cause: `weight_rho=-5` → σ≈0.007 vs `prior_std=1.0` → 4.5 nats/param × 12.8M params). Fix: cold posterior (`kl_weight=0.01`) + optional linear KL annealing (`kl_annealing_steps=200`). Sanity run with fixes confirmed: ELBO = CE(5.96) + weighted_KL(0.21) — 100x reduction. Results identical at 400 steps (too few to differentiate); bumped to 5000 steps for real run.
   - **MLflow fix**: stepless `log_metric` calls created single-point bar charts in UI. Moved all summary values (best_val_loss, perplexities, MI metrics, etc.) to `log_param` in both A0 and A1 scripts. Only step-aware time-series (train_loss, val_loss, lr, effective_kl_weight, etc.) stay as metrics.
   - **Config audit**: moved 8 categories of hardcoded values to YAML config: `eval.temperature`, `eval.sample_tokens` (wiring gap), `model.bayes.init_rho`, `eval.n_perplexity_batches`, `experiment.mlflow_uri`, `train.adam_beta1/adam_beta2`, `eval.qualitative_*` (prompts_per_category, max_new_tokens, seed), `train.checkpoint_dir`. All experiment scripts now read from config, no magic numbers.
@@ -287,6 +287,56 @@ Do not commit secrets or large binaries. Use `.env` (ignored) and provide `.env.
   - **Qualitative eval output**: console now prints summary line only (`Qualitative MI — ID: ... OOD: ... Ratio: ...`). Full per-prompt report still saved to MLflow artifact `qualitative_eval.txt`.
   - **Config for round 2** (`configs/a1_agnews.yaml`): `init_rho=-2.0`, `steps=50000`, `eval_interval=2000`, `checkpoint_interval=5000`, `kl_annealing_steps=10000`. Rest unchanged from round 1.
   - All 38 tests passing, ruff clean. **Ready for round 2 training run**.
+- **2026-02-26:** A1 tuning round 2 — training results (MLflow `5dff1029689942c4a08b0136c4647298`, 50K steps):
+  - **Config**: `init_rho=-2.0` (σ₀=0.127), `kl_weight=0.2`, `kl_annealing_steps=10000`, `steps=50000`, `batch_size=32`, `eval_interval=2000`, `checkpoint_interval=5000`, `warmup_steps=1000`. AMP active, 106K tok/s on RTX 4070 (~64 min).
+  - **Best ELBO at step 48000** (val CE=4.4875, val ELBO=4.7732). ELBO checkpoint selection working correctly — CE kept improving slightly past step 48K but ELBO (which includes KL) peaked there.
+  - **KL trajectory**: 20.2M → 3.85M (monotonically decreasing, as expected — posterior shrinking from init toward optimal). Much lower than round 1's final 15.7M because init_rho=-2 starts with larger σ (closer to prior), so KL starts lower.
+  - **Sigma statistics** (step 48K): mean=0.637, std=0.213, median=0.706, range=[0.111, 0.919], p5=0.298, p95=0.870. Posterior is ~64% as wide as the prior (σ=1.0) — much wider than round 1's 0.224.
+  - **Uncertainty metrics** (N=30 MC samples):
+    - MI: ID=0.317, OOD=0.387, **ratio=1.22x**
+    - Predictive entropy: ID=3.70, OOD=4.59
+    - Expected entropy: ID=3.38, OOD=4.20
+    - Flip rate: ID=28.5%, OOD=31.7%
+  - **Perplexity** (mean weights): test_id=65.83, test_ood=1069.33 (16.2x ratio)
+  - **Qualitative MI** (prompt-token scoring, fixed methodology):
+    - Sci/Tech: avg MI ≈ 0.42 (highest — most specialized vocabulary)
+    - Business: avg MI ≈ 0.37
+    - World: avg MI ≈ 0.30
+    - Sports: avg MI ≈ 0.31
+    - Overall: ID=0.307, OOD=0.394, ratio=1.28x
+  - **Qualitative MI shows a real category gradient** — Sci/Tech (jargon-heavy) is most detectable, Business intermediate, World/Sports (seen in training) lowest. This confirms the output head detects unfamiliar *vocabulary*, not unfamiliar *concepts*.
+
+- **2026-02-26:** A1 conclusion — cross-round analysis and architectural ceiling:
+
+  **Three-run comparison table:**
+
+  | Run | init_rho | σ final | MI (ID) | MI (OOD) | MI ratio | ID ppl | OOD ppl | Notes |
+  |-----|----------|---------|---------|----------|----------|--------|---------|-------|
+  | R0 (first run) | -5 | — | 0.024 | 0.025 | 1.07x | 65.6 | 630 | kl_weight=0.01, posterior collapse |
+  | R1 (step 40K) | -5 | 0.224 | 0.293 | 0.398 | **1.36x** | 56.3 | 1477 | kl_weight=0.2, best MI ratio |
+  | R1 (step 8K) | -5 | 0.049 | 0.146 | 0.188 | 1.29x | 60.1 | 733 | CE-selected checkpoint |
+  | **R2 (step 48K)** | **-2** | **0.637** | **0.317** | **0.387** | **1.22x** | **65.8** | **1069** | **ELBO-selected checkpoint** |
+
+  **Finding 1 — Optimal sigma window.** There is a sweet spot around σ ≈ 0.1–0.3 for the output head. Below it (R0, σ → 0): posterior collapse, MI ≈ 0. Above it (R2, σ = 0.64): noise is uniform across all tokens, MI is high everywhere (both ID and OOD), so the ratio drops. R1 at step 40K (σ = 0.22) hit the sweet spot accidentally — enough variance for MC samples to disagree on OOD tokens, but not so much that ID predictions become noisy too.
+
+  **Finding 2 — Higher sigma hurts ID perplexity.** R2 (σ=0.64): test_id_ppl=65.8, R1 (σ=0.22): test_id_ppl=56.3, A0 (deterministic): test_id_ppl=49.1. Each increase in posterior width costs prediction quality. The posterior is too diffuse to make confident predictions — the KL term pushes σ toward the prior (1.0), overpowering the CE signal that wants narrow posteriors.
+
+  **Finding 3 — The output head has a structural ceiling for OOD detection.** Across three runs spanning very different hyperparameters (kl_weight 0.01–0.2, init_rho -5 to -2, steps 5K–50K), the MI ratio stays in the **1.2–1.4x band** (excluding the collapsed R0). The output head is a linear projection from hidden states to vocabulary — it can only express uncertainty about the token-level mapping, not about content semantics. The factual knowledge about *what topics the model has seen* lives in the FFN layers (and to some extent attention), not in the vocabulary projection.
+
+  **Finding 4 — Qualitative MI confirms the vocabulary-level limitation.** The category gradient (Sci/Tech > Business > World ≈ Sports) tracks vocabulary specialization, not conceptual novelty. Sci/Tech articles contain domain-specific terms (technical jargon) that the output head has rarely mapped from hidden states → high MI. Business uses more general vocabulary → lower MI. This is consistent with the output head detecting OOD at the lexical level only.
+
+  **Finding 5 — Infrastructure validated.** All A1 machinery is working correctly and reusable for A2:
+  - ELBO training with KL annealing ✓
+  - Best-ELBO checkpoint selection ✓
+  - MC sampling uncertainty eval (streaming, AMP-compatible) ✓
+  - MI / flip rate / entropy metrics ✓
+  - Qualitative prompt-panel scoring (prompt tokens, not generations) ✓
+  - Sigma summary logging ✓
+  - Gradient accumulation infrastructure ✓
+
+  **Decision: A1 is DONE. Move to A2 (Bayesian FFN layers).**
+
+  Best A1 result: **MI ratio 1.36x** (R1 step 40K, σ=0.22). This is a positive but modest OOD signal from the output head alone. The hypothesis — that Bayesian weight uncertainty produces higher MI on OOD text — is confirmed directionally. The magnitude should increase substantially with A2, where FFN layers (which store factual/topical knowledge) become Bayesian.
 
 ## Future Work (Non-Bayesian — Parked)
 These are architectural improvements to revisit **after** Bayesian milestones (A1/A2) are done. Not in scope now — the current miniGPT is intentionally basic to keep focus on Bayesian aspects.
