@@ -5,7 +5,8 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "bayesian-llm"
 version = "0.1.0"
-description = "Minimal experiments for Bayesian methods in LLMs."
+description = "Estimating epistemic uncertainty in language models via Bayesian inference over weights."
+license = "MIT"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

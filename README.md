@@ -1,54 +1,35 @@
-# Bayesian LLM Experiments
+# Bayesian LLM
 
-Minimal, hands-on experiments for Bayesian methods in LLMs. The two PDFs in `docs/` are the theory baseline and should guide implementation choices.
+Estimating **epistemic uncertainty** in language models via Bayesian inference over weights.
 
-## Quickstart (uv + Python 3.12)
+Replace point-estimate weights with learned posterior distributions (mean + variance per weight). Sample weights multiple times, measure how much predictions disagree — that disagreement (mutual information) is the model's epistemic uncertainty. High MI on a given input means the model knows it doesn't know.
+
+## Approach
+
+Start with a small GPT (4-layer, 256-dim) trained on a topic-split corpus (AG News). Train on World + Sports articles; hold out Business + Sci/Tech as OOD. Progressively make layers Bayesian, measure whether MI separates ID from OOD text.
+
+## Results so far
+
+| Milestone | What's Bayesian | MI ratio (OOD/ID) | Status |
+|-----------|----------------|-------------------|--------|
+| **A0** | Nothing (baseline) | — | Done |
+| **A1** | Output head | 1.36x | Done |
+| **A2** | FFN layers | **1.70x** | Tuning |
+
+**A2 highlights:** 4.2M Bayesian params (out of 20M total). Posteriors learned meaningful structure — sigma ranges from 0.04 (confident weights) to 0.97 (uncertain, near prior). MI cleanly separates all four categories. FFN captures topic-level uncertainty, not just vocabulary.
+
+## Quick start
+
 ```bash
-uv venv
 uv sync
-uv run python experiments/a0_baseline.py
+python experiments/a0_baseline.py --config configs/a0_agnews.yaml        # deterministic baseline
+python experiments/a2_bayes_ffn.py --config configs/a2_agnews.yaml       # Bayesian FFN
+uv run pytest tests/ -v                                                   # 28 tests
 ```
 
+Requires Python 3.12+ and CUDA-enabled PyTorch for GPU training.
 
-## Dataset
-TinyShakespeare (~1.1 MB, ~304k BPE tokens) — auto-downloaded on first run to `data/tinyshakespeare.txt`.
+## Next steps
 
-## Tokenizer
-GPT-2 BPE via `tiktoken` (vocab_size=50,257).
-
-## Experiment Tracking (MLflow)
-All runs are logged to a local SQLite-backed MLflow store (`mlflow.db`).
-
-View results:
-```bash
-uv run mlflow ui --backend-store-uri sqlite:///mlflow.db
-```
-Then open http://127.0.0.1:5000. Use `--no-mlflow` flag on experiment scripts to disable tracking.
-
-## Framework Choice
-PyTorch with `torch.distributions` for Bayesian layers and ELBO/KL wiring. Dependencies managed with uv.
-
-## Experiments
-- **A0:** Deterministic miniGPT baseline (`uv run python experiments/a0_baseline.py`)
-- **A1:** Bayesian output head (planned)
-- **A2:** Bayesian FFN layers + OOD evaluation (planned)
-- **B1:** Bayesian LoRA on existing model (later)
-
-## Repo Structure
-```
-minigpt/          # Python package
-  layers.py       # Bayesian layers (BayesianLinear, reparameterization trick, KL)
-  model.py        # MiniGPT (CausalSelfAttention, MLP, Block, MiniGPT)
-  data.py         # TinyShakespeare download + BPE tokenization
-  train.py        # Training loop with perplexity, checkpoints, MLflow
-  evaluate.py     # Perplexity computation + text generation
-  uncertainty.py  # Epistemic uncertainty (Phase 2)
-experiments/      # Runnable .py scripts
-tests/            # pytest tests
-data/             # Local datasets + checkpoints (gitignored)
-docs/             # Theory references
-specs/            # Project spec and decision notes
-```
-
-## Notes
-See `NOTES.md` for running decisions and experiment logs.
+- Further A2 tuning (prior_std, kl_weight)
+- **B1:** Bayesian LoRA on an open-weight LLM — scale from toy model to real
