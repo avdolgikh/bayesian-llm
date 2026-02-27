@@ -9,3 +9,7 @@ __pycache__/
 *.ckpt
 *.log
 *.egg-info/
+mlflow.db
+mlflow.db-journal
+/mlruns/
+.env
