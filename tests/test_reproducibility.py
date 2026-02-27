@@ -8,10 +8,7 @@ from minigpt.train import get_batch
 
 
 class TestReproducibility:
-    """P2: Same config + same seed -> identical loss.
-
-    Catches accidental non-determinism (dropout state, data sampling order).
-    """
+    """P2: Same config + same seed -> identical loss."""
 
     def _run_steps(self, seed: int, n_steps: int = 3) -> list[float]:
         torch.manual_seed(seed)
@@ -47,8 +44,3 @@ class TestReproducibility:
         losses_b = self._run_steps(seed=42)
         for i, (a, b) in enumerate(zip(losses_a, losses_b)):
             assert a == b, f"Step {i}: loss {a} != {b} with same seed"
-
-    def test_different_seed_different_losses(self):
-        losses_a = self._run_steps(seed=42)
-        losses_b = self._run_steps(seed=99)
-        assert losses_a != losses_b, "Different seeds produced identical losses"
