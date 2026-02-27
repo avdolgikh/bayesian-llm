@@ -167,8 +167,6 @@ def run_experiment(milestone: str, description: str = "Bayesian experiment") -> 
     ap.add_argument("--set", dest="overrides", action="append", default=[],
                     metavar="key=value", help="Dot-notation config override (repeatable)")
     ap.add_argument("--no-mlflow", action="store_true", help="Disable MLflow logging")
-    ap.add_argument("--log-model", action="store_true",
-                    help="Log model artifact + checkpoint to MLflow (heavy, off by default)")
     args = ap.parse_args()
 
     # --- Build config: defaults → YAML → CLI overrides ---
@@ -403,14 +401,6 @@ def run_experiment(milestone: str, description: str = "Bayesian experiment") -> 
         if use_mlflow:
             mlflow.log_text(report, "qualitative_eval.txt")
             mlflow.log_text(json.dumps(qual_results, indent=2), "qualitative_metrics.json")
-
-        # --- Log model + checkpoint (opt-in) ---
-        if use_mlflow and args.log_model:
-            mlflow.pytorch.log_model(model, "model")
-            ckpt_dir = cfg["train"].get("checkpoint_dir", "data/checkpoints")
-            best_ckpt = Path(ckpt_dir) / "ckpt_best.pt"
-            if best_ckpt.exists():
-                mlflow.log_artifact(str(best_ckpt))
 
         # --- Final KL ---
         final_kl = model.kl_loss().item()
