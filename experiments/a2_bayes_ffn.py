@@ -1,7 +1,8 @@
-"""A1 — Bayesian output head on AG News (BPE).
+"""A2 — Bayesian FFN layers on AG News (BPE).
 
-Trains miniGPT with BayesianLinear lm_head (ELBO loss), evaluates perplexity
-and epistemic uncertainty (MI) on ID vs OOD splits, runs qualitative prompt panel.
+Trains miniGPT with BayesianLinear in FFN (MLP.fc + MLP.proj) across all blocks.
+Output head is deterministic (weight-tied). Evaluates perplexity and epistemic
+uncertainty (MI) on ID vs OOD splits, runs qualitative prompt panel.
 """
 
 import argparse
@@ -30,6 +31,7 @@ from minigpt.train import load_checkpoint, train
 from minigpt.uncertainty import compute_uncertainty_metrics, score_sequence
 
 # --- Curated prompts for qualitative evaluation ---
+
 
 def _select_prompts(
     samples: list[tuple[int, str, str]],
@@ -61,7 +63,7 @@ def _run_qualitative_eval(
     prompts: list[dict],
     id_categories: list[int],
     device: torch.device,
-    n_samples: int = 30,
+    n_samples: int = 20,
     max_new_tokens: int = 100,
 ) -> str:
     """Generate + score prompts, return formatted text report."""
@@ -127,7 +129,7 @@ def _run_qualitative_eval(
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description="A1 Bayesian output head")
+    p = argparse.ArgumentParser(description="A2 Bayesian FFN layers")
     p.add_argument("--config", type=str, default=None, help="Path to YAML config file")
     p.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume from")
     p.add_argument("--set", dest="overrides", action="append", default=[],
@@ -165,7 +167,6 @@ def main() -> None:
     gpt_config = build_gpt_config(cfg, vocab_size=tokenizer.n_vocab)
     model = MiniGPT(gpt_config)
     n_params = sum(p.numel() for p in model.parameters())
-    # TODO: rename to ~ "bayes_weight_mu", etc. ??
     n_bayes_params = sum(
         p.numel() for name, p in model.named_parameters()
         if "weight_mu" in name or "weight_rho" in name
@@ -173,6 +174,7 @@ def main() -> None:
     )
     print(f"Model parameters: {n_params:,} (Bayesian: {n_bayes_params:,})")
     print(f"Bayesian head: {gpt_config.bayes_head.enabled}")
+    print(f"Bayesian FFN: {gpt_config.bayes_ffn.enabled}")
 
     # --- Device ---
     device_str = cfg["train"]["device"]
@@ -192,8 +194,17 @@ def main() -> None:
 
     # --- Train config ---
     train_cfg = build_train_config(cfg)
-    bayes_cfg = gpt_config.bayes_head
     num_train_tokens = len(train_data)
+
+    # KL weight comes from whichever Bayesian config is active (FFN or head)
+    bayes_ffn_cfg = gpt_config.bayes_ffn
+    bayes_head_cfg = gpt_config.bayes_head
+    if bayes_ffn_cfg.enabled:
+        kl_weight = bayes_ffn_cfg.kl_weight
+    elif bayes_head_cfg.enabled:
+        kl_weight = bayes_head_cfg.kl_weight
+    else:
+        kl_weight = 0.0
 
     # --- MLflow ---
     use_mlflow = not args.no_mlflow
@@ -218,7 +229,7 @@ def main() -> None:
         # --- Tags ---
         if use_mlflow:
             mlflow.set_tag("dataset", cfg["data"]["dataset"])
-            mlflow.set_tag("milestone", "a1")
+            mlflow.set_tag("milestone", "a2")
             if torch.cuda.is_available():
                 mlflow.set_tag("gpu", torch.cuda.get_device_name())
 
@@ -228,7 +239,7 @@ def main() -> None:
             mlflow_run=run if use_mlflow else None,
             config_dict=cfg,
             resume_ckpt=resume_ckpt,
-            kl_weight=bayes_cfg.kl_weight,
+            kl_weight=kl_weight,
             num_train_tokens=num_train_tokens,
         )
 
@@ -305,7 +316,7 @@ def main() -> None:
             mlflow.log_text(sample, "generated_sample.txt")
 
         # --- Uncertainty evaluation ---
-        n_samples = cfg["eval"].get("num_samples", 30)
+        n_samples = cfg["eval"].get("num_samples", 20)
         print(f"\nUncertainty evaluation (N={n_samples} MC samples)...")
 
         mi_id = compute_uncertainty_metrics(
@@ -395,7 +406,7 @@ def main() -> None:
             summary = (
                 f"{cfg['experiment']['name']}, "
                 f"{cfg['model']['n_layer']}L/{cfg['model']['n_head']}H/{cfg['model']['n_embd']}d, "
-                f"{cfg['data']['dataset']}, bayes_head=True, "
+                f"{cfg['data']['dataset']}, bayes_ffn=True, "
                 f"best_val={train_meta['best_val_loss']:.4f}, "
                 f"test_id_ppl={test_id_ppl:.2f}, "
                 f"mi_id={mi_id['mi_mean']:.4f}"

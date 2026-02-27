@@ -30,7 +30,13 @@ DEFAULT_CONFIG: dict = {
         "n_embd": 256,
         "dropout": 0.2,
         "bias": True,
-        "bayes": {
+        "bayes_head": {
+            "enabled": False,
+            "prior_std": 1.0,
+            "kl_weight": 1.0,
+            "init_rho": -1.0,
+        },
+        "bayes_ffn": {
             "enabled": False,
             "prior_std": 1.0,
             "kl_weight": 1.0,
@@ -126,13 +132,22 @@ def apply_overrides(cfg: dict, overrides: list[str]) -> dict:
     return cfg
 
 
+def _build_bayes_config(d: dict) -> BayesConfig:
+    """Build a BayesConfig from a config sub-dict."""
+    return BayesConfig(
+        enabled=d.get("enabled", False),
+        prior_std=d.get("prior_std", 1.0),
+        kl_weight=d.get("kl_weight", 1.0),
+        init_rho=d.get("init_rho", -5.0),
+    )
+
+
 def build_gpt_config(cfg: dict, vocab_size: int) -> GPTConfig:
     """Construct a GPTConfig from the merged config dict.
 
     ``vocab_size`` comes from the tokenizer, never from the config file.
     """
     m = cfg["model"]
-    bayes_d = m.get("bayes", {})
     return GPTConfig(
         vocab_size=vocab_size,
         block_size=m["block_size"],
@@ -141,12 +156,8 @@ def build_gpt_config(cfg: dict, vocab_size: int) -> GPTConfig:
         n_embd=m["n_embd"],
         dropout=m["dropout"],
         bias=m["bias"],
-        bayes=BayesConfig(
-            enabled=bayes_d.get("enabled", False),
-            prior_std=bayes_d.get("prior_std", 1.0),
-            kl_weight=bayes_d.get("kl_weight", 1.0),
-            init_rho=bayes_d.get("init_rho", -5.0),
-        ),
+        bayes_head=_build_bayes_config(m.get("bayes_head", {})),
+        bayes_ffn=_build_bayes_config(m.get("bayes_ffn", {})),
     )
 
 

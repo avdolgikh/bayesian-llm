@@ -55,17 +55,17 @@ A2 is **smaller** than A1 because weight tying is restored (the head shares weig
 
 ### 3.1. GPTConfig — Separate Bayes Configs per Component
 
-Currently, `GPTConfig.bayes` controls only the output head. For A2, we need to separately configure FFN layers. Add a new field:
+Currently, `GPTConfig.bayes` controls only the output head and is ambiguously named. For A2, we rename it to `bayes_head` for clarity and add `bayes_ffn`:
 
 ```python
 @dataclass
 class GPTConfig:
     ...
-    bayes: BayesConfig = field(default_factory=BayesConfig)       # output head
+    bayes_head: BayesConfig = field(default_factory=BayesConfig)  # output head
     bayes_ffn: BayesConfig = field(default_factory=BayesConfig)   # FFN in transformer blocks
 ```
 
-- `bayes` controls `lm_head` (same as A1, backward-compatible)
+- `bayes_head` controls `lm_head` (renamed from `bayes` for clarity)
 - `bayes_ffn` controls `MLP.fc` and `MLP.proj` in every `Block`
 - Attention always deterministic (future work)
 
@@ -73,26 +73,14 @@ class GPTConfig:
 
 Current signature: `Block(config, bayes)` — passes same `bayes` to both `CausalSelfAttention` and `MLP`.
 
-New signature: separate routing. Two options (pick during implementation):
+New signature — explicit params (Option A chosen for flexibility with future attention-Bayesian experiments):
 
-**Option A — explicit params:**
 ```python
 class Block(nn.Module):
     def __init__(self, config: GPTConfig, bayes_attn: BayesConfig, bayes_ffn: BayesConfig):
         self.attn = CausalSelfAttention(config, bayes_attn)
         self.mlp = MLP(config, bayes_ffn)
 ```
-
-**Option B — read from GPTConfig:**
-```python
-class Block(nn.Module):
-    def __init__(self, config: GPTConfig):
-        no_bayes = BayesConfig(enabled=False)
-        self.attn = CausalSelfAttention(config, no_bayes)  # always deterministic
-        self.mlp = MLP(config, config.bayes_ffn)
-```
-
-Option B is simpler (Block only takes `config`), but Option A is more flexible for future attention-Bayesian experiments. **Recommendation: Option A**, since the infrastructure is already designed to pass explicit `BayesConfig` objects.
 
 ### 3.3. MiniGPT — Wiring
 
@@ -105,14 +93,14 @@ class MiniGPT(nn.Module):
             Block(config, bayes_attn=no_bayes, bayes_ffn=config.bayes_ffn)
             for _ in range(config.n_layer)
         ])
-        self.lm_head = make_linear(config.n_embd, config.vocab_size, config.bayes, bias=False)
+        self.lm_head = make_linear(config.n_embd, config.vocab_size, config.bayes_head, bias=False)
 
         # Weight tying: only when head is deterministic
-        if not config.bayes.enabled:
+        if not config.bayes_head.enabled:
             self.lm_head.linear.weight = self.token_emb.weight
 ```
 
-For A2: `config.bayes.enabled = False` (head deterministic, weight-tied), `config.bayes_ffn.enabled = True` (FFN Bayesian).
+For A2: `config.bayes_head.enabled = False` (head deterministic, weight-tied), `config.bayes_ffn.enabled = True` (FFN Bayesian).
 
 ### 3.4. `forward_body()` — No Longer a Shortcut
 
@@ -146,7 +134,7 @@ model:
   n_embd: 256
   dropout: 0.2
   bias: true
-  bayes:
+  bayes_head:
     enabled: false            # head deterministic — weight tying restored
   bayes_ffn:
     enabled: true
@@ -186,43 +174,41 @@ eval:
 
 ### 4.2. DEFAULT_CONFIG Update
 
-Add `bayes_ffn` block (default disabled):
+Add `bayes_ffn` block (default disabled), rename `bayes` → `bayes_head`:
 
 ```python
 "model": {
     ...
-    "bayes": { "enabled": False, ... },
+    "bayes_head": { "enabled": False, ... },
     "bayes_ffn": { "enabled": False, "prior_std": 1.0, "kl_weight": 1.0, "init_rho": -1.0 },
 }
 ```
 
 ### 4.3. Config Builder — `build_gpt_config()`
 
-Extend to read `bayes_ffn` from config dict and pass to `GPTConfig`:
+Extend to read `bayes_head` and `bayes_ffn` from config dict via shared helper:
 
 ```python
+def _build_bayes_config(d: dict) -> BayesConfig:
+    return BayesConfig(
+        enabled=d.get("enabled", False),
+        prior_std=d.get("prior_std", 1.0),
+        kl_weight=d.get("kl_weight", 1.0),
+        init_rho=d.get("init_rho", -5.0),
+    )
+
 def build_gpt_config(cfg: dict, vocab_size: int) -> GPTConfig:
     m = cfg["model"]
-    bayes_d = m.get("bayes", {})
-    ffn_d = m.get("bayes_ffn", {})
     return GPTConfig(
         ...,
-        bayes=BayesConfig(
-            enabled=bayes_d.get("enabled", False),
-            ...
-        ),
-        bayes_ffn=BayesConfig(
-            enabled=ffn_d.get("enabled", False),
-            prior_std=ffn_d.get("prior_std", 1.0),
-            kl_weight=ffn_d.get("kl_weight", 1.0),
-            init_rho=ffn_d.get("init_rho", -1.0),
-        ),
+        bayes_head=_build_bayes_config(m.get("bayes_head", {})),
+        bayes_ffn=_build_bayes_config(m.get("bayes_ffn", {})),
     )
 ```
 
 ### 4.4. Backward Compatibility
 
-Existing A0/A1 configs don't have `bayes_ffn`. The `DEFAULT_CONFIG` sets `bayes_ffn.enabled: false` by default. `build_gpt_config` uses `.get()` with fallbacks. All existing configs continue to work without modification. The only YAML change needed for existing configs is adding `bayes_ffn` with `enabled: false` per the explicit-config rule.
+All existing A0/A1 configs updated: `bayes` renamed to `bayes_head`, `bayes_ffn` added with `enabled: false`. `DEFAULT_CONFIG` and `build_gpt_config` use `.get()` with fallbacks, so configs missing either key still work.
 
 ---
 
@@ -396,13 +382,13 @@ The script should be a copy-and-adapt of `a1_bayes_output.py`, not a shared func
 
 ### 9.1. Existing Tests — Must Continue Passing
 
-All 38 existing tests must pass. The key risk is `test_bayesian.py`, which tests selective Bayesian architecture (6 tests). These tests construct models with `bayes.enabled=True/False` and check which layers are `BayesianLinear`. They need to be updated to account for the new `bayes_ffn` field.
+All 38 existing tests must pass. The key risk is `test_bayesian.py`, which tests selective Bayesian architecture (6 tests). These tests construct models with `bayes_head.enabled=True/False` and check which layers are `BayesianLinear`. They need to be updated to account for the new `bayes_ffn` field.
 
 ### 9.2. New Tests
 
 **Architecture tests (in `test_bayesian.py`):**
 - FFN-only Bayesian: confirm `MLP.fc` and `MLP.proj` are `BayesianLinear` in each block, attention linears are `DeterministicLinear`, head is `DeterministicLinear`.
-- Weight tying: when `bayes.enabled=False` and `bayes_ffn.enabled=True`, confirm `lm_head.linear.weight is model.token_emb.weight`.
+- Weight tying: when `bayes_head.enabled=False` and `bayes_ffn.enabled=True`, confirm `lm_head.linear.weight is model.token_emb.weight`.
 - Combined (FFN + head): both FFN linears and head are `BayesianLinear`, no weight tying.
 - KL non-negativity: same tests as A1 but with FFN-only Bayesian config.
 - Sampling variance: FFN outputs differ across forward passes (body is stochastic).
@@ -419,7 +405,7 @@ All 38 existing tests must pass. The key risk is `test_bayesian.py`, which tests
 ### Step 1: Config + Architecture (model.py, layers.py, config.py)
 - Add `bayes_ffn` field to `GPTConfig` (default disabled).
 - Change `Block.__init__` to accept separate `bayes_attn` and `bayes_ffn` params.
-- Update `MiniGPT.__init__` to wire `config.bayes_ffn` to blocks and `config.bayes` to head.
+- Update `MiniGPT.__init__` to wire `config.bayes_ffn` to blocks and `config.bayes_head` to head.
 - Update `DEFAULT_CONFIG` with `bayes_ffn` section.
 - Update `build_gpt_config()` to read `bayes_ffn` from YAML.
 - Add `bayes_ffn: { enabled: false, ... }` to all existing YAML configs (explicit-config rule).
@@ -488,7 +474,7 @@ After validating FFN-only, we can optionally run a combined experiment:
 
 ```yaml
 model:
-  bayes:
+  bayes_head:
     enabled: true             # head Bayesian (no weight tying)
     init_rho: -4.0            # keep head sigma small — not the main signal
   bayes_ffn:

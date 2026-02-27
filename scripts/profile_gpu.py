@@ -138,8 +138,9 @@ def main():
     print(f"GPU: {gpu_name} ({total_vram:.0f} MB)")
     print(f"Model: {cfg['model']['n_layer']}L/{cfg['model']['n_head']}H/{cfg['model']['n_embd']}d")
     print(f"Block size: {cfg['train']['block_size']}")
-    bayes_enabled = cfg.get("model", {}).get("bayes", {}).get("enabled", False)
-    print(f"Bayesian: {bayes_enabled}")
+    bayes_head = cfg.get("model", {}).get("bayes_head", {}).get("enabled", False)
+    bayes_ffn = cfg.get("model", {}).get("bayes_ffn", {}).get("enabled", False)
+    print(f"Bayesian head: {bayes_head}, FFN: {bayes_ffn}")
 
     import tiktoken
     enc = tiktoken.get_encoding("gpt2")

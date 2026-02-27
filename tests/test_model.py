@@ -16,7 +16,7 @@ def _small_config() -> GPTConfig:
         n_embd=64,
         dropout=0.0,
         bias=True,
-        bayes=BayesConfig(enabled=False),
+        bayes_head=BayesConfig(enabled=False),
     )
 
 

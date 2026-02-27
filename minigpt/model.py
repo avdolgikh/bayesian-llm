@@ -22,7 +22,8 @@ class GPTConfig:
     n_embd: int = 128
     dropout: float = 0.1
     bias: bool = True
-    bayes: BayesConfig = field(default_factory=BayesConfig)
+    bayes_head: BayesConfig = field(default_factory=BayesConfig)   # output head
+    bayes_ffn: BayesConfig = field(default_factory=BayesConfig)   # FFN in transformer blocks
 
 
 class CausalSelfAttention(nn.Module):
@@ -73,12 +74,14 @@ class MLP(nn.Module):
 
 
 class Block(nn.Module):
-    def __init__(self, config: GPTConfig, bayes: BayesConfig) -> None:
+    def __init__(
+        self, config: GPTConfig, bayes_attn: BayesConfig, bayes_ffn: BayesConfig,
+    ) -> None:
         super().__init__()
         self.ln1 = nn.LayerNorm(config.n_embd)
-        self.attn = CausalSelfAttention(config, bayes)
+        self.attn = CausalSelfAttention(config, bayes_attn)
         self.ln2 = nn.LayerNorm(config.n_embd)
-        self.mlp = MLP(config, bayes)
+        self.mlp = MLP(config, bayes_ffn)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = x + self.attn(self.ln1(x))
@@ -94,17 +97,20 @@ class MiniGPT(nn.Module):
         self.pos_emb = nn.Embedding(config.block_size, config.n_embd)
         self.drop = nn.Dropout(config.dropout)
 
-        # Transformer blocks: always deterministic (A1 — only lm_head is Bayesian)
+        # Transformer blocks: attention always deterministic, FFN configurable
         no_bayes = BayesConfig(enabled=False)
-        self.blocks = nn.ModuleList([Block(config, no_bayes) for _ in range(config.n_layer)])
+        self.blocks = nn.ModuleList([
+            Block(config, bayes_attn=no_bayes, bayes_ffn=config.bayes_ffn)
+            for _ in range(config.n_layer)
+        ])
 
         self.ln_f = nn.LayerNorm(config.n_embd)
 
         # Output head: gets the real bayes config
-        self.lm_head = make_linear(config.n_embd, config.vocab_size, config.bayes, bias=False)
+        self.lm_head = make_linear(config.n_embd, config.vocab_size, config.bayes_head, bias=False)
 
         # Weight tying (GPT-2 style) — only when lm_head is deterministic
-        if not config.bayes.enabled:
+        if not config.bayes_head.enabled:
             self.lm_head.linear.weight = self.token_emb.weight
 
         self.apply(self._init_weights)

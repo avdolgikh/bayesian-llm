@@ -104,7 +104,7 @@ def main() -> None:
     ckpt = load_checkpoint(ckpt_path, model)
     step = ckpt.get("step", "?")
     print(f"\nLoaded checkpoint: {ckpt_path} (step {step})")
-    print(f"Bayesian head: {gpt_config.bayes.enabled}")
+    print(f"Bayesian head: {gpt_config.bayes_head.enabled}")
 
     # --- Device ---
     device_str = cfg["train"]["device"]

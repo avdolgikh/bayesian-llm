@@ -15,7 +15,7 @@ minigpt/          # Python package — all model-related code
   config.py       # YAML config ↔ dataclass bridge
   uncertainty.py  # Epistemic uncertainty measurement (Phase 2)
 configs/          # YAML config files for experiments
-experiments/      # Runnable .py scripts (a0_baseline, a1_bayes_output, etc.)
+experiments/      # Runnable .py scripts (a0_baseline, a1_bayes_output, a2_bayes_ffn, etc.)
 scripts/          # Utility scripts (dump_mlflow_run, profile_gpu, etc.)
 tests/            # pytest tests
 data/             # Local datasets (gitignored; document provenance in README.md)
@@ -81,7 +81,7 @@ PyTorch + `torch.distributions` for all milestones. No JAX for now. No TensorFlo
   - **MLflow fix**: stepless `log_metric` calls created single-point bar charts in UI. Moved all summary values (best_val_loss, perplexities, MI metrics, etc.) to `log_param` in both A0 and A1 scripts. Only step-aware time-series (train_loss, val_loss, lr, effective_kl_weight, etc.) stay as metrics.
   - **Config audit**: moved 8 categories of hardcoded values to YAML config: `eval.temperature`, `eval.sample_tokens` (wiring gap), `model.bayes.init_rho`, `eval.n_perplexity_batches`, `experiment.mlflow_uri`, `train.adam_beta1/adam_beta2`, `eval.qualitative_*` (prompts_per_category, max_new_tokens, seed), `train.checkpoint_dir`. All experiment scripts now read from config, no magic numbers.
   - **train.py refactor**: replaced vague `num_train_tokens > 0` guard with explicit `is_bayesian = kl_weight > 0` flag. Collapsed `kl_weight/num_train_tokens` into `kl_scale` in `estimate_loss`. Added validation: `num_train_tokens` must be > 0 when `kl_weight > 0`. Deterministic path (A0) now has zero KL overhead — no `model.kl_loss()` call.
-- **A2:** Bayesian FFN layers — replace FFN linears, in-distribution vs OOD epistemic uncertainty evaluation
+- **A2: CODE READY** — Bayesian FFN layers (MLP.fc + MLP.proj, 4 blocks). ~20M params (4.2M Bayesian, weight-tied head). Dual-path MC sampling auto-detects body vs head Bayesian. 15 new tests (53 total). Spec: `a2-bayesian-ffn.md`. Config: `init_rho=-3`, `kl_weight=0.2`, `kl_annealing=10K`, `steps=50K`, `num_samples=20`. Pending training run.
 - **B1 (later, separate track):** Bayesian LoRA on an existing open-weight LLM
 
 ## Bayesian Layer Strategy
@@ -105,8 +105,10 @@ Experiments use a YAML config pipeline: `DEFAULT_CONFIG → YAML file → CLI ov
 - **`minigpt/config.py`** — `DEFAULT_CONFIG` dict with all defaults, plus helpers: `load_yaml`, `deep_merge`, `apply_overrides` (dot-notation), `build_gpt_config`, `build_train_config`, `validate_config`, `config_to_flat_params`.
 - **`configs/a0_baseline.yaml`** — reference config for A0 baseline (TinyShakespeare, matches defaults).
 - **`configs/a0_agnews.yaml`** — AG News config (fully explicit — all settings, 5000 steps, 500 warmup, ID=[1,2], OOD=[3,4]).
-- **`configs/a1_agnews.yaml`** — A1 Bayesian output head on AG News. `bayes.enabled: true`, `prior_std: 1.0`, `kl_weight: 0.2`, `init_rho: -2.0`, `steps: 50000`, `kl_annealing_steps: 10000`, `eval.num_samples: 30`, `eval_interval: 2000`, `checkpoint_interval: 5000`.
+- **`configs/a1_agnews.yaml`** — A1 Bayesian output head on AG News. `bayes_head.enabled: true`, `prior_std: 1.0`, `kl_weight: 0.2`, `init_rho: -2.0`, `steps: 50000`, `kl_annealing_steps: 10000`, `eval.num_samples: 30`, `eval_interval: 2000`, `checkpoint_interval: 5000`.
+- **`configs/a2_agnews.yaml`** — A2 Bayesian FFN on AG News. `bayes_head.enabled: false` (weight-tied), `bayes_ffn.enabled: true`, `prior_std: 1.0`, `kl_weight: 0.2`, `init_rho: -3.0`, `steps: 50000`, `kl_annealing_steps: 10000`, `eval.num_samples: 20`.
 - `vocab_size` always comes from the tokenizer, never from config files.
+- Config key `model.bayes` was renamed to `model.bayes_head` in A2 for clarity. `model.bayes_ffn` added for FFN-layer Bayesian config.
 - **PyYAML gotcha:** scientific notation without a decimal point (e.g. `3e-4`) is parsed as a **string**, not float. Always write `3.0e-4` or `0.0003` in YAML files.
 
 ### Experiment CLI
@@ -138,6 +140,7 @@ Checkpoints save full config dict, `best_val_loss`, torch/CUDA RNG states. On re
 - `uv run ruff check minigpt/ experiments/ tests/` (lint)
 - `python experiments/a0_baseline.py` (training — global env, GPU)
 - `python experiments/a1_bayes_output.py --config configs/a1_agnews.yaml` (A1 Bayesian training)
+- `python experiments/a2_bayes_ffn.py --config configs/a2_agnews.yaml` (A2 Bayesian FFN training)
 - `python scripts/profile_gpu.py --config configs/a1_agnews.yaml` (GPU throughput profiling)
 - `python scripts/dump_mlflow_run.py <run_id>` (inspect MLflow run)
 - `python scripts/eval_checkpoint.py <ckpt_path> --config <yaml>` (uncertainty + sigma stats on any checkpoint)
@@ -168,7 +171,9 @@ tests/
   test_reproducibility.py # P2: same seed = identical losses (2 tests)
   test_bayesian.py       # A1: KL non-negativity (4), sampling variance (4),
                          #     frozen sampling (4), selective Bayesian (6),
-                         #     MI invariants (6) — 24 tests total
+                         #     MI invariants (6)
+                         # A2: FFN Bayesian (8), combined (3),
+                         #     body detection (4) — 39 tests total
 ```
 
 ## Commit & Pull Request Guidelines
@@ -337,6 +342,19 @@ Do not commit secrets or large binaries. Use `.env` (ignored) and provide `.env.
   **Decision: A1 is DONE. Move to A2 (Bayesian FFN layers).**
 
   Best A1 result: **MI ratio 1.36x** (R1 step 40K, σ=0.22). This is a positive but modest OOD signal from the output head alone. The hypothesis — that Bayesian weight uncertainty produces higher MI on OOD text — is confirmed directionally. The magnitude should increase substantially with A2, where FFN layers (which store factual/topical knowledge) become Bayesian.
+
+- **2026-02-26:** A2 Bayesian FFN — code infrastructure complete (pending training run):
+  - **Spec**: `specs/a2-bayesian-ffn.md` — full design doc (14 sections).
+  - **`model.py`**: `GPTConfig.bayes` renamed to `GPTConfig.bayes_head` for clarity; new `bayes_ffn` field added. `Block` signature changed to `(config, bayes_attn, bayes_ffn)` (Option A — explicit params) — attention always deterministic, FFN configurable. `MiniGPT` wires `config.bayes_ffn` to blocks, `config.bayes_head` to head. Weight tying active when head is deterministic (`config.bayes_head.enabled=False`).
+  - **`config.py`**: `DEFAULT_CONFIG` `model.bayes` renamed to `model.bayes_head`; `bayes_ffn` section added (default disabled). `build_gpt_config()` refactored — shared `_build_bayes_config()` helper reads both `bayes_head` and `bayes_ffn`.
+  - **`uncertainty.py`**: Auto-detecting dual-path MC sampling. `_has_bayesian_body(model)` checks for BayesianLinear in transformer blocks. `_stream_metrics_full()` does N full forward passes (A2+ path). `compute_uncertainty_metrics()` and `score_sequence()` auto-select A1 (body once, head N times) vs A2 (full pass N times) path.
+  - **`train.py`**: `_configure_optimizer()` now excludes `_rho` params from weight decay — rho is regularized by KL, not weight decay.
+  - **`configs/a2_agnews.yaml`**: FFN Bayesian (`bayes_ffn.enabled: true`, `init_rho: -3.0`), head deterministic (weight-tied). `eval.num_samples: 20` (reduced from 30 — full passes are more expensive). `kl_weight: 0.2`, `kl_annealing: 10K`, `steps: 50K`.
+  - **`experiments/a2_bayes_ffn.py`**: Adapted from A1 script. KL weight sourced from active Bayesian config (FFN or head). Prints which components are Bayesian. Milestone tag `a2`.
+  - **Existing YAML configs**: `bayes_ffn: { enabled: false }` added to `a0_baseline.yaml`, `a0_agnews.yaml`, `a1_agnews.yaml` (explicit-config rule).
+  - **Tests**: 15 new tests (53 total, all passing): `TestFFNBayesian` (8 — architecture, weight tying, stochastic body, MI), `TestCombinedBayesian` (3 — FFN+head config), `TestHasBayesianBody` (4 — path detection). Ruff clean.
+  - **Model size**: ~20M params (4.2M Bayesian in FFN), ~half of A1's 42M — weight tying restored.
+  - **Next**: GPU training run: `python experiments/a2_bayes_ffn.py --config configs/a2_agnews.yaml`. Target: MI ratio > 1.5x, test_id_ppl < 55.
 
 ## Future Work (Non-Bayesian — Parked)
 These are architectural improvements to revisit **after** Bayesian milestones (A1/A2) are done. Not in scope now — the current miniGPT is intentionally basic to keep focus on Bayesian aspects.

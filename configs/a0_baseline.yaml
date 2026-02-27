@@ -14,7 +14,9 @@ model:
   n_embd: 256
   dropout: 0.2
   bias: true
-  bayes:
+  bayes_head:
+    enabled: false
+  bayes_ffn:
     enabled: false
 
 train:

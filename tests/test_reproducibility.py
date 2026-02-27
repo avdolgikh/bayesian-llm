@@ -23,7 +23,7 @@ class TestReproducibility:
             n_embd=64,
             dropout=0.1,
             bias=True,
-            bayes=BayesConfig(enabled=False),
+            bayes_head=BayesConfig(enabled=False),
         )
         model = MiniGPT(config)
         model.train()

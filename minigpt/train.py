@@ -140,9 +140,19 @@ def _get_lr(step: int, cfg: TrainConfig) -> float:
 
 
 def _configure_optimizer(model: MiniGPT, cfg: TrainConfig) -> torch.optim.AdamW:
-    """AdamW with weight decay only on 2-D weight tensors (not biases/layernorms)."""
-    decay_params = [p for p in model.parameters() if p.requires_grad and p.dim() >= 2]
-    no_decay_params = [p for p in model.parameters() if p.requires_grad and p.dim() < 2]
+    """AdamW with weight decay only on 2-D weight tensors (not biases/layernorms/rho)."""
+    decay_params = []
+    no_decay_params = []
+    for name, p in model.named_parameters():
+        if not p.requires_grad:
+            continue
+        # Rho params are regularized by KL, not weight decay
+        if "_rho" in name:
+            no_decay_params.append(p)
+        elif p.dim() >= 2:
+            decay_params.append(p)
+        else:
+            no_decay_params.append(p)
     groups = [
         {"params": decay_params, "weight_decay": cfg.weight_decay},
         {"params": no_decay_params, "weight_decay": 0.0},
