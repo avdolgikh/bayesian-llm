@@ -23,10 +23,10 @@ model:
     enabled: true
     prior_std: 1.0
     kl_weight: 0.2
-    init_rho: -3.0
+    init_rho: -2.0
 
 train:
-  steps: 50000
+  steps: 100000
   batch_size: 32
   block_size: 256
   lr: 3.0e-4

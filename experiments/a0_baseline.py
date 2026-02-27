@@ -1,6 +1,7 @@
 """A0 — Deterministic miniGPT baseline (TinyShakespeare / AG News, BPE)."""
 
 import argparse
+from contextlib import nullcontext
 from pathlib import Path
 
 import mlflow
@@ -92,7 +93,7 @@ def main() -> None:
     run_ctx = (
         mlflow.start_run(run_name=cfg["experiment"]["run_name"])
         if use_mlflow
-        else _nullcontext()
+        else nullcontext()
     )
     with run_ctx as run:
         if use_mlflow:
@@ -188,13 +189,6 @@ def main() -> None:
 
     print("\nDone.")
 
-
-class _nullcontext:
-    def __enter__(self):
-        return None
-
-    def __exit__(self, *args):
-        pass
 
 
 if __name__ == "__main__":

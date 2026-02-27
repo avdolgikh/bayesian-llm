@@ -15,7 +15,8 @@ minigpt/          # Python package — all model-related code
   config.py       # YAML config ↔ dataclass bridge
   uncertainty.py  # Epistemic uncertainty measurement (Phase 2)
 configs/          # YAML config files for experiments
-experiments/      # Runnable .py scripts (a0_baseline, a1_bayes_output, a2_bayes_ffn, etc.)
+experiments/      # Runnable .py scripts (a0_baseline, a1_bayes_output, a2_bayes_ffn)
+  runner.py       # Shared runner for Bayesian milestones (A1, A2, …) — argparse, config, train, eval, MLflow
 scripts/          # Utility scripts (dump_mlflow_run, profile_gpu, etc.)
 tests/            # pytest tests
 data/             # Local datasets (gitignored; document provenance in README.md)
@@ -81,7 +82,7 @@ PyTorch + `torch.distributions` for all milestones. No JAX for now. No TensorFlo
   - **MLflow fix**: stepless `log_metric` calls created single-point bar charts in UI. Moved all summary values (best_val_loss, perplexities, MI metrics, etc.) to `log_param` in both A0 and A1 scripts. Only step-aware time-series (train_loss, val_loss, lr, effective_kl_weight, etc.) stay as metrics.
   - **Config audit**: moved 8 categories of hardcoded values to YAML config: `eval.temperature`, `eval.sample_tokens` (wiring gap), `model.bayes.init_rho`, `eval.n_perplexity_batches`, `experiment.mlflow_uri`, `train.adam_beta1/adam_beta2`, `eval.qualitative_*` (prompts_per_category, max_new_tokens, seed), `train.checkpoint_dir`. All experiment scripts now read from config, no magic numbers.
   - **train.py refactor**: replaced vague `num_train_tokens > 0` guard with explicit `is_bayesian = kl_weight > 0` flag. Collapsed `kl_weight/num_train_tokens` into `kl_scale` in `estimate_loss`. Added validation: `num_train_tokens` must be > 0 when `kl_weight > 0`. Deterministic path (A0) now has zero KL overhead — no `model.kl_loss()` call.
-- **A2: CODE READY** — Bayesian FFN layers (MLP.fc + MLP.proj, 4 blocks). ~20M params (4.2M Bayesian, weight-tied head). Dual-path MC sampling auto-detects body vs head Bayesian. 15 new tests (53 total). Spec: `a2-bayesian-ffn.md`. Config: `init_rho=-3`, `kl_weight=0.2`, `kl_annealing=10K`, `steps=50K`, `num_samples=20`. Pending training run.
+- **A2: TUNING** — Bayesian FFN layers (MLP.fc + MLP.proj, 4 blocks). ~20M params (4.2M Bayesian, weight-tied head). Dual-path MC sampling auto-detects body vs head Bayesian. 15 new tests (53 total). Spec: `a2-bayesian-ffn.md`. R1 (init_rho=-3, 50K steps): MI ratio 1.38x batch / 1.57x qualitative, σ=0.048 (frozen at init). R2 in progress (init_rho=-2, 100K steps).
 - **B1 (later, separate track):** Bayesian LoRA on an existing open-weight LLM
 
 ## Bayesian Layer Strategy
@@ -106,7 +107,7 @@ Experiments use a YAML config pipeline: `DEFAULT_CONFIG → YAML file → CLI ov
 - **`configs/a0_baseline.yaml`** — reference config for A0 baseline (TinyShakespeare, matches defaults).
 - **`configs/a0_agnews.yaml`** — AG News config (fully explicit — all settings, 5000 steps, 500 warmup, ID=[1,2], OOD=[3,4]).
 - **`configs/a1_agnews.yaml`** — A1 Bayesian output head on AG News. `bayes_head.enabled: true`, `prior_std: 1.0`, `kl_weight: 0.2`, `init_rho: -2.0`, `steps: 50000`, `kl_annealing_steps: 10000`, `eval.num_samples: 30`, `eval_interval: 2000`, `checkpoint_interval: 5000`.
-- **`configs/a2_agnews.yaml`** — A2 Bayesian FFN on AG News. `bayes_head.enabled: false` (weight-tied), `bayes_ffn.enabled: true`, `prior_std: 1.0`, `kl_weight: 0.2`, `init_rho: -3.0`, `steps: 50000`, `kl_annealing_steps: 10000`, `eval.num_samples: 20`.
+- **`configs/a2_agnews.yaml`** — A2 Bayesian FFN on AG News. `bayes_head.enabled: false` (weight-tied), `bayes_ffn.enabled: true`, `prior_std: 1.0`, `kl_weight: 0.2`, `init_rho: -2.0`, `steps: 100000`, `kl_annealing_steps: 10000`, `eval.num_samples: 20`. (R1 used `init_rho: -3.0`, `steps: 50000`.)
 - `vocab_size` always comes from the tokenizer, never from config files.
 - Config key `model.bayes` was renamed to `model.bayes_head` in A2 for clarity. `model.bayes_ffn` added for FFN-layer Bayesian config.
 - **PyYAML gotcha:** scientific notation without a decimal point (e.g. `3e-4`) is parsed as a **string**, not float. Always write `3.0e-4` or `0.0003` in YAML files.
@@ -355,6 +356,69 @@ Do not commit secrets or large binaries. Use `.env` (ignored) and provide `.env.
   - **Tests**: 15 new tests (53 total, all passing): `TestFFNBayesian` (8 — architecture, weight tying, stochastic body, MI), `TestCombinedBayesian` (3 — FFN+head config), `TestHasBayesianBody` (4 — path detection). Ruff clean.
   - **Model size**: ~20M params (4.2M Bayesian in FFN), ~half of A1's 42M — weight tying restored.
   - **Next**: GPU training run: `python experiments/a2_bayes_ffn.py --config configs/a2_agnews.yaml`. Target: MI ratio > 1.5x, test_id_ppl < 55.
+
+- **2026-02-26:** Experiment runner refactoring — DRY cleanup:
+  - **Problem**: `a1_bayes_output.py` and `a2_bayes_ffn.py` were ~95% identical (430 lines each). Only differences: argparse description, milestone tag, KL weight resolution, summary string.
+  - **Solution**: Extracted `experiments/runner.py` with shared `run_experiment(milestone, description)` function. Contains: argparse, config loading, data, model creation, training, sigma stats, perplexity (mean weights), OOD perplexity, text generation, uncertainty eval (MI/entropy/flip rate), qualitative eval (prompt panel), MLflow logging, model artifact logging, final KL, run summary.
+  - A1 and A2 scripts reduced to thin wrappers (~10 lines each).
+  - Shared helpers: `select_prompts()`, `run_qualitative_eval()`, `_resolve_kl_weight()` (auto-detects FFN vs head), `_bayes_summary()` (auto-generates status string).
+  - A0 stays separate (structurally different — no Bayesian eval). Updated to use `contextlib.nullcontext` (stdlib) instead of custom `_nullcontext` class.
+  - All 53 tests passing. No behavior changes — pure refactoring.
+
+- **2026-02-26:** A2 R1 training results (MLflow `93ff41da152b43b59b9ae39bd7c2350c`, 50K steps):
+  - **Config**: `init_rho=-3.0` (σ₀=0.049), `kl_weight=0.2`, `kl_annealing_steps=10000`, `steps=50000`, `batch_size=32`, `prior_std=1.0`. Head deterministic (weight-tied). AMP active, 113K tok/s on RTX 4070 (~60 min).
+  - **Best ELBO at step 44000** (val CE=3.9725, val ELBO=4.3685).
+  - **KL trajectory**: 5.31M → 5.35M — rising throughout training (NOT decreasing like A1). Root cause: structural KL dominated by log-ratio term because σ≈0.05 is 20x narrower than prior_std=1.0. Per-weight KL ≈ 0.5 × (σ²/σ_p² + μ² - 1 - ln(σ²/σ_p²)) ≈ 2.5 + 0.5μ². As μ grows during training (fitting data), KL rises.
+  - **Sigma statistics** (final): mean=0.048, std=0.004, range=[0.027, 0.090]. softplus(-3) = 0.049 — **posteriors barely moved from initialization**. CE gradient (push σ down) and KL gradient (push σ up) cancelled out at init equilibrium.
+  - **Uncertainty metrics** (N=20 MC samples):
+    - MI: ID=0.0595, OOD=0.0820, **ratio=1.38x** (batch-level)
+    - Predictive entropy: ID=3.58, OOD=4.56
+    - Expected entropy: ID=3.52, OOD=4.48
+    - Flip rate: ID=16.2%, OOD=19.1%
+  - **Qualitative MI** (prompt-token scoring):
+    - Overall: ID=0.0532, OOD=0.0834, **ratio=1.57x**
+    - Higher than batch-level because curated prompts have strong topic signals
+  - **Perplexity** (mean weights): test_id=51.04, test_ood=500.0 (9.8x ratio). Close to A0 baseline (49.1 / 540.3) — Bayesian FFN doesn't hurt language modeling quality.
+  - **FFN hypothesis validated**: MI ratio 1.38x (batch) already matches A1's best (1.36x), and qualitative ratio 1.57x exceeds A1's ceiling (1.28x). Even with frozen posteriors (σ stuck at init), FFN-level uncertainty provides stronger OOD signal than output-head uncertainty.
+
+  **A2 R1 vs A1 comparison:**
+
+  | Metric | A0 (baseline) | A1 best (R1 40K) | A2 R1 (50K) |
+  |--------|---------------|------------------|-------------|
+  | Model | deterministic | bayes head | bayes FFN |
+  | Params (Bayesian) | 16M (0) | 42M (25.7M) | 20M (4.2M) |
+  | σ mean | — | 0.224 | 0.048 |
+  | MI ratio (batch) | — | 1.36x | 1.38x |
+  | MI ratio (qual) | — | 1.28x | 1.57x |
+  | Test ID ppl | 49.1 | 56.3 | 51.0 |
+  | Test OOD ppl | 540 | 1477 | 500 |
+
+  **Key insight**: A2 achieves same/better MI ratio with 6x fewer Bayesian parameters and 5x smaller σ. FFN layers are inherently better at encoding topic-level uncertainty. The output head only detects unfamiliar vocabulary; FFN layers detect unfamiliar *patterns* in the hidden representations.
+
+- **2026-02-26:** A2 R2 planned — rationale and config changes:
+
+  **Problem diagnosed in R1**: Posteriors frozen at init. σ_mean=0.048 vs softplus(-3)=0.049 — zero posterior learning. The optimization is trapped: CE gradient pushes σ down, KL gradient pushes σ up (toward prior_std=1.0), and they cancel at the init point. With σ=0.05 and prior_std=1.0, the KL log-ratio term (-ln(σ²/σ_p²) ≈ 6.0) dominates the KL, creating 5.35M total KL that is structural rather than informative.
+
+  **Change 1 — init_rho: -3.0 → -2.0** (σ₀: 0.049 → 0.127):
+  - 2.6x wider initial posteriors, within the sweet-spot range (0.1–0.3) from A1
+  - Reduces structural KL per weight from ~2.5 to ~1.5 nats (less log-ratio penalty)
+  - More gradient signal through softplus: sigmoid(-2)=0.12 vs sigmoid(-3)=0.05
+  - Risk: from A1 we learned wider σ can become uniform noise. But FFN noise affects hidden representations (not vocabulary directly), so this risk is lower for FFN layers.
+
+  **Change 2 — steps: 50000 → 100000**:
+  - With different σ₀, optimization landscape changes — more steps for posteriors to settle
+  - R1 plateaued at 40-44K; R2 might need longer with wider posteriors
+  - ~2 hours on RTX 4070 (113K tok/s)
+
+  **What to watch in R2**:
+  - Does σ move from init this time? (σ₀=0.127 — will it grow toward prior or shrink toward zero?)
+  - KL trajectory: should start lower (~2M vs 5M) — does it decrease (healthy) or still rise?
+  - MI ratio: target > 1.5x batch-level (R1 was 1.38x with frozen posteriors — expect improvement with actual posterior learning)
+  - ID perplexity: target < 55 (R1 was 51 — wider σ may cost some quality)
+
+  **If R2 still shows frozen posteriors**: consider reducing prior_std (0.3–0.5) to bring prior closer to posterior, or reducing kl_weight (0.05–0.1) to weaken the KL pull. One variable at a time.
+
+  **Updated config** (`configs/a2_agnews.yaml`): `init_rho: -2.0`, `steps: 100000`. All else unchanged.
 
 ## Future Work (Non-Bayesian — Parked)
 These are architectural improvements to revisit **after** Bayesian milestones (A1/A2) are done. Not in scope now — the current miniGPT is intentionally basic to keep focus on Bayesian aspects.
