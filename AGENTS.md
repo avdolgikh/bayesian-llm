@@ -82,7 +82,9 @@ PyTorch + `torch.distributions` for all milestones. No JAX for now. No TensorFlo
   - **MLflow fix**: stepless `log_metric` calls created single-point bar charts in UI. Moved all summary values (best_val_loss, perplexities, MI metrics, etc.) to `log_param` in both A0 and A1 scripts. Only step-aware time-series (train_loss, val_loss, lr, effective_kl_weight, etc.) stay as metrics.
   - **Config audit**: moved 8 categories of hardcoded values to YAML config: `eval.temperature`, `eval.sample_tokens` (wiring gap), `model.bayes.init_rho`, `eval.n_perplexity_batches`, `experiment.mlflow_uri`, `train.adam_beta1/adam_beta2`, `eval.qualitative_*` (prompts_per_category, max_new_tokens, seed), `train.checkpoint_dir`. All experiment scripts now read from config, no magic numbers.
   - **train.py refactor**: replaced vague `num_train_tokens > 0` guard with explicit `is_bayesian = kl_weight > 0` flag. Collapsed `kl_weight/num_train_tokens` into `kl_scale` in `estimate_loss`. Added validation: `num_train_tokens` must be > 0 when `kl_weight > 0`. Deterministic path (A0) now has zero KL overhead — no `model.kl_loss()` call.
-- **A2: TUNING** — Bayesian FFN layers (MLP.fc + MLP.proj, 4 blocks). ~20M params (4.2M Bayesian, weight-tied head). Dual-path MC sampling auto-detects body vs head Bayesian. 15 new tests (53 total). Spec: `a2-bayesian-ffn.md`. R1 (init_rho=-3, 50K steps): MI ratio 1.38x batch / 1.57x qualitative, σ=0.048 (frozen at init). R2 in progress (init_rho=-2, 100K steps).
+- **A2: TUNING** — Bayesian FFN layers (MLP.fc + MLP.proj, 4 blocks). ~20M params (4.2M Bayesian, weight-tied head). Dual-path MC sampling auto-detects body vs head Bayesian. 15 new tests (53 total). Spec: `a2-bayesian-ffn.md`.
+  - R1 (init_rho=-3, 50K steps): MI ratio 1.38x batch / 1.57x qual, σ=0.048 (frozen at init). MLflow `93ff41da`.
+  - **R2 (init_rho=-2, 100K steps): MI ratio 1.43x batch / 1.70x qual, σ mean=0.147 (posteriors learned!). MLflow `76d049b7`. Healthy KL (3.3→3.2M ↓). ID ppl=53.5.**
 - **B1 (later, separate track):** Bayesian LoRA on an existing open-weight LLM
 
 ## Bayesian Layer Strategy
@@ -419,6 +421,67 @@ Do not commit secrets or large binaries. Use `.env` (ignored) and provide `.env.
   **If R2 still shows frozen posteriors**: consider reducing prior_std (0.3–0.5) to bring prior closer to posterior, or reducing kl_weight (0.05–0.1) to weaken the KL pull. One variable at a time.
 
   **Updated config** (`configs/a2_agnews.yaml`): `init_rho: -2.0`, `steps: 100000`. All else unchanged.
+
+- **2026-02-27:** A2 R2 training results (MLflow `76d049b74681472cae35381d81e12c8f`, 100K steps):
+  - **Config**: `init_rho=-2.0` (σ₀=0.127), `kl_weight=0.2`, `kl_annealing_steps=10000`, `steps=100000`, `batch_size=32`, `prior_std=1.0`. Head deterministic (weight-tied). AMP active, 113K tok/s on RTX 4070 (~121 min).
+  - **Best ELBO at step 98000** (val CE=3.988, val ELBO=4.225). ELBO checkpoint selection captured the true optimum — CE alone would have selected differently. Training still improving at 100K steps (best at 98K).
+  - **KL trajectory**: 3.306M → 3.198M (step 60K, minimum) → 3.200M (step 100K). Decreasing then flat — healthy Bayesian behavior. The decrease means posteriors moved toward a lower-KL region (closer to optimal). Stark contrast with R1's pathological rising KL (5.31M → 5.35M). Absolute KL ~40% lower than R1 because init_rho=-2 starts closer to the prior.
+  - **Sigma statistics** (step 98K): mean=0.147, std=0.074, median=0.129, range=[0.036, 0.966], p5=0.091, p25=0.109, p75=0.148, p95=0.297.
+    - **Posteriors learned.** σ moved from init (0.127) to mean 0.147, but the real story is the range: [0.036, 0.966]. The model differentiated which weights need certainty vs uncertainty.
+    - Most weights stayed near init (median=0.129 ≈ softplus(-2)=0.127), but there is a meaningful right tail — p95=0.297, max=0.966 (essentially at the prior). These are "I don't know" weights.
+    - Some weights collapsed to σ=0.036 — strong certainty on frequently-used patterns.
+    - Compared to R1 (σ range [0.027, 0.090], std=0.004): R2's posterior spread is 18x wider (std 0.074 vs 0.004).
+  - **Uncertainty metrics** (N=20 MC samples):
+    - MI: ID=0.0599, OOD=0.0854, **ratio=1.43x** (batch-level)
+    - Predictive entropy: ID=3.59, OOD=4.52
+    - Expected entropy: ID=3.53, OOD=4.43
+    - Flip rate: ID=16.2%, OOD=19.8%
+  - **Qualitative MI** (prompt-token scoring, N=20 MC samples, 5 prompts per category):
+    - World (ID): avg MI ≈ 0.050
+    - Sports (ID): avg MI ≈ 0.053
+    - Business (OOD): avg MI ≈ 0.090
+    - Sci/Tech (OOD): avg MI ≈ 0.088
+    - Overall: ID=0.0523, OOD=0.0889, **ratio=1.70x**
+    - Clean category separation: all OOD prompts scored higher MI than all ID prompts.
+    - Notably Sci/Tech ≈ Business (0.088 vs 0.090) — unlike A1 where Sci/Tech was clearly highest (specialized vocab). FFN-level uncertainty is more about content patterns than vocabulary.
+  - **Perplexity** (mean weights): test_id=53.53, test_ood=595.25 (11.1x ratio). Modest cost vs A0 (49.1) — ~9% ID perplexity hit from Bayesian FFN.
+
+  **A2 R2 vs R1 — answering the R2 watch questions:**
+
+  | Question | R1 answer | R2 answer |
+  |----------|-----------|-----------|
+  | Does σ move from init? | No — stuck at 0.048 ≈ softplus(-3) | **Yes** — mean 0.127→0.147, range [0.036, 0.966] |
+  | KL trajectory | Rising (pathological) | **Decreasing then flat (healthy)** |
+  | MI ratio (batch) | 1.38x | **1.43x** (+0.05x) |
+  | MI ratio (qual) | 1.57x | **1.70x** (+0.13x) |
+  | ID perplexity | 51.0 | 53.5 (within target <55) |
+
+  **Full cross-milestone comparison:**
+
+  | Metric | A0 (baseline) | A1 best (R1 40K) | A2 R1 (50K) | **A2 R2 (98K)** |
+  |--------|---------------|------------------|-------------|-----------------|
+  | Model | deterministic | bayes head | bayes FFN | **bayes FFN** |
+  | Params (Bayesian) | 16M (0) | 42M (25.7M) | 20M (4.2M) | **20M (4.2M)** |
+  | init_rho | — | -5 | -3 | **-2** |
+  | σ mean | — | 0.224 | 0.048 | **0.147** |
+  | σ range | — | [.015, .441] | [.027, .090] | **[.036, .966]** |
+  | MI ratio (batch) | — | 1.36x | 1.38x | **1.43x** |
+  | MI ratio (qual) | — | 1.28x | 1.57x | **1.70x** |
+  | Test ID ppl | 49.1 | 56.3 | 51.0 | **53.5** |
+  | Test OOD ppl | 540 | 1477 | 500 | **595** |
+  | KL (final) | — | 15.7M | 5.35M | **3.20M** |
+  | KL trend | — | ↓ (58→16M) | ↑ (5.3→5.4M) | **↓ then flat (3.3→3.2M)** |
+  | Training time | 2.8hr | ~52min | ~60min | **~121min** |
+
+  **Finding 1 — init_rho=-2 unlocks posterior learning for FFN layers.** R1 (init_rho=-3) had completely frozen posteriors: σ stuck at softplus(-3)=0.049, std=0.004. R2 (init_rho=-2) shows genuine posterior differentiation: σ spread from 0.036 to 0.966, std=0.074. The sigmoid gradient at ρ=-2 (0.12) provides 2.4x more gradient flow than at ρ=-3 (0.05), enabling the optimizer to actually move rho parameters.
+
+  **Finding 2 — Posterior learning adds modest but real signal.** R1 achieved MI ratio 1.38x with frozen posteriors (σ≈0.048 everywhere). R2 achieved 1.43x with learned posteriors (σ in [0.036, 0.966]). The batch-level improvement (+0.05x) is modest, but the qualitative improvement (+0.13x, from 1.57x to 1.70x) is substantial. Curated prompts with strong topic signals benefit more from posterior differentiation than random batches.
+
+  **Finding 3 — KL behavior confirms correct Bayesian optimization.** R1 had pathological rising KL because small σ (0.05) created a huge log-ratio penalty (-ln(0.05²/1.0²) ≈ 6.0 nats/weight) that grew as μ fitted the data. R2 starts with σ=0.127 (lower log-ratio ≈ 4.1 nats/weight), and KL *decreases* over training — posteriors finding their optimal width. The KL floor at ~3.20M (step 60K+) represents the equilibrium between data fit (CE pushing σ down) and regularization (KL pushing σ toward prior).
+
+  **Finding 4 — FFN uncertainty is topic-level, not vocabulary-level.** In A1, Sci/Tech had the highest MI (specialized jargon → unfamiliar vocabulary mapping). In A2 R2, Business ≈ Sci/Tech (0.090 vs 0.088) — the FFN doesn't distinguish vocabulary difficulty, it detects unfamiliar *content patterns* in hidden representations. This is the semantic uncertainty signal that A1's output head couldn't capture.
+
+  **Finding 5 — 100K steps justified; model still improving.** Best ELBO at step 98K (out of 100K). Val CE was still decreasing at end (3.988 at 98K). Unlike R1 which plateaued at 44K, the wider-posterior optimization landscape needs more steps. A longer run (150K+) might extract more signal, but with diminishing returns — the KL already stabilized at 60K.
 
 ## Future Work (Non-Bayesian — Parked)
 These are architectural improvements to revisit **after** Bayesian milestones (A1/A2) are done. Not in scope now — the current miniGPT is intentionally basic to keep focus on Bayesian aspects.

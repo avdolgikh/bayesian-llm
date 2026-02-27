@@ -31,7 +31,6 @@ from minigpt.model import MiniGPT
 from minigpt.train import load_checkpoint, train
 from minigpt.uncertainty import compute_uncertainty_metrics, score_sequence
 
-
 # ---------------------------------------------------------------------------
 # Qualitative eval helpers
 # ---------------------------------------------------------------------------
