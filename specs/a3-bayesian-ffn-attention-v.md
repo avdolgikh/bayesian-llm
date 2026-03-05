@@ -78,8 +78,10 @@ model:
 `bayes_attn_v` uses the same schema as other Bayesian blocks:
 - `enabled`
 - `prior_std`
-- `kl_weight`
 - `init_rho`
+
+KL scaling is global:
+- `train.kl_weight`
 
 ## 5.2 `GPTConfig` and Config Builder
 
@@ -105,20 +107,16 @@ To Bayesianize only V, split into explicit projections:
 Files:
 - `minigpt/model.py` (`CausalSelfAttention`, `Block`, `MiniGPT`)
 
-## 5.4 KL Weight Resolution with Multiple Bayesian Components
-
-Current runner resolves KL weight from only one active block. In A3 both FFN and attn V are
-Bayesian, so this must be explicit.
+## 5.4 KL Weight Resolution
 
 File:
 - `experiments/runner.py`
 
 Planned behavior:
-- Collect `kl_weight` from all enabled Bayesian groups (`bayes_head`, `bayes_ffn`, `bayes_attn_v`).
-- If multiple enabled groups have different `kl_weight`, raise `ValueError`.
-- Otherwise use the shared value.
+- Read a single global `train.kl_weight` and use it for ELBO KL scaling.
+- Layer-level Bayesian blocks do not define their own KL weights.
 
-This keeps the current single-global KL scaling behavior explicit and safe.
+This keeps KL objective configuration in the training section, where it belongs.
 
 ## 6. New Experiment Artifacts
 
@@ -137,8 +135,9 @@ Proposed initial config:
 - `bayes_attn_v.enabled: true` with conservative init.
 
 Initial hyperparameter defaults:
-- `model.bayes_ffn`: `prior_std=1.0`, `kl_weight=0.2`, `init_rho=-2.0`
-- `model.bayes_attn_v`: `prior_std=1.0`, `kl_weight=0.2`, `init_rho=-3.0`
+- `model.bayes_ffn`: `prior_std=1.0`, `init_rho=-2.0`
+- `model.bayes_attn_v`: `prior_std=1.0`, `init_rho=-3.0`
+- `train.kl_weight=0.2`
 - `train.steps=100000`, `eval.num_samples=20`
 
 Notes:
@@ -214,6 +213,11 @@ Q/K/V split they should assert deterministic `q_proj` and `k_proj` instead.
 8. Run `uv run pytest tests/ -q` and `uv run ruff check minigpt/ experiments/ tests/`.
 9. Run first A3 training (`seed=1337`) and log to MLflow.
 10. Document results in `AGENTS.md`.
+
+Implementation status (2026-03-05):
+- Done: steps 1-8.
+- Pending: step 9 (first full A3 train/eval run and MLflow metrics).
+- Partial: step 10 (implementation status documented; run results pending).
 
 ## 12. Follow-Up After A3
 

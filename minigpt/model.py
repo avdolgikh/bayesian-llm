@@ -24,16 +24,20 @@ class GPTConfig:
     bias: bool = True
     bayes_head: BayesConfig = field(default_factory=BayesConfig)   # output head
     bayes_ffn: BayesConfig = field(default_factory=BayesConfig)   # FFN in transformer blocks
+    bayes_attn_v: BayesConfig = field(default_factory=BayesConfig)  # attention value projection
 
 
 class CausalSelfAttention(nn.Module):
-    def __init__(self, config: GPTConfig, bayes: BayesConfig) -> None:
+    def __init__(self, config: GPTConfig, bayes_v: BayesConfig) -> None:
         super().__init__()
         assert config.n_embd % config.n_head == 0
         self.config = config
         self.head_size = config.n_embd // config.n_head
-        self.qkv = make_linear(config.n_embd, 3 * config.n_embd, bayes, bias=config.bias)
-        self.proj = make_linear(config.n_embd, config.n_embd, bayes, bias=config.bias)
+        no_bayes = BayesConfig(enabled=False)
+        self.q_proj = make_linear(config.n_embd, config.n_embd, no_bayes, bias=config.bias)
+        self.k_proj = make_linear(config.n_embd, config.n_embd, no_bayes, bias=config.bias)
+        self.v_proj = make_linear(config.n_embd, config.n_embd, bayes_v, bias=config.bias)
+        self.proj = make_linear(config.n_embd, config.n_embd, no_bayes, bias=config.bias)
         self.attn_dropout = nn.Dropout(config.dropout)
         self.resid_dropout = nn.Dropout(config.dropout)
 
@@ -42,8 +46,9 @@ class CausalSelfAttention(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         bsz, seq_len, embd = x.size()
-        qkv = self.qkv(x)
-        q, k, v = qkv.split(embd, dim=2)
+        q = self.q_proj(x)
+        k = self.k_proj(x)
+        v = self.v_proj(x)
         q = q.view(bsz, seq_len, self.config.n_head, self.head_size).transpose(1, 2)
         k = k.view(bsz, seq_len, self.config.n_head, self.head_size).transpose(1, 2)
         v = v.view(bsz, seq_len, self.config.n_head, self.head_size).transpose(1, 2)
@@ -75,11 +80,11 @@ class MLP(nn.Module):
 
 class Block(nn.Module):
     def __init__(
-        self, config: GPTConfig, bayes_attn: BayesConfig, bayes_ffn: BayesConfig,
+        self, config: GPTConfig, bayes_attn_v: BayesConfig, bayes_ffn: BayesConfig,
     ) -> None:
         super().__init__()
         self.ln1 = nn.LayerNorm(config.n_embd)
-        self.attn = CausalSelfAttention(config, bayes_attn)
+        self.attn = CausalSelfAttention(config, bayes_attn_v)
         self.ln2 = nn.LayerNorm(config.n_embd)
         self.mlp = MLP(config, bayes_ffn)
 
@@ -97,10 +102,13 @@ class MiniGPT(nn.Module):
         self.pos_emb = nn.Embedding(config.block_size, config.n_embd)
         self.drop = nn.Dropout(config.dropout)
 
-        # Transformer blocks: attention always deterministic, FFN configurable
-        no_bayes = BayesConfig(enabled=False)
+        # Transformer blocks: FFN configurable, attention V optionally Bayesian
         self.blocks = nn.ModuleList([
-            Block(config, bayes_attn=no_bayes, bayes_ffn=config.bayes_ffn)
+            Block(
+                config,
+                bayes_attn_v=config.bayes_attn_v,
+                bayes_ffn=config.bayes_ffn,
+            )
             for _ in range(config.n_layer)
         ])
 

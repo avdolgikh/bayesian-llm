@@ -131,13 +131,9 @@ def run_qualitative_eval(
 # ---------------------------------------------------------------------------
 
 
-def _resolve_kl_weight(gpt_config) -> float:
-    """Pick KL weight from whichever Bayesian config is active."""
-    if gpt_config.bayes_ffn.enabled:
-        return gpt_config.bayes_ffn.kl_weight
-    if gpt_config.bayes_head.enabled:
-        return gpt_config.bayes_head.kl_weight
-    return 0.0
+def _resolve_kl_weight(cfg: dict) -> float:
+    """Global KL weight is defined in train config."""
+    return float(cfg["train"]["kl_weight"])
 
 
 def _bayes_summary(gpt_config) -> str:
@@ -147,6 +143,8 @@ def _bayes_summary(gpt_config) -> str:
         parts.append("bayes_head=True")
     if gpt_config.bayes_ffn.enabled:
         parts.append("bayes_ffn=True")
+    if gpt_config.bayes_attn_v.enabled:
+        parts.append("bayes_attn_v=True")
     return ", ".join(parts) if parts else "deterministic"
 
 
@@ -205,6 +203,7 @@ def run_experiment(milestone: str, description: str = "Bayesian experiment") -> 
     print(f"Model parameters: {n_params:,} (Bayesian: {n_bayes_params:,})")
     print(f"Bayesian head: {gpt_config.bayes_head.enabled}")
     print(f"Bayesian FFN: {gpt_config.bayes_ffn.enabled}")
+    print(f"Bayesian attention V: {gpt_config.bayes_attn_v.enabled}")
 
     # --- Device ---
     device_str = cfg["train"]["device"]
@@ -224,7 +223,7 @@ def run_experiment(milestone: str, description: str = "Bayesian experiment") -> 
 
     # --- Train config ---
     train_cfg = build_train_config(cfg)
-    kl_weight = _resolve_kl_weight(gpt_config)
+    kl_weight = _resolve_kl_weight(cfg)
     num_train_tokens = len(train_data)
 
     # --- MLflow ---

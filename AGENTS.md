@@ -20,8 +20,8 @@ minigpt/          # Python package — all model code
   config.py       # YAML config ↔ dataclass bridge
   uncertainty.py  # Epistemic uncertainty (MI via MC sampling)
 configs/          # YAML config files per experiment
-experiments/      # Runnable scripts (a0_baseline, a1_bayes_output, a2_bayes_ffn; a3 planned)
-  runner.py       # Shared runner for Bayesian milestones — A1/A2 are thin wrappers (A3 planned)
+experiments/      # Runnable scripts (a0_baseline, a1_bayes_output, a2_bayes_ffn, a3_bayes_ffn_attn_v)
+  runner.py       # Shared runner for Bayesian milestones — A1/A2/A3 are thin wrappers
 scripts/          # Utilities (dump_mlflow_run, profile_gpu, eval_checkpoint)
 tests/            # pytest (28 tests)
 data/             # Local datasets (gitignored)
@@ -64,7 +64,7 @@ PyTorch + `torch.distributions`. No JAX, no TensorFlow.
 - **A0: DONE** — Deterministic miniGPT on AG News. 4L/4H/256d, 16M params. test_id_ppl=49.11, test_ood_ppl=540.28. MLflow `5dc45450`.
 - **A1: DONE** — Bayesian output head (BayesianLinear on lm_head). 42M params (25.7M Bayesian). Best MI ratio **1.36x** (σ=0.22). Ceiling at 1.2–1.4x — detects OOD at vocabulary level only. All ELBO/MI/sigma infrastructure validated. See [A1 Report](#a1-report).
 - **A2: DONE** — Bayesian FFN (MLP.fc + MLP.proj, 4 blocks). 20M params (4.2M Bayesian, weight-tied head). Best MI ratio **1.43x batch / 1.70x qualitative** (σ mean=0.147, posteriors learned). Confirmation run (seed=2352) reproduced separation at **1.36x batch / 1.55x qualitative**. See [A2 Report](#a2-report).
-- **A3: PLANNED** — Bayesian FFN + Bayesian attention value projection (`V`) with diagonal posteriors. Keep `Q/K` deterministic for stability and attribution. Spec: `specs/a3-bayesian-ffn-attention-v.md`.
+- **A3: IMPLEMENTED (training pending)** — Bayesian FFN + Bayesian attention value projection (`V`) with diagonal posteriors. `Q/K` and attention output projection remain deterministic. Spec: `specs/a3-bayesian-ffn-attention-v.md`.
 - **B1 (future):** Bayesian LoRA on open-weight LLM.
 
 ## Bayesian Layer Strategy (order)
@@ -84,11 +84,13 @@ PyTorch + `torch.distributions`. No JAX, no TensorFlow.
 ## Configuration System
 Pipeline: `DEFAULT_CONFIG → YAML file → CLI --set overrides → validate`.
 
-Configs: `a0_baseline.yaml` (TinyShakespeare), `a0_agnews.yaml`, `a1_agnews.yaml`, `a2_agnews.yaml`, `a3_agnews.yaml` (planned).
+Configs: `a0_baseline.yaml` (TinyShakespeare), `a0_agnews.yaml`, `a1_agnews.yaml`, `a2_agnews.yaml`, `a3_agnews.yaml`.
 
 Key conventions:
 - `vocab_size` always from tokenizer, never config.
-- `model.bayes_head` for output head config, `model.bayes_ffn` for FFN config.
+- `model.bayes_head` for output head config, `model.bayes_ffn` for FFN config,
+  `model.bayes_attn_v` for attention value projection config.
+- `train.kl_weight` is global for all enabled Bayesian components.
 - **PyYAML gotcha:** write `3.0e-4` not `3e-4` (parsed as string without decimal).
 
 ### Experiment CLI
@@ -96,6 +98,7 @@ Key conventions:
 python experiments/a0_baseline.py --config configs/a0_agnews.yaml
 python experiments/a1_bayes_output.py --config configs/a1_agnews.yaml
 python experiments/a2_bayes_ffn.py --config configs/a2_agnews.yaml
+python experiments/a3_bayes_ffn_attn_v.py --config configs/a3_agnews.yaml
 python experiments/a0_baseline.py --config configs/a0_agnews.yaml --set train.lr=1e-3
 python experiments/a0_baseline.py --config configs/a0_agnews.yaml --resume data/checkpoints/ckpt_step500.pt
 ```
@@ -106,11 +109,12 @@ Saves full config, `best_val_loss`, RNG states. LR schedule is stateless (comput
 ## Build & Dev Commands
 ```bash
 uv sync                                          # install deps
-uv run pytest tests/ -v                          # 28 unit tests
+uv run pytest tests/ -v                          # 32 unit tests
 uv run ruff check minigpt/ experiments/ tests/   # lint
 python experiments/a0_baseline.py                # A0 training (GPU)
 python experiments/a1_bayes_output.py --config configs/a1_agnews.yaml  # A1
 python experiments/a2_bayes_ffn.py --config configs/a2_agnews.yaml     # A2
+python experiments/a3_bayes_ffn_attn_v.py --config configs/a3_agnews.yaml  # A3
 python scripts/dump_mlflow_run.py <run_id>       # inspect run
 python scripts/eval_checkpoint.py <ckpt> --config <yaml>  # eval any checkpoint
 ```
@@ -121,7 +125,7 @@ GitHub Actions (`.github/workflows/ci.yml`): `ruff check` → `pytest`. No GPU i
 ## Coding Style
 4 spaces, 100-char lines (ruff). `snake_case` functions, `PascalCase` classes. Type hints on public APIs.
 
-## Tests (28 total)
+## Tests (32 total)
 ```
 tests/
   test_model.py          # Weight tying (2), perplexity bounds (1)
@@ -129,7 +133,8 @@ tests/
   test_reproducibility.py # Same seed = identical losses (1)
   test_bayesian.py       # KL invariants (2), sampling (2), context managers (2),
                          # A1 architecture (4), MI invariants (4),
-                         # A2 FFN architecture (5), path detection (2)
+                         # A2 FFN architecture (5), A3 Attn-V architecture (3),
+                         # path detection (3)
 ```
 
 ## Commit Guidelines
@@ -218,6 +223,27 @@ MLflow runs: R1=`93ff41da`, R2=`76d049b7`, R3=`1238951099144292844c33258721fa80`
 - If posteriors frozen: increase init_rho (try -1) or reduce kl_weight (0.05–0.1).
 - If σ too wide (uniform noise): decrease init_rho or reduce prior_std (0.3–0.5).
 - One variable at a time.
+
+---
+
+## A3 Implementation Notes
+
+- Implemented architecture delta only: attention `V` projection is now optionally Bayesian; `Q/K` and
+  attention output projection remain deterministic.
+- Added config surface `model.bayes_attn_v` (defaults + YAML wiring).
+- Refactored attention from fused `qkv` to `q_proj/k_proj/v_proj` so `v_proj` can be Bayesian in isolation.
+- Added A3 experiment entrypoint: `experiments/a3_bayes_ffn_attn_v.py`.
+- Added A3 config: `configs/a3_agnews.yaml`.
+- Updated shared runner KL resolution: single global `train.kl_weight` (no per-component KL weight).
+- Updated tests for attention split and A3 invariants.
+
+Validation:
+- `uv run pytest tests/ -q` → `32 passed`
+- `uv run ruff check minigpt/ experiments/ tests/` → passed
+
+Pending:
+- First A3 training run + metrics logging to MLflow:
+  `python experiments/a3_bayes_ffn_attn_v.py --config configs/a3_agnews.yaml`
 
 ---
 

@@ -47,7 +47,7 @@ def _small_bayesian_config() -> GPTConfig:
     return GPTConfig(
         vocab_size=256, block_size=32, n_layer=2, n_head=2,
         n_embd=64, dropout=0.0, bias=True,
-        bayes_head=BayesConfig(enabled=True, prior_std=1.0, kl_weight=1.0),
+        bayes_head=BayesConfig(enabled=True, prior_std=1.0),
     )
 
 
@@ -57,7 +57,18 @@ def _small_ffn_bayesian_config() -> GPTConfig:
         vocab_size=256, block_size=32, n_layer=2, n_head=2,
         n_embd=64, dropout=0.0, bias=True,
         bayes_head=BayesConfig(enabled=False),
-        bayes_ffn=BayesConfig(enabled=True, prior_std=1.0, kl_weight=1.0),
+        bayes_ffn=BayesConfig(enabled=True, prior_std=1.0),
+    )
+
+
+def _small_ffn_attn_v_bayesian_config() -> GPTConfig:
+    """A3-style: FFN + attention V are Bayesian, head is deterministic."""
+    return GPTConfig(
+        vocab_size=256, block_size=32, n_layer=2, n_head=2,
+        n_embd=64, dropout=0.0, bias=True,
+        bayes_head=BayesConfig(enabled=False),
+        bayes_ffn=BayesConfig(enabled=True, prior_std=1.0),
+        bayes_attn_v=BayesConfig(enabled=True, prior_std=1.0),
     )
 
 
@@ -233,8 +244,12 @@ class TestFFNBayesian:
         """Attention Q/K/V and proj should remain DeterministicLinear."""
         model = MiniGPT(_small_ffn_bayesian_config())
         for i, block in enumerate(model.blocks):
-            assert isinstance(block.attn.qkv, DeterministicLinear), \
-                f"block {i} attn.qkv should be DeterministicLinear"
+            assert isinstance(block.attn.q_proj, DeterministicLinear), \
+                f"block {i} attn.q_proj should be DeterministicLinear"
+            assert isinstance(block.attn.k_proj, DeterministicLinear), \
+                f"block {i} attn.k_proj should be DeterministicLinear"
+            assert isinstance(block.attn.v_proj, DeterministicLinear), \
+                f"block {i} attn.v_proj should be DeterministicLinear"
             assert isinstance(block.attn.proj, DeterministicLinear), \
                 f"block {i} attn.proj should be DeterministicLinear"
 
@@ -268,6 +283,43 @@ class TestFFNBayesian:
             "MI should be > 0 for FFN-Bayesian model"
 
 
+class TestFFNAttnVBayesian:
+    """A3: FFN + attention V Bayesian; Q/K/proj deterministic; head deterministic."""
+
+    def test_attn_v_layers_are_bayesian(self):
+        model = MiniGPT(_small_ffn_attn_v_bayesian_config())
+        for i, block in enumerate(model.blocks):
+            assert isinstance(block.attn.v_proj, BayesianLinear), \
+                f"block {i} attn.v_proj should be BayesianLinear"
+
+    def test_attn_qk_and_output_proj_are_deterministic(self):
+        model = MiniGPT(_small_ffn_attn_v_bayesian_config())
+        for i, block in enumerate(model.blocks):
+            assert isinstance(block.attn.q_proj, DeterministicLinear), \
+                f"block {i} attn.q_proj should be DeterministicLinear"
+            assert isinstance(block.attn.k_proj, DeterministicLinear), \
+                f"block {i} attn.k_proj should be DeterministicLinear"
+            assert isinstance(block.attn.proj, DeterministicLinear), \
+                f"block {i} attn.proj should be DeterministicLinear"
+
+    def test_mi_positive_for_ffn_attn_v_bayesian_model(self):
+        torch.manual_seed(42)
+        config = _small_ffn_attn_v_bayesian_config()
+        model = MiniGPT(config)
+        model.eval()
+        x = torch.randint(0, config.vocab_size, (1, 16))
+
+        probs_list = []
+        for _ in range(30):
+            logits, _ = model(x)
+            probs_list.append(torch.softmax(logits, dim=-1))
+        probs = torch.stack(probs_list, dim=0)[:, 0]
+
+        metrics = _compute_token_metrics(probs)
+        assert metrics["mi"].mean().item() > 0, \
+            "MI should be > 0 for FFN+AttnV Bayesian model"
+
+
 # --- Path detection tests ---
 
 class TestHasBayesianBody:
@@ -283,4 +335,10 @@ class TestHasBayesianBody:
         """A2 model: FFN Bayesian -> must take A2 path (full forward N times)."""
         from minigpt.uncertainty import _has_bayesian_body
         model = MiniGPT(_small_ffn_bayesian_config())
+        assert _has_bayesian_body(model)
+
+    def test_ffn_and_attn_v_bayesian(self):
+        """A3 model: FFN + attn V Bayesian -> must take full-forward MC path."""
+        from minigpt.uncertainty import _has_bayesian_body
+        model = MiniGPT(_small_ffn_attn_v_bayesian_config())
         assert _has_bayesian_body(model)

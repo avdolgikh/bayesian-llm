@@ -18,6 +18,8 @@ model:
     enabled: false
   bayes_ffn:
     enabled: false
+  bayes_attn_v:
+    enabled: false
 
 train:
   steps: 2000
@@ -32,6 +34,7 @@ train:
   eval_iters: 20
   checkpoint_interval: 500
   gradient_accumulation_steps: 1
+  kl_weight: 0.0
   seed: 1337
   device: auto
 

@@ -22,8 +22,9 @@ model:
   bayes_ffn:
     enabled: true
     prior_std: 1.0
-    kl_weight: 0.2
     init_rho: -2.0
+  bayes_attn_v:
+    enabled: false
 
 train:
   steps: 100000
@@ -39,6 +40,7 @@ train:
   checkpoint_interval: 5000
   checkpoint_dir: "data/checkpoints"
   gradient_accumulation_steps: 1
+  kl_weight: 0.2
   kl_annealing_steps: 10000
   adam_beta1: 0.9
   adam_beta2: 0.95

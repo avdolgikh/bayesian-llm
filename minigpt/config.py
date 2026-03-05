@@ -33,13 +33,16 @@ DEFAULT_CONFIG: dict = {
         "bayes_head": {
             "enabled": False,
             "prior_std": 1.0,
-            "kl_weight": 1.0,
             "init_rho": -1.0,
         },
         "bayes_ffn": {
             "enabled": False,
             "prior_std": 1.0,
-            "kl_weight": 1.0,
+            "init_rho": -1.0,
+        },
+        "bayes_attn_v": {
+            "enabled": False,
+            "prior_std": 1.0,
             "init_rho": -1.0,
         },
     },
@@ -57,6 +60,7 @@ DEFAULT_CONFIG: dict = {
         "checkpoint_interval": 500,
         "checkpoint_dir": "data/checkpoints",
         "gradient_accumulation_steps": 1,
+        "kl_weight": 0.0,
         "kl_annealing_steps": 0,
         "adam_beta1": 0.9,
         "adam_beta2": 0.95,
@@ -137,7 +141,6 @@ def _build_bayes_config(d: dict) -> BayesConfig:
     return BayesConfig(
         enabled=d.get("enabled", False),
         prior_std=d.get("prior_std", 1.0),
-        kl_weight=d.get("kl_weight", 1.0),
         init_rho=d.get("init_rho", -5.0),
     )
 
@@ -158,6 +161,7 @@ def build_gpt_config(cfg: dict, vocab_size: int) -> GPTConfig:
         bias=m["bias"],
         bayes_head=_build_bayes_config(m.get("bayes_head", {})),
         bayes_ffn=_build_bayes_config(m.get("bayes_ffn", {})),
+        bayes_attn_v=_build_bayes_config(m.get("bayes_attn_v", {})),
     )
 
 
@@ -195,6 +199,14 @@ def validate_config(cfg: dict) -> None:
         )
     if cfg["train"]["warmup_steps"] >= cfg["train"]["steps"]:
         raise ValueError("train.warmup_steps must be < train.steps")
+    kl_weight = cfg["train"]["kl_weight"]
+    if kl_weight < 0:
+        raise ValueError(f"train.kl_weight must be >= 0, got {kl_weight}")
+    bayes_enabled = any(
+        cfg["model"][key]["enabled"] for key in ("bayes_head", "bayes_ffn", "bayes_attn_v")
+    )
+    if bayes_enabled and kl_weight <= 0:
+        raise ValueError("train.kl_weight must be > 0 when any Bayesian component is enabled")
     n_embd = cfg["model"]["n_embd"]
     n_head = cfg["model"]["n_head"]
     if n_embd % n_head != 0:

@@ -10,7 +10,6 @@ from torch.nn import functional as F
 class BayesConfig:
     enabled: bool = False
     prior_std: float = 1.0
-    kl_weight: float = 1.0
     init_rho: float = -1.0
 
 

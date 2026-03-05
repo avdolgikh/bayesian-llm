@@ -1,6 +1,6 @@
 experiment:
-  name: a1-agnews
-  run_name: a1-agnews
+  name: a3-agnews
+  run_name: a3-agnews
   mlflow_uri: "sqlite:///mlflow.db"
 
 data:
@@ -18,16 +18,20 @@ model:
   dropout: 0.2
   bias: true
   bayes_head:
+    enabled: false
+    prior_std: 1.0
+    init_rho: -1.0
+  bayes_ffn:
     enabled: true
     prior_std: 1.0
     init_rho: -2.0
-  bayes_ffn:
-    enabled: false
   bayes_attn_v:
-    enabled: false
+    enabled: true
+    prior_std: 1.0
+    init_rho: -3.0
 
 train:
-  steps: 50000
+  steps: 100000
   batch_size: 32
   block_size: 256
   lr: 3.0e-4
@@ -50,7 +54,7 @@ train:
 eval:
   sample_tokens: 200
   temperature: 0.8
-  num_samples: 30
+  num_samples: 20
   n_perplexity_batches: 20
   qualitative_prompts_per_category: 5
   qualitative_max_new_tokens: 100
