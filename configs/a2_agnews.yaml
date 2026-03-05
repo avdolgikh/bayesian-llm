@@ -42,7 +42,7 @@ train:
   kl_annealing_steps: 10000
   adam_beta1: 0.9
   adam_beta2: 0.95
-  seed: 1337
+  seed: 2352
   device: auto
 
 eval:

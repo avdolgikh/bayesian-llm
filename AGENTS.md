@@ -5,7 +5,7 @@
 
 The core idea: replace point-estimate weights with learned posterior distributions, then measure how much the model's predictions disagree across weight samples (mutual information). High MI = "the model knows what it doesn't know" — it's uncertain about out-of-distribution inputs at the weight level, not just the token level.
 
-**Current approach:** Start small (miniGPT on AG News), progressively make layers Bayesian (A1: output head → A2: FFN → future: Q/K/V), validate that MI separates ID from OOD text, then scale to real LLMs via Bayesian LoRA (B1).
+**Current approach:** Start small (miniGPT on AG News), progressively make layers Bayesian (A1: output head → A2: FFN → A3: attention V), validate that MI separates ID from OOD text, then scale to real LLMs via Bayesian LoRA (B1).
 
 ## Project Structure
 `docs/` — PDF papers (theory baseline). `specs/` — planning docs (active: `specs/refined-spec-feb2026.md`).
@@ -20,8 +20,8 @@ minigpt/          # Python package — all model code
   config.py       # YAML config ↔ dataclass bridge
   uncertainty.py  # Epistemic uncertainty (MI via MC sampling)
 configs/          # YAML config files per experiment
-experiments/      # Runnable scripts (a0_baseline, a1_bayes_output, a2_bayes_ffn)
-  runner.py       # Shared runner for Bayesian milestones — A1/A2 are thin wrappers
+experiments/      # Runnable scripts (a0_baseline, a1_bayes_output, a2_bayes_ffn; a3 planned)
+  runner.py       # Shared runner for Bayesian milestones — A1/A2 are thin wrappers (A3 planned)
 scripts/          # Utilities (dump_mlflow_run, profile_gpu, eval_checkpoint)
 tests/            # pytest (28 tests)
 data/             # Local datasets (gitignored)
@@ -48,7 +48,7 @@ BPE via `tiktoken` (GPT-2 encoding, vocab_size=50257).
 ## Experiment Tracking
 - **MLflow** (local, `sqlite:///mlflow.db`). `mlflow.db` and `mlruns/` are **gitignored** (kept local only).
 - Logs: hyperparams, train/val loss, perplexity, LR, test_id/test_ood perplexity, MI metrics, sigma stats, generated samples.
-- Tags: `dataset`, `milestone` (a0/a1/a2), `gpu`.
+- Tags: `dataset`, `milestone` (a0/a1/a2/a3), `gpu`.
 - `--no-mlflow` flag to disable. Launch UI: `mlflow ui --backend-store-uri sqlite:///mlflow.db`
 
 ## Environment & Tooling
@@ -63,14 +63,16 @@ PyTorch + `torch.distributions`. No JAX, no TensorFlow.
 
 - **A0: DONE** — Deterministic miniGPT on AG News. 4L/4H/256d, 16M params. test_id_ppl=49.11, test_ood_ppl=540.28. MLflow `5dc45450`.
 - **A1: DONE** — Bayesian output head (BayesianLinear on lm_head). 42M params (25.7M Bayesian). Best MI ratio **1.36x** (σ=0.22). Ceiling at 1.2–1.4x — detects OOD at vocabulary level only. All ELBO/MI/sigma infrastructure validated. See [A1 Report](#a1-report).
-- **A2: TUNING** — Bayesian FFN (MLP.fc + MLP.proj, 4 blocks). 20M params (4.2M Bayesian, weight-tied head). Best MI ratio **1.43x batch / 1.70x qualitative** (σ mean=0.147, posteriors learned). See [A2 Report](#a2-report).
+- **A2: DONE** — Bayesian FFN (MLP.fc + MLP.proj, 4 blocks). 20M params (4.2M Bayesian, weight-tied head). Best MI ratio **1.43x batch / 1.70x qualitative** (σ mean=0.147, posteriors learned). Confirmation run (seed=2352) reproduced separation at **1.36x batch / 1.55x qualitative**. See [A2 Report](#a2-report).
+- **A3: PLANNED** — Bayesian FFN + Bayesian attention value projection (`V`) with diagonal posteriors. Keep `Q/K` deterministic for stability and attribution. Spec: `specs/a3-bayesian-ffn-attention-v.md`.
 - **B1 (future):** Bayesian LoRA on open-weight LLM.
 
 ## Bayesian Layer Strategy (order)
 1. Output head (A1) — simplest, proves pipeline
 2. FFN layers (A2) — strongest epistemic signal (FFN stores factual knowledge)
-3. Q/K/V projections — optional, later
-4. Embeddings — optional, later
+3. Attention value projection `V` (A3) — add content-path uncertainty with stable routing
+4. Q/K projections — optional, later
+5. Embeddings — optional, later
 
 ## Epistemic Uncertainty Measurement
 - Temperature = 0. All stochasticity from Bayesian weights.
@@ -82,7 +84,7 @@ PyTorch + `torch.distributions`. No JAX, no TensorFlow.
 ## Configuration System
 Pipeline: `DEFAULT_CONFIG → YAML file → CLI --set overrides → validate`.
 
-Configs: `a0_baseline.yaml` (TinyShakespeare), `a0_agnews.yaml`, `a1_agnews.yaml`, `a2_agnews.yaml`.
+Configs: `a0_baseline.yaml` (TinyShakespeare), `a0_agnews.yaml`, `a1_agnews.yaml`, `a2_agnews.yaml`, `a3_agnews.yaml` (planned).
 
 Key conventions:
 - `vocab_size` always from tokenizer, never config.
@@ -186,11 +188,13 @@ ELBO training + KL annealing, best-ELBO checkpoint, streaming MC sampling (AMP-c
 | KL (final) | — | 15.7M | 5.35M | **3.20M** |
 | KL trend | — | ↓ (58→16M) | ↑ pathological | **↓ then flat (healthy)** |
 
-MLflow runs: R1=`93ff41da`, R2=`76d049b7`.
+MLflow runs: R1=`93ff41da`, R2=`76d049b7`, R3=`1238951099144292844c33258721fa80`.
 
 **A2 R1** (init_rho=-3, 50K steps): Posteriors frozen at init (σ stuck at softplus(-3)=0.049). KL rising (structural, not informative). Despite this, MI ratio 1.38x batch / 1.57x qualitative — matching A1's best with 6x fewer Bayesian params.
 
 **A2 R2** (init_rho=-2, 100K steps): Posteriors learned. σ range [0.036, 0.966] — model differentiated which weights need certainty vs uncertainty. KL decreased then stabilized (healthy). Best ELBO at step 98K.
+
+**A2 R3 (confirmation run, seed=2352)** (init_rho=-2, 100K steps): Core behavior reproduced on a new run. Sigma stats remained healthy (mean=0.1509, range [0.0229, 0.9382]), MI separated ID/OOD (batch=1.36x, qualitative=1.55x), and KL remained stable (~3.17M). This run confirms A2 signal is robust, with expected variance vs the best-seed run.
 
 ### A2 R2 Qualitative MI (prompt-token scoring)
 - World (ID): 0.050 | Sports (ID): 0.053 | Business (OOD): 0.090 | Sci/Tech (OOD): 0.088
@@ -207,6 +211,8 @@ MLflow runs: R1=`93ff41da`, R2=`76d049b7`.
 4. **FFN uncertainty is topic-level, not vocabulary-level.** In A1: Sci/Tech >> Business (vocabulary jargon). In A2: Business ≈ Sci/Tech — FFN detects unfamiliar content patterns, not unfamiliar words.
 
 5. **FFN is more parameter-efficient than output head.** 4.2M Bayesian params produce better MI separation than A1's 25.7M. Weight tying preserved (head deterministic).
+
+6. **A2 is reproducible enough to close.** The seed-2352 confirmation run preserved the same qualitative behavior (OOD MI > ID MI, learned posteriors, healthy KL), so A2 is closed and B1 is the next milestone.
 
 ### Tuning Levers (if further runs needed)
 - If posteriors frozen: increase init_rho (try -1) or reduce kl_weight (0.05–0.1).
