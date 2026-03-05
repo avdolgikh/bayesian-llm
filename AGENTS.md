@@ -8,7 +8,7 @@ The core idea: replace point-estimate weights with learned posterior distributio
 **Current approach:** Start small (miniGPT on AG News), progressively make layers Bayesian (A1: output head → A2: FFN → A3: attention V), validate that MI separates ID from OOD text, then scale to real LLMs via Bayesian LoRA (B1).
 
 ## Project Structure
-`docs/` — PDF papers (theory baseline). `specs/` — planning docs (active: `specs/refined-spec-feb2026.md`).
+`docs/` — PDF papers (theory baseline). `specs/` — planning docs (active: `specs/refined-spec-feb2026.md`). B1 stage-1 tech spec: `specs/b1-laplace-tech-spec-mar2026.md`.
 
 ```
 minigpt/          # Python package — all model code
