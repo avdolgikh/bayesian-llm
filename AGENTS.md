@@ -22,7 +22,7 @@ minigpt/          # Python package — all model code
 configs/          # YAML config files per experiment
 experiments/      # Runnable scripts (a0_baseline, a1_bayes_output, a2_bayes_ffn, a3_bayes_ffn_attn_v)
   runner.py       # Shared runner for Bayesian milestones — A1/A2/A3 are thin wrappers
-scripts/          # Utilities (dump_mlflow_run, profile_gpu, eval_checkpoint)
+scripts/          # Utilities (dump_mlflow_run, compare_runs, profile_gpu, eval_checkpoint)
 tests/            # pytest (28 tests)
 data/             # Local datasets (gitignored)
 ```
@@ -32,6 +32,7 @@ data/             # Local datasets (gitignored)
 - **No extra Bayesian libraries.** Only `torch.distributions`. Manual implementation preferred.
 - **No modern transformer tricks** (RoPE, SwiGLU, MoE, etc.). Keep miniGPT basic.
 - **Document on the fly** in this file — during implementation, not after.
+- **No unsolicited AGENTS.md cleanup.** Do not reformat, normalize typography/encoding, or rewrite text unless explicitly requested; only apply the exact requested doc change.
 - **Explicit configs.** Every parameter in YAML — never rely on code defaults.
 
 ## Datasets
@@ -116,6 +117,8 @@ python experiments/a1_bayes_output.py --config configs/a1_agnews.yaml  # A1
 python experiments/a2_bayes_ffn.py --config configs/a2_agnews.yaml     # A2
 python experiments/a3_bayes_ffn_attn_v.py --config configs/a3_agnews.yaml  # A3
 python scripts/dump_mlflow_run.py <run_id>       # inspect run
+uv run python scripts/compare_runs.py --runs <run_id...> --baseline <run_id>  # compare runs vs gates
+UV_CACHE_DIR=.uv-cache uv run python scripts/compare_runs.py --runs <run_id...> --baseline <run_id>  # if uv cache permission errors
 python scripts/eval_checkpoint.py <ckpt> --config <yaml>  # eval any checkpoint
 ```
 
@@ -259,10 +262,9 @@ Conclusion:
 - Likely issue: attention `v_proj` posteriors are under-learning with `init_rho=-3.0`
   (sigma means stayed low, ~`0.04–0.07` per block) compared to FFN posteriors.
 
-Immediate tuning plan:
-1. Increase `model.bayes_attn_v.init_rho` from `-3.0` to `-2.0`.
-2. Reduce `train.kl_weight` from `0.2` to `0.15` (or `0.1`) to offset added Bayesian params.
-3. Run one-variable-at-a-time sweeps and compare against A2 gates.
+Updated tuning history:
+- Run 2 already tested `model.bayes_attn_v.init_rho=-2.0` (from `-3.0`).
+- Next experiment tested lower KL pressure via `train.kl_weight=0.15`.
 
 Second training run:
 - MLflow run: `1848a95f9d494a6baca5e41a5cd65829`
@@ -274,16 +276,52 @@ Second training run:
 - Qualitative MI ratio: `1.41x`
 - Final KL loss: `3.63M`
 
+Third training run:
+- Command: `python experiments/a3_bayes_ffn_attn_v.py --config configs/a3_agnews.yaml`
+- MLflow run: `c7855477d3bf4ae09bd66fcb3949351a`
+- Key config change vs run 2: `train.kl_weight=0.15` (from `0.2`)
+- Best val loss (ELBO criterion): `4.3571` at step `90,000`
+- Sigma stats: mean=`0.1253`, std=`0.0338`, min=`0.0375`, max=`0.7410`
+- Test ID/OOD perplexity: `61.23` / `551.91`
+- MI (ID/OOD): `0.0618` / `0.0795` -> batch ratio `1.29x`
+- Qualitative MI ratio: `1.41x`
+- Final KL loss: `3.85M`
+
+KL trajectory diagnostics (MLflow metric history, 51 eval points each):
+- A2 best (`76d049b7...`): KL `3.306M` -> `3.200M` (overall decreasing).
+- A2 repro (`12389510...`): KL `3.306M` -> `3.172M` (overall decreasing).
+- A3 run 1 (`660914c3...`, `kl_weight=0.2`): KL `3.971M` -> `3.832M` (overall decreasing).
+- A3 run 2 (`1848a95f...`, `kl_weight=0.2`): KL `3.720M` -> `3.633M` (overall decreasing).
+- A3 run 3 (`c7855477...`, `kl_weight=0.15`): KL `3.720M` -> `3.848M` (overall increasing).
+
+Interpretation:
+- Rising raw KL does **not** mean posterior is not training. It means posterior moved farther from prior.
+- Training optimizes `CE + (effective_kl_weight / num_train_tokens) * KL`.
+- Lowering `train.kl_weight` weakens KL pressure and can allow CE-driven posterior drift (higher raw KL).
+- KL is the variational inference term `KL(q(w)||p(w))`, not only optional regularization.
+
 Cross-run A3 conclusion:
 - Run 2 confirmed that `init_rho=-2.0` unlocks attention-`v_proj` posterior learning
   (per-block sigma means increased into ~`0.10–0.14`), but uncertainty separation did not improve.
+- Run 3 (`kl_weight=0.15`) did not improve MI separation or ID perplexity and introduced an
+  overall increasing KL trajectory.
 - A3 remains below A2:
   - A2 best: batch `1.42x`, qualitative `1.70x`, test_id_ppl `53.53`
   - A2 repro: batch `1.36x`, qualitative `1.55x`, test_id_ppl `55.08`
   - A3 run 1: batch `1.29x`, qualitative `1.39x`, test_id_ppl `59.20`
   - A3 run 2: batch `1.27x`, qualitative `1.41x`, test_id_ppl `61.97`
+  - A3 run 3: batch `1.29x`, qualitative `1.41x`, test_id_ppl `61.23`
 - Working hypothesis: current Bayesian `V` adds broad uncertainty (raises MI on both ID and OOD)
   but does not improve discriminative epistemic separation.
+
+Updated tuning plan (one variable at a time):
+1. Keep baseline fixed at `init_rho=-2.0` (FFN + Attn-V), `train.kl_weight=0.2`.
+2. Sweep `model.bayes_attn_v.prior_std` only: `0.7` then `0.5`.
+3. Compare with fixed gates (A2 repro floor):
+   - Batch MI ratio >= `1.36x`
+   - Qualitative MI ratio >= `1.55x`
+   - Test ID perplexity <= `58`
+4. If two prior_std sweeps fail gates, pause A3 and move focus to B1.
 
 ---
 
