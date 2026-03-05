@@ -64,7 +64,7 @@ PyTorch + `torch.distributions`. No JAX, no TensorFlow.
 - **A0: DONE** — Deterministic miniGPT on AG News. 4L/4H/256d, 16M params. test_id_ppl=49.11, test_ood_ppl=540.28. MLflow `5dc45450`.
 - **A1: DONE** — Bayesian output head (BayesianLinear on lm_head). 42M params (25.7M Bayesian). Best MI ratio **1.36x** (σ=0.22). Ceiling at 1.2–1.4x — detects OOD at vocabulary level only. All ELBO/MI/sigma infrastructure validated. See [A1 Report](#a1-report).
 - **A2: DONE** — Bayesian FFN (MLP.fc + MLP.proj, 4 blocks). 20M params (4.2M Bayesian, weight-tied head). Best MI ratio **1.43x batch / 1.70x qualitative** (σ mean=0.147, posteriors learned). Confirmation run (seed=2352) reproduced separation at **1.36x batch / 1.55x qualitative**. See [A2 Report](#a2-report).
-- **A3: IMPLEMENTED (training pending)** — Bayesian FFN + Bayesian attention value projection (`V`) with diagonal posteriors. `Q/K` and attention output projection remain deterministic. Spec: `specs/a3-bayesian-ffn-attention-v.md`.
+- **A3: TUNING** — Bayesian FFN + Bayesian attention value projection (`V`) with diagonal posteriors. Two full runs completed (`660914c3`, `1848a95f`) and both underperformed A2 on MI separation and ID perplexity. `init_rho=-2` improved `attn_v` posterior learning but did not improve OOD/ID MI ratio. Spec: `specs/a3-bayesian-ffn-attention-v.md`.
 - **B1 (future):** Bayesian LoRA on open-weight LLM.
 
 ## Bayesian Layer Strategy (order)
@@ -241,9 +241,49 @@ Validation:
 - `uv run pytest tests/ -q` → `32 passed`
 - `uv run ruff check minigpt/ experiments/ tests/` → passed
 
-Pending:
-- First A3 training run + metrics logging to MLflow:
-  `python experiments/a3_bayes_ffn_attn_v.py --config configs/a3_agnews.yaml`
+First training run:
+- Command: `python experiments/a3_bayes_ffn_attn_v.py --config configs/a3_agnews.yaml`
+- MLflow run: `660914c3a2744188bd197afa3b4901ae`
+- Seed: `1337`
+- Model params: `18,456,320` (Bayesian: `4,730,880`)
+- Best val loss (ELBO criterion): `4.3734` at step `90,000`
+- Sigma stats: mean=`0.1329`, std=`0.0594`, min=`0.0244`, max=`0.9043`
+- Test ID/OOD perplexity: `59.20` / `554.70`
+- MI (ID/OOD): `0.0582` / `0.0753` → batch ratio `1.29x`
+- Qualitative MI ratio: `1.39x`
+- Final KL loss: `3.83M`
+
+Conclusion:
+- A3 architecture works end-to-end, but this initial run is a regression vs A2 on MI separation and
+  ID perplexity. A3 remains in tuning.
+- Likely issue: attention `v_proj` posteriors are under-learning with `init_rho=-3.0`
+  (sigma means stayed low, ~`0.04–0.07` per block) compared to FFN posteriors.
+
+Immediate tuning plan:
+1. Increase `model.bayes_attn_v.init_rho` from `-3.0` to `-2.0`.
+2. Reduce `train.kl_weight` from `0.2` to `0.15` (or `0.1`) to offset added Bayesian params.
+3. Run one-variable-at-a-time sweeps and compare against A2 gates.
+
+Second training run:
+- MLflow run: `1848a95f9d494a6baca5e41a5cd65829`
+- Key config change vs run 1: `model.bayes_attn_v.init_rho=-2.0` (from `-3.0`)
+- Best val loss (ELBO criterion): `4.4310` at step `90,000`
+- Sigma stats: mean=`0.1405`, std=`0.0559`, min=`0.0365`, max=`0.9036`
+- Test ID/OOD perplexity: `61.97` / `573.95`
+- MI (ID/OOD): `0.0621` / `0.0789` → batch ratio `1.27x`
+- Qualitative MI ratio: `1.41x`
+- Final KL loss: `3.63M`
+
+Cross-run A3 conclusion:
+- Run 2 confirmed that `init_rho=-2.0` unlocks attention-`v_proj` posterior learning
+  (per-block sigma means increased into ~`0.10–0.14`), but uncertainty separation did not improve.
+- A3 remains below A2:
+  - A2 best: batch `1.42x`, qualitative `1.70x`, test_id_ppl `53.53`
+  - A2 repro: batch `1.36x`, qualitative `1.55x`, test_id_ppl `55.08`
+  - A3 run 1: batch `1.29x`, qualitative `1.39x`, test_id_ppl `59.20`
+  - A3 run 2: batch `1.27x`, qualitative `1.41x`, test_id_ppl `61.97`
+- Working hypothesis: current Bayesian `V` adds broad uncertainty (raises MI on both ID and OOD)
+  but does not improve discriminative epistemic separation.
 
 ---
 

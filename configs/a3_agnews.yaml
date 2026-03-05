@@ -28,7 +28,7 @@ model:
   bayes_attn_v:
     enabled: true
     prior_std: 1.0
-    init_rho: -3.0
+    init_rho: -2.0
 
 train:
   steps: 100000

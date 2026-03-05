@@ -215,9 +215,12 @@ Q/K/V split they should assert deterministic `q_proj` and `k_proj` instead.
 10. Document results in `AGENTS.md`.
 
 Implementation status (2026-03-05):
-- Done: steps 1-8.
-- Pending: step 9 (first full A3 train/eval run and MLflow metrics).
-- Partial: step 10 (implementation status documented; run results pending).
+- Done: steps 1-10 (implementation + first full A3 train/eval run documented).
+- First run: `660914c3a2744188bd197afa3b4901ae` (seed=1337).
+- Second run: `1848a95f9d494a6baca5e41a5cd65829` (`attn_v.init_rho=-2.0`).
+- Outcome: A3 currently underperforms A2 on MI separation and ID perplexity across both runs.
+  `init_rho=-2.0` improved attention-`V` posterior learning but did not improve OOD/ID MI ratio.
+  Further tuning required.
 
 ## 12. Follow-Up After A3
 
