@@ -27,7 +27,7 @@ model:
     init_rho: -2.0
   bayes_attn_v:
     enabled: true
-    prior_std: 0.7
+    prior_std: 1.0
     init_rho: -2.0
 
 train:

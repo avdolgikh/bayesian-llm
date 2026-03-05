@@ -65,8 +65,8 @@ PyTorch + `torch.distributions`. No JAX, no TensorFlow.
 - **A0: DONE** — Deterministic miniGPT on AG News. 4L/4H/256d, 16M params. test_id_ppl=49.11, test_ood_ppl=540.28. MLflow `5dc45450`.
 - **A1: DONE** — Bayesian output head (BayesianLinear on lm_head). 42M params (25.7M Bayesian). Best MI ratio **1.36x** (σ=0.22). Ceiling at 1.2–1.4x — detects OOD at vocabulary level only. All ELBO/MI/sigma infrastructure validated. See [A1 Report](#a1-report).
 - **A2: DONE** — Bayesian FFN (MLP.fc + MLP.proj, 4 blocks). 20M params (4.2M Bayesian, weight-tied head). Best MI ratio **1.43x batch / 1.70x qualitative** (σ mean=0.147, posteriors learned). Confirmation run (seed=2352) reproduced separation at **1.36x batch / 1.55x qualitative**. See [A2 Report](#a2-report).
-- **A3: TUNING** — Bayesian FFN + Bayesian attention value projection (`V`) with diagonal posteriors. Two full runs completed (`660914c3`, `1848a95f`) and both underperformed A2 on MI separation and ID perplexity. `init_rho=-2` improved `attn_v` posterior learning but did not improve OOD/ID MI ratio. Spec: `specs/a3-bayesian-ffn-attention-v.md`.
-- **B1 (future):** Bayesian LoRA on open-weight LLM.
+- **A3: CLOSED** — Bayesian FFN + Bayesian attention value projection (`V`) with diagonal posteriors. Four runs completed (`660914c3`, `1848a95f`, `c7855477`, `910b0b43`); all underperformed A2 on MI separation and ID perplexity. Final archived A3 config (no rerun): `bayes_ffn.init_rho=-2.0`, `bayes_ffn.prior_std=1.0`, `bayes_attn_v.init_rho=-2.0`, `bayes_attn_v.prior_std=1.0`, `train.kl_weight=0.2` (reference run `1848a95f`). Spec: `specs/a3-bayesian-ffn-attention-v.md`.
+- **B1 (next):** Bayesian LoRA on open-weight LLM.
 
 ## Bayesian Layer Strategy (order)
 1. Output head (A1) — simplest, proves pipeline
@@ -287,12 +287,24 @@ Third training run:
 - Qualitative MI ratio: `1.41x`
 - Final KL loss: `3.85M`
 
+Fourth training run:
+- Command: `python experiments/a3_bayes_ffn_attn_v.py --config configs/a3_agnews.yaml --set model.bayes_attn_v.prior_std=0.7`
+- MLflow run: `910b0b43a53a48518936f0ac41972e7a`
+- Key config change vs run 2: `model.bayes_attn_v.prior_std=0.7` (from `1.0`, with `train.kl_weight=0.2`)
+- Best val loss (ELBO criterion): `4.4204` at step `80,000`
+- Sigma stats: mean=`0.1388`, std=`0.0502`, min=`0.0385`, max=`0.8372`
+- Test ID/OOD perplexity: `62.33` / `558.66`
+- MI (ID/OOD): `0.0625` / `0.0786` -> batch ratio `1.26x`
+- Qualitative MI ratio: `1.35x`
+- Final KL loss: `3.56M`
+
 KL trajectory diagnostics (MLflow metric history, 51 eval points each):
 - A2 best (`76d049b7...`): KL `3.306M` -> `3.200M` (overall decreasing).
 - A2 repro (`12389510...`): KL `3.306M` -> `3.172M` (overall decreasing).
 - A3 run 1 (`660914c3...`, `kl_weight=0.2`): KL `3.971M` -> `3.832M` (overall decreasing).
 - A3 run 2 (`1848a95f...`, `kl_weight=0.2`): KL `3.720M` -> `3.633M` (overall decreasing).
 - A3 run 3 (`c7855477...`, `kl_weight=0.15`): KL `3.720M` -> `3.848M` (overall increasing).
+- A3 run 4 (`910b0b43...`, `attn_v prior_std=0.7`): KL `3.628M` -> `3.562M` (overall decreasing).
 
 Interpretation:
 - Rising raw KL does **not** mean posterior is not training. It means posterior moved farther from prior.
@@ -305,24 +317,24 @@ Cross-run A3 conclusion:
   (per-block sigma means increased into ~`0.10–0.14`), but uncertainty separation did not improve.
 - Run 3 (`kl_weight=0.15`) did not improve MI separation or ID perplexity and introduced an
   overall increasing KL trajectory.
+- Run 4 (`attn_v prior_std=0.7`) reduced KL and narrowed sigma tails, but further regressed
+  MI separation (batch `1.26x`, qualitative `1.35x`) and ID perplexity (`62.33`).
 - A3 remains below A2:
   - A2 best: batch `1.42x`, qualitative `1.70x`, test_id_ppl `53.53`
   - A2 repro: batch `1.36x`, qualitative `1.55x`, test_id_ppl `55.08`
   - A3 run 1: batch `1.29x`, qualitative `1.39x`, test_id_ppl `59.20`
   - A3 run 2: batch `1.27x`, qualitative `1.41x`, test_id_ppl `61.97`
   - A3 run 3: batch `1.29x`, qualitative `1.41x`, test_id_ppl `61.23`
+  - A3 run 4: batch `1.26x`, qualitative `1.35x`, test_id_ppl `62.33`
 - Working hypothesis: current Bayesian `V` adds broad uncertainty (raises MI on both ID and OOD)
   but does not improve discriminative epistemic separation.
 
-Updated tuning plan (one variable at a time):
-1. Keep baseline fixed at `init_rho=-2.0` (FFN + Attn-V), `train.kl_weight=0.2`.
-2. Sweep `model.bayes_attn_v.prior_std` only: `0.7` then `0.5`.
-3. Compare with fixed gates (A2 repro floor):
-   - Batch MI ratio >= `1.36x`
-   - Qualitative MI ratio >= `1.55x`
-   - Test ID perplexity <= `58`
-4. If two prior_std sweeps fail gates, pause A3 and move focus to B1.
-
+A3 closure decision:
+1. A3 is closed (negative result vs A2).
+2. Final archived A3 hyperparameters: `model.bayes_ffn.init_rho=-2.0`, `model.bayes_ffn.prior_std=1.0`, `model.bayes_attn_v.init_rho=-2.0`, `model.bayes_attn_v.prior_std=1.0`, `train.kl_weight=0.2`.
+3. Reference run for archived config: `1848a95f9d494a6baca5e41a5cd65829`.
+4. No further A3 reruns are planned.
+5. Next milestone: B1.
 ---
 
 ## Future Work (Parked)
