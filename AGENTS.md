@@ -19,11 +19,15 @@ minigpt/          # Python package — all model code
   evaluate.py     # Perplexity, text generation
   config.py       # YAML config ↔ dataclass bridge
   uncertainty.py  # Epistemic uncertainty (MI via MC sampling)
+  laplace.py      # Post-hoc Laplace: curvature fitting, sampling, context manager
 configs/          # YAML config files per experiment
-experiments/      # Runnable scripts (a0_baseline, a1_bayes_output, a2_bayes_ffn, a3_bayes_ffn_attn_v)
-  runner.py       # Shared runner for Bayesian milestones — A1/A2/A3 are thin wrappers
-scripts/          # Utilities (dump_mlflow_run, compare_runs, profile_gpu, eval_checkpoint)
-tests/            # pytest (28 tests)
+experiments/      # Runnable scripts (a0_baseline, a1–a3 Bayesian, b1_laplace_baseline)
+  experiment_setup.py  # Shared setup: CLI parsing, config, data, model, device
+  eval_utils.py        # Shared eval: perplexity suite, MI suite, qualitative eval
+  mlflow_utils.py      # Shared MLflow: context, logging helpers
+  runner.py            # A-series orchestrator — A1/A2/A3 are thin wrappers
+scripts/          # Utilities (dump_mlflow_run, compare_runs, profile_gpu, eval_checkpoint, fit_laplace)
+tests/            # pytest (56 tests)
 data/             # Local datasets (gitignored)
 ```
 
@@ -66,7 +70,7 @@ PyTorch + `torch.distributions`. No JAX, no TensorFlow.
 - **A1: DONE** — Bayesian output head (BayesianLinear on lm_head). 42M params (25.7M Bayesian). Best MI ratio **1.36x** (σ=0.22). Ceiling at 1.2–1.4x — detects OOD at vocabulary level only. All ELBO/MI/sigma infrastructure validated. See [A1 Report](#a1-report).
 - **A2: DONE** — Bayesian FFN (MLP.fc + MLP.proj, 4 blocks). 20M params (4.2M Bayesian, weight-tied head). Best MI ratio **1.43x batch / 1.70x qualitative** (σ mean=0.147, posteriors learned). Confirmation run (seed=2352) reproduced separation at **1.36x batch / 1.55x qualitative**. See [A2 Report](#a2-report).
 - **A3: CLOSED** — Bayesian FFN + Bayesian attention value projection (`V`) with diagonal posteriors. Four runs completed (`660914c3`, `1848a95f`, `c7855477`, `910b0b43`); all underperformed A2 on MI separation and ID perplexity. Final archived A3 config (no rerun): `bayes_ffn.init_rho=-2.0`, `bayes_ffn.prior_std=1.0`, `bayes_attn_v.init_rho=-2.0`, `bayes_attn_v.prior_std=1.0`, `train.kl_weight=0.2` (reference run `1848a95f`). Spec: `specs/a3-bayesian-ffn-attention-v.md`.
-- **B1 (next):** Bayesian LoRA on open-weight LLM.
+- **B1: IN PROGRESS** — Post-hoc Laplace baseline on deterministic checkpoint. Diagonal Fisher curvature on FFN params, MC sampling for MI eval. Infrastructure complete (module, tests, experiment script). Pending: full training run. See [B1 Implementation Notes](#b1-implementation-notes).
 
 ## Bayesian Layer Strategy (order)
 1. Output head (A1) — simplest, proves pipeline
@@ -85,7 +89,7 @@ PyTorch + `torch.distributions`. No JAX, no TensorFlow.
 ## Configuration System
 Pipeline: `DEFAULT_CONFIG → YAML file → CLI --set overrides → validate`.
 
-Configs: `a0_baseline.yaml` (TinyShakespeare), `a0_agnews.yaml`, `a1_agnews.yaml`, `a2_agnews.yaml`, `a3_agnews.yaml`.
+Configs: `a0_baseline.yaml` (TinyShakespeare), `a0_agnews.yaml`, `a1_agnews.yaml`, `a2_agnews.yaml`, `a3_agnews.yaml`, `b1_laplace_agnews.yaml`.
 
 Key conventions:
 - `vocab_size` always from tokenizer, never config.
@@ -100,6 +104,8 @@ python experiments/a0_baseline.py --config configs/a0_agnews.yaml
 python experiments/a1_bayes_output.py --config configs/a1_agnews.yaml
 python experiments/a2_bayes_ffn.py --config configs/a2_agnews.yaml
 python experiments/a3_bayes_ffn_attn_v.py --config configs/a3_agnews.yaml
+python experiments/b1_laplace_baseline.py --config configs/b1_laplace_agnews.yaml
+python experiments/b1_laplace_baseline.py --config configs/b1_laplace_agnews.yaml --skip-train --set laplace.checkpoint=data/checkpoints/ckpt_best.pt
 python experiments/a0_baseline.py --config configs/a0_agnews.yaml --set train.lr=1e-3
 python experiments/a0_baseline.py --config configs/a0_agnews.yaml --resume data/checkpoints/ckpt_step500.pt
 ```
@@ -110,12 +116,13 @@ Saves full config, `best_val_loss`, RNG states. LR schedule is stateless (comput
 ## Build & Dev Commands
 ```bash
 uv sync                                          # install deps
-uv run pytest tests/ -v                          # 32 unit tests
+uv run pytest tests/ -v                          # 56 unit tests
 uv run ruff check minigpt/ experiments/ tests/   # lint
 python experiments/a0_baseline.py                # A0 training (GPU)
 python experiments/a1_bayes_output.py --config configs/a1_agnews.yaml  # A1
 python experiments/a2_bayes_ffn.py --config configs/a2_agnews.yaml     # A2
 python experiments/a3_bayes_ffn_attn_v.py --config configs/a3_agnews.yaml  # A3
+python experiments/b1_laplace_baseline.py --config configs/b1_laplace_agnews.yaml  # B1
 python scripts/dump_mlflow_run.py <run_id>       # inspect run
 uv run python scripts/compare_runs.py --runs <run_id...> --baseline <run_id>  # compare runs vs gates
 UV_CACHE_DIR=.uv-cache uv run python scripts/compare_runs.py --runs <run_id...> --baseline <run_id>  # if uv cache permission errors
@@ -128,7 +135,7 @@ GitHub Actions (`.github/workflows/ci.yml`): `ruff check` → `pytest`. No GPU i
 ## Coding Style
 4 spaces, 100-char lines (ruff). `snake_case` functions, `PascalCase` classes. Type hints on public APIs.
 
-## Tests (32 total)
+## Tests (56 total)
 ```
 tests/
   test_model.py          # Weight tying (2), perplexity bounds (1)
@@ -138,6 +145,13 @@ tests/
                          # A1 architecture (4), MI invariants (4),
                          # A2 FFN architecture (5), A3 Attn-V architecture (3),
                          # path detection (3)
+  test_laplace.py        # B1 Laplace: curvature shapes (1), damping (1),
+                         # sampling reproducibility (2), zero scale (1),
+                         # logit variation (1), pipeline integration (2),
+                         # checkpoint roundtrip (1), param scope (2),
+                         # selection modes (4), curvature invariants (3),
+                         # scale/damping modulation (2), fit side effects (2),
+                         # loaded state sampling (1), e2e smoke (1)
 ```
 
 ## Commit Guidelines
@@ -335,6 +349,39 @@ A3 closure decision:
 3. Reference run for archived config: `1848a95f9d494a6baca5e41a5cd65829`.
 4. No further A3 reruns are planned.
 5. Next milestone: B1.
+---
+
+## B1 Implementation Notes
+
+### Architecture
+- **Post-hoc Laplace** — no training loop changes. Fits diagonal Fisher curvature from a deterministic checkpoint, samples from Gaussian posterior for MI evaluation.
+- New module: `minigpt/laplace.py` with `LaplaceState` dataclass, `select_params`, `fit_laplace`, `sample_laplace_params`, `apply_sampled_params` (context manager), `compute_laplace_uncertainty`, `score_sequence_laplace`, save/load utilities.
+- Core MC metrics loop (`mc_metrics_single` in `uncertainty.py`) is shared between A-series and Laplace — no duplication.
+- `compute_laplace_uncertainty` mirrors `compute_uncertainty_metrics` protocol (MI, entropy, flip rate) but uses Laplace sampling.
+
+### Config surface
+- New YAML section `laplace:` with `checkpoint`, `selection_mode`, `damping`, `sample_scale`, `n_curvature_batches`.
+- Config: `configs/b1_laplace_agnews.yaml`.
+
+### Scripts
+- `experiments/b1_laplace_baseline.py` — full pipeline: train (or load checkpoint) → fit Laplace → evaluate MI → qualitative panel → MLflow logging. Uses shared infrastructure from `experiment_setup.py`, `eval_utils.py`, `mlflow_utils.py`. Supports `--skip-train`.
+### Key implementation details
+- Curvature = empirical Fisher (average squared gradients over mini-batches). Diagonal only (no K-FAC).
+- Posterior variance = `1 / (curvature + damping)`. Damping mandatory for numerical stability.
+- Sampling: `phi ~ N(phi_hat, diag(sample_scale^2 / (curvature + damping)))`. CPU generator for reproducibility, then `.to(device)`.
+- `apply_sampled_params` context manager: temporarily patches model params, restores on exit (including on exception).
+- Selection modes: `ffn` (MLP fc/proj weights), `head` (lm_head weight), `all` (all weight matrices excluding embeddings/layernorm).
+
+### Validation
+- 24 unit tests in `tests/test_laplace.py`, all green.
+- Smoke test completed on GPU (200 training steps): end-to-end pipeline runs without errors.
+- MI ratio 1.00x with 200 steps (expected — model barely trained, curvature near-zero).
+
+### Pending
+- Full training run (10K steps) to produce a proper checkpoint with meaningful curvature.
+- Tuning: damping, sample_scale, n_curvature_batches.
+- Compare B1 MI separation against A2 best (1.43x batch / 1.70x qualitative).
+
 ---
 
 ## Future Work (Parked)

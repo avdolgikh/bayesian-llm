@@ -7,12 +7,60 @@ Core metrics:
 - Top-1 flip rate: fraction of samples where argmax differs from mode
 """
 
+from collections.abc import Callable
+
 import torch
 from torch.nn import functional as F
 
 from minigpt.layers import BayesianLinear
 from minigpt.model import MiniGPT
 from minigpt.train import get_batch
+
+
+def mc_metrics_single(
+    get_logits_fn: Callable[[int], torch.Tensor],
+    n_samples: int,
+    seq_len: int,
+    vocab_size: int,
+    device: torch.device,
+) -> dict[str, torch.Tensor]:
+    """Core MC metrics computation for a single sequence.
+
+    Args:
+        get_logits_fn: callable(sample_idx) -> logits tensor (1, seq_len, vocab).
+        n_samples: number of MC forward passes.
+        seq_len: sequence length.
+        vocab_size: vocabulary size.
+        device: torch device for accumulators.
+
+    Returns per-token tensors (seq_len,): mi, predictive_entropy, expected_entropy, flip_rate.
+    """
+    eps = 1e-10
+    p_sum = torch.zeros(seq_len, vocab_size, device=device)
+    entropy_sum = torch.zeros(seq_len, device=device)
+    argmaxes = torch.zeros(n_samples, seq_len, dtype=torch.long, device=device)
+
+    for s in range(n_samples):
+        logits = get_logits_fn(s)
+        probs = F.softmax(logits[0].float(), dim=-1)
+        p_sum.add_(probs)
+        entropy_sum.add_(-(probs * torch.log(probs + eps)).sum(dim=-1))
+        argmaxes[s] = probs.argmax(dim=-1)
+
+    p_bar = p_sum / n_samples
+    predictive_entropy = -(p_bar * torch.log(p_bar + eps)).sum(dim=-1)
+    expected_entropy = entropy_sum / n_samples
+    mi = predictive_entropy - expected_entropy
+
+    mode_tokens = argmaxes.mode(dim=0).values
+    flip_rate = (argmaxes != mode_tokens.unsqueeze(0)).float().mean(dim=0)
+
+    return {
+        "predictive_entropy": predictive_entropy,
+        "expected_entropy": expected_entropy,
+        "mi": mi,
+        "flip_rate": flip_rate,
+    }
 
 
 def _has_bayesian_body(model: MiniGPT) -> bool:
@@ -29,47 +77,18 @@ def _stream_metrics(
     h: torch.Tensor,
     n_samples: int,
 ) -> dict[str, torch.Tensor]:
-    """Streaming MC metrics for a single batch element — O(seq_len * vocab) memory.
-
-    Args:
-        model: MiniGPT model (only lm_head is called).
-        h: hidden states for one element, shape (1, seq_len, n_embd).
-        n_samples: number of MC forward passes.
-
-    Returns per-token tensors (seq_len,): mi, predictive_entropy, expected_entropy, flip_rate.
-    """
-    eps = 1e-10
-    seq_len = h.size(1)
-    device = h.device
-
-    # Running accumulators — never stack N full vocab tensors
-    p_sum = torch.zeros(seq_len, model.config.vocab_size, device=device)
-    entropy_sum = torch.zeros(seq_len, device=device)
-    argmaxes = torch.zeros(n_samples, seq_len, dtype=torch.long, device=device)
-
+    """Streaming MC metrics for a single batch element — head-only path (A1)."""
     use_amp = h.device.type == "cuda"
-    for s in range(n_samples):
-        with torch.amp.autocast(device_type=h.device.type, dtype=torch.float16, enabled=use_amp):
-            logits = model.lm_head(h)  # (1, seq_len, vocab)
-        probs = F.softmax(logits[0].float(), dim=-1)  # (seq_len, vocab) — fp32 for entropy
-        p_sum.add_(probs)
-        entropy_sum.add_(-(probs * torch.log(probs + eps)).sum(dim=-1))
-        argmaxes[s] = probs.argmax(dim=-1)
 
-    p_bar = p_sum / n_samples
-    predictive_entropy = -(p_bar * torch.log(p_bar + eps)).sum(dim=-1)
-    expected_entropy = entropy_sum / n_samples
-    mi = predictive_entropy - expected_entropy
+    def get_logits(s: int) -> torch.Tensor:
+        with torch.amp.autocast(
+            device_type=h.device.type, dtype=torch.float16, enabled=use_amp,
+        ):
+            return model.lm_head(h)
 
-    mode_tokens = argmaxes.mode(dim=0).values
-    flip_rate = (argmaxes != mode_tokens.unsqueeze(0)).float().mean(dim=0)
-
-    return {
-        "predictive_entropy": predictive_entropy,
-        "expected_entropy": expected_entropy,
-        "mi": mi,
-        "flip_rate": flip_rate,
-    }
+    return mc_metrics_single(
+        get_logits, n_samples, h.size(1), model.config.vocab_size, h.device,
+    )
 
 
 def _stream_metrics_full(
@@ -77,50 +96,19 @@ def _stream_metrics_full(
     x: torch.Tensor,
     n_samples: int,
 ) -> dict[str, torch.Tensor]:
-    """Streaming MC metrics with full forward pass per sample.
+    """Streaming MC metrics with full forward pass — body+head path (A2+)."""
+    use_amp = x.device.type == "cuda"
 
-    Like _stream_metrics, but runs the entire model (not just lm_head).
-    Used when the transformer body contains BayesianLinear layers (A2+).
+    def get_logits(s: int) -> torch.Tensor:
+        with torch.amp.autocast(
+            device_type=x.device.type, dtype=torch.float16, enabled=use_amp,
+        ):
+            logits, _ = model(x)
+        return logits
 
-    Args:
-        model: MiniGPT model with Bayesian layers in the body.
-        x: input tokens for one element, shape (1, seq_len).
-        n_samples: number of MC forward passes.
-
-    Returns per-token tensors (seq_len,): mi, predictive_entropy, expected_entropy, flip_rate.
-    """
-    eps = 1e-10
-    seq_len = x.size(1)
-    device = x.device
-    vocab = model.config.vocab_size
-
-    p_sum = torch.zeros(seq_len, vocab, device=device)
-    entropy_sum = torch.zeros(seq_len, device=device)
-    argmaxes = torch.zeros(n_samples, seq_len, dtype=torch.long, device=device)
-
-    use_amp = device.type == "cuda"
-    for s in range(n_samples):
-        with torch.amp.autocast(device_type=device.type, dtype=torch.float16, enabled=use_amp):
-            logits, _ = model(x)  # full forward pass — new weight sample each time
-        probs = F.softmax(logits[0].float(), dim=-1)  # (seq_len, vocab) — fp32
-        p_sum.add_(probs)
-        entropy_sum.add_(-(probs * torch.log(probs + eps)).sum(dim=-1))
-        argmaxes[s] = probs.argmax(dim=-1)
-
-    p_bar = p_sum / n_samples
-    predictive_entropy = -(p_bar * torch.log(p_bar + eps)).sum(dim=-1)
-    expected_entropy = entropy_sum / n_samples
-    mi = predictive_entropy - expected_entropy
-
-    mode_tokens = argmaxes.mode(dim=0).values
-    flip_rate = (argmaxes != mode_tokens.unsqueeze(0)).float().mean(dim=0)
-
-    return {
-        "predictive_entropy": predictive_entropy,
-        "expected_entropy": expected_entropy,
-        "mi": mi,
-        "flip_rate": flip_rate,
-    }
+    return mc_metrics_single(
+        get_logits, n_samples, x.size(1), model.config.vocab_size, x.device,
+    )
 
 
 @torch.no_grad()

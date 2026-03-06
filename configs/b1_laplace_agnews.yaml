@@ -1,0 +1,61 @@
+experiment:
+  name: b1-laplace
+  run_name: b1-laplace-agnews
+  mlflow_uri: "sqlite:///mlflow.db"
+
+data:
+  dataset: agnews
+  id_categories: [1, 2]      # World, Sports
+  ood_categories: [3, 4]     # Business, Sci/Tech
+  val_fraction: 0.1
+  test_fraction: 0.1
+
+model:
+  block_size: 256
+  n_layer: 4
+  n_head: 4
+  n_embd: 256
+  dropout: 0.2
+  bias: true
+  bayes_head:
+    enabled: false
+  bayes_ffn:
+    enabled: false
+  bayes_attn_v:
+    enabled: false
+
+train:
+  steps: 100000
+  batch_size: 32
+  block_size: 256
+  lr: 3.0e-4
+  weight_decay: 0.1
+  warmup_steps: 1000
+  min_lr: 1.0e-5
+  grad_clip: 1.0
+  eval_interval: 2000
+  eval_iters: 20
+  checkpoint_interval: 5000
+  checkpoint_dir: "data/checkpoints"
+  gradient_accumulation_steps: 1
+  kl_weight: 0.0
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  seed: 1337
+  device: auto
+
+laplace:
+  checkpoint: null
+  selection_mode: ffn
+  damping: 1.0
+  sample_scale: 1.0
+  n_curvature_batches: 100
+
+eval:
+  sample_tokens: 200
+  temperature: 0.8
+  num_samples: 20
+  n_perplexity_batches: 20
+  qualitative_prompts_per_category: 5
+  qualitative_max_new_tokens: 100
+  qualitative_seed: 42

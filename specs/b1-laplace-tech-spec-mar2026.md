@@ -41,38 +41,38 @@ High disagreement on OOD data means the model "knows it does not know."
 
 ## 3.1 Setup
 Let model parameters be split into:
-- `psi`: frozen deterministic backbone parameters
-- `phi`: selected parameters for Laplace posterior (adapter-only target in B1)
+- $\psi$ — frozen deterministic backbone parameters
+- $\phi$ — selected parameters for Laplace posterior (adapter-only target in B1)
 
-We start from a deterministic checkpoint with MAP-like estimate `phi_hat`.
+We start from a deterministic checkpoint with MAP-like estimate $\hat{\phi}$.
 
 ## 3.2 Local quadratic approximation
-Around `phi_hat`, approximate negative log posterior by a quadratic:
+Around $\hat{\phi}$, approximate negative log posterior by a quadratic:
 
-`-log p(phi | D) ~= const + 0.5 * (phi - phi_hat)^T * H * (phi - phi_hat)`
+$$-\log p(\phi \mid \mathcal{D}) \approx \mathrm{const} + \frac{1}{2} (\phi - \hat{\phi})^\top H\, (\phi - \hat{\phi})$$
 
-where `H` is a curvature approximation (GGN/Fisher-style, damped).
+where $H$ is a curvature approximation (GGN/Fisher-style, damped).
 
 This yields Gaussian posterior:
 
-`q(phi) = N(phi_hat, (H + lambda I)^-1)`
+$$q(\phi) = \mathcal{N}\!\left(\hat{\phi},\; (H + \lambda I)^{-1}\right)$$
 
-- `lambda > 0` is damping for numerical stability.
+- $\lambda > 0$ is damping for numerical stability.
 - B1 first version uses tractable structure (start diagonal over selected parameters).
 
 ## 3.3 Predictive uncertainty
-For input `x`, Bayesian predictive:
+For input $x$, Bayesian predictive:
 
-`p(y | x, D) = integral p(y | x, phi, psi) q(phi) dphi`
+$$p(y \mid x, \mathcal{D}) = \int p(y \mid x, \phi, \psi)\; q(\phi)\; d\phi$$
 
-Approximate with Monte Carlo samples `phi^(i) ~ q(phi)`:
+Approximate with Monte Carlo samples $\phi^{(i)} \sim q(\phi)$:
 
-`p_bar = (1/N) * sum_i softmax(logits_i)`
+$$\bar{p} = \frac{1}{N} \sum_{i=1}^{N} \mathrm{softmax}\!\left(z^{(i)}\right)$$
 
 Then compute:
-- Predictive entropy `H[p_bar]`
-- Expected entropy `(1/N) * sum_i H[p_i]`
-- Mutual information `MI = H[p_bar] - E[H[p_i]]`
+- Predictive entropy: $\mathbb{H}[\bar{p}] = -\sum_k \bar{p}_k \log \bar{p}_k$
+- Expected entropy: $\frac{1}{N} \sum_{i=1}^{N} \mathbb{H}[p^{(i)}]$
+- Mutual information: $\mathrm{MI} = \mathbb{H}[\bar{p}] - \frac{1}{N} \sum_{i=1}^{N} \mathbb{H}[p^{(i)}]$
 
 This MI is the epistemic signal used in A-milestones too, so protocol stays comparable.
 
