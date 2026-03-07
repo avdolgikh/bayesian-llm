@@ -45,10 +45,10 @@ train:
   device: auto
 
 laplace:
-  checkpoint: null
+  checkpoint: "data/checkpoints/ckpt_best.pt"
   selection_mode: ffn
   damping: 1.0
-  sample_scale: 1.0
+  sample_scale: 1.0        # Approach B: per-sample Fisher, start with default
   n_curvature_batches: 100
 
 eval:

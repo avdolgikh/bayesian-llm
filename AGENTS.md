@@ -5,10 +5,10 @@
 
 The core idea: replace point-estimate weights with learned posterior distributions, then measure how much the model's predictions disagree across weight samples (mutual information). High MI = "the model knows what it doesn't know" — it's uncertain about out-of-distribution inputs at the weight level, not just the token level.
 
-**Current approach:** Start small (miniGPT on AG News), progressively make layers Bayesian (A1: output head → A2: FFN → A3: attention V), validate that MI separates ID from OOD text, then scale to real LLMs via Bayesian LoRA (B1).
+**Current approach:** Controlled comparative study on miniGPT (AG News). Four Bayesian methods in a 2x2 matrix: (variational vs post-hoc) x (full weights vs LoRA). A-series (variational full weights) done. B-series: B1 Laplace (post-hoc full weights), B2 BLoB (variational LoRA), B3 TFB/Laplace-LoRA (post-hoc LoRA). Active spec: `specs/comparative-bayesian-llm-study.md`.
 
 ## Project Structure
-`docs/` — PDF papers (theory baseline). `specs/` — planning docs (active: `specs/refined-spec-feb2026.md`). B1 stage-1 tech spec: `specs/b1-laplace-tech-spec-mar2026.md`.
+`docs/` — PDF papers (theory baseline). `specs/` — planning docs (active: `specs/comparative-bayesian-llm-study.md`). B1 tech spec: `specs/b1-laplace-tech-spec-mar2026.md`. B1 analysis: `specs/b1-laplace-analysis.md`.
 
 ```
 minigpt/          # Python package — all model code
@@ -70,7 +70,9 @@ PyTorch + `torch.distributions`. No JAX, no TensorFlow.
 - **A1: DONE** — Bayesian output head (BayesianLinear on lm_head). 42M params (25.7M Bayesian). Best MI ratio **1.36x** (σ=0.22). Ceiling at 1.2–1.4x — detects OOD at vocabulary level only. All ELBO/MI/sigma infrastructure validated. See [A1 Report](#a1-report).
 - **A2: DONE** — Bayesian FFN (MLP.fc + MLP.proj, 4 blocks). 20M params (4.2M Bayesian, weight-tied head). Best MI ratio **1.43x batch / 1.70x qualitative** (σ mean=0.147, posteriors learned). Confirmation run (seed=2352) reproduced separation at **1.36x batch / 1.55x qualitative**. See [A2 Report](#a2-report).
 - **A3: CLOSED** — Bayesian FFN + Bayesian attention value projection (`V`) with diagonal posteriors. Four runs completed (`660914c3`, `1848a95f`, `c7855477`, `910b0b43`); all underperformed A2 on MI separation and ID perplexity. Final archived A3 config (no rerun): `bayes_ffn.init_rho=-2.0`, `bayes_ffn.prior_std=1.0`, `bayes_attn_v.init_rho=-2.0`, `bayes_attn_v.prior_std=1.0`, `train.kl_weight=0.2` (reference run `1848a95f`). Spec: `specs/a3-bayesian-ffn-attention-v.md`.
-- **B1: IN PROGRESS** — Post-hoc Laplace baseline on deterministic checkpoint. Diagonal Fisher curvature on FFN params, MC sampling for MI eval. Infrastructure complete (module, tests, experiment script). Pending: full training run. See [B1 Implementation Notes](#b1-implementation-notes).
+- **B1: DONE (NEGATIVE)** — Post-hoc Laplace on deterministic checkpoint. Approach A (identity-curvature sweep): MI ratio 1.00x at all scales. Approach B (per-sample Fisher): curvature non-zero but still MI ratio 1.00x. **Conclusion: diagonal Laplace on FFN params does not produce OOD-discriminative uncertainty in language models.** See [B1 Implementation Notes](#b1-implementation-notes).
+- **B2: PLANNED** — BLoB-style Bayesian LoRA (variational, train-time). LoRA adapters on FFN layers with variational inference on A matrix.
+- **B3: PLANNED** — TFB / Laplace-LoRA (post-hoc LoRA). Post-hoc variance search or Laplace on trained LoRA params.
 
 ## Bayesian Layer Strategy (order)
 1. Output head (A1) — simplest, proves pipeline
@@ -105,7 +107,7 @@ python experiments/a1_bayes_output.py --config configs/a1_agnews.yaml
 python experiments/a2_bayes_ffn.py --config configs/a2_agnews.yaml
 python experiments/a3_bayes_ffn_attn_v.py --config configs/a3_agnews.yaml
 python experiments/b1_laplace_baseline.py --config configs/b1_laplace_agnews.yaml
-python experiments/b1_laplace_baseline.py --config configs/b1_laplace_agnews.yaml --skip-train --set laplace.checkpoint=data/checkpoints/ckpt_best.pt
+python experiments/b1_laplace_baseline.py --config configs/b1_laplace_agnews.yaml --skip-train --laplace-state data/checkpoints/laplace_state.pt
 python experiments/a0_baseline.py --config configs/a0_agnews.yaml --set train.lr=1e-3
 python experiments/a0_baseline.py --config configs/a0_agnews.yaml --resume data/checkpoints/ckpt_step500.pt
 ```
@@ -375,22 +377,88 @@ A3 closure decision:
 ### Validation
 - 24 unit tests in `tests/test_laplace.py`, all green.
 - Smoke test completed on GPU (200 training steps): end-to-end pipeline runs without errors.
-- MI ratio 1.00x with 200 steps (expected — model barely trained, curvature near-zero).
 
-### Pending
-- Full training run (10K steps) to produce a proper checkpoint with meaningful curvature.
-- Tuning: damping, sample_scale, n_curvature_batches.
-- Compare B1 MI separation against A2 best (1.43x batch / 1.70x qualitative).
+### B1 R1 — Full training run (100K steps, damping=1.0, sample_scale=1.0)
+- Command: `python experiments/b1_laplace_baseline.py --config configs/b1_laplace_agnews.yaml`
+- MLflow run: `4da8958d2ad84c5a9d58547289f8bf29`
+- Training: 100K steps, best val loss 3.6656 (step 94K), training time 5955s
+- Test ID/OOD perplexity: **40.99 / 476.42** (strong separation — model trained well)
+- Laplace: 8 FFN params selected (2,097,152 elements), fit time 8s
+- Curvature: mean=0.000001, std=0.000048, min=0.000000, max=0.050442
+- MI (ID/OOD): 1.7077 / 1.7079 → **MI ratio 1.00x** (no OOD signal)
+- Qualitative MI ratio: **0.99x**
+- Flip rate: 0.89, predictive entropy: 9.13 (near-uniform over vocab)
+
+**Root cause: two bugs identified.**
+
+1. **Fisher computation bug** — `fit_laplace()` computes `(mean_gradient)²` instead of `mean(gradient²)`. Loss is `reduction='mean'` over batch×seq (32×256=8192 tokens). At convergence, per-token gradients cancel in the mean → (mean_grad)² ≈ 0. Correct diagonal Fisher requires per-sample squared gradients. See `specs/b1-laplace-analysis.md`.
+
+2. **MLflow duplicate params bug** — `log_common_mlflow` flattens entire config (including `laplace.*` keys), then B1 script logged `laplace.damping`/`sample_scale`/etc. explicitly → MLflow threw on duplicate keys, silently losing all downstream logging (MI, perplexity, qualitative). Fixed: removed duplicate explicit params, kept only computed values (`laplace.num_selected_params`, `skip_train`, `laplace_state_path`).
+
+**Why MI ratio = 1.00x:** With curvature ≈ 0, posterior variance = `1/(0 + damping)` = 1.0 for ALL params. Effective σ ≈ 1.0 — catastrophic noise (10-100x weight magnitude). Every MC sample outputs near-random predictions. Noise is equally random for ID and OOD → MI identical.
+
+### B1 Approach A — sample_scale sweep (identity-curvature regime) — NEGATIVE
+
+Since curvature ≈ 0, posterior is effectively `N(θ_MAP, (sample_scale²/damping) × I)`.
+Four runs with damping=1.0, varying sample_scale:
+
+| sample_scale | eff. σ | MI ID | MI OOD | Ratio | Flip Rate | MLflow run |
+|---|---|---|---|---|---|---|
+| 0.05 | 0.05 | 1.881 | 1.879 | 1.00x | 0.900 | `497423b8` |
+| 0.10 | 0.10 | 1.795 | 1.795 | 1.00x | 0.904 | `c9966171` |
+| 0.20 | 0.20 | 1.724 | 1.724 | 1.00x | 0.897 | `44efc13d` |
+| 0.30 | 0.30 | 1.710 | 1.711 | 1.00x | 0.894 | `c76e81cb` |
+
+All perplexity identical (40.05 / 488.33) — same MAP model, expected.
+
+**Conclusion: uniform (identity-curvature) noise fundamentally cannot differentiate ID from OOD in language models, at any scale.** Flip rate ≈ 0.90 even at σ=0.05 — 2M uniformly perturbed params accumulate to catastrophic output changes. MI is high but identical for ID and OOD because the noise has no notion of which parameters matter for what. ICLA (WACV 2025) works for image classification (10–200 classes) but fails for language modeling (50K vocab, high-dimensional output space).
+
+### B1 Approach B — per-sample Fisher computation — NEGATIVE
+Fix `fit_laplace()` to process sequences one-at-a-time instead of batch-averaged gradients. This gives correct diagonal Fisher: `mean(gradient²)` instead of `(mean_gradient)²`.
+
+- Command: `python experiments/b1_laplace_baseline.py --config configs/b1_laplace_agnews.yaml --skip-train`
+- MLflow run: `8774fa910ffc455fa7c734f933a44761`
+- Curvature: mean=0.000018, std=0.000139, min=0.000000, max=0.086192 (non-zero — fix worked)
+- Fit time: 20.6s (vs 8s before — per-sample loop is 2.5x slower)
+- Test ID/OOD perplexity: 41.06 / 481.58
+- MI (ID/OOD): 1.7072 / 1.7078 → **MI ratio 1.00x** (still no separation)
+- Qualitative MI ratio: **0.99x**
+- Flip rate: 0.89 (unchanged)
+
+**Why still 1.00x:** Curvature is non-zero but still tiny (mean ~10⁻⁵) vs damping=1.0. Posterior variance = `1/(0.000018 + 1.0) ≈ 1.0` — damping dominates completely. Even the max-curvature param: `1/(0.086 + 1.0) = 0.92` vs `1/(0 + 1.0) = 1.0` — only 8% difference. Lowering damping to match curvature scale (e.g., 0.00001) would give variance ~55,000 — catastrophic noise that destroys all predictions equally. The fundamental issue is that diagonal Fisher curvature at convergence for a well-trained LM is too flat to provide informative posterior structure.
+
+### B1 Final Conclusion
+
+**Diagonal post-hoc Laplace on FFN params of a converged language model does not produce OOD-discriminative uncertainty.** Two independent approaches confirm this:
+
+1. **Approach A (identity curvature):** Uniform noise at any scale gives MI ratio 1.00x. ICLA works for image classification (10-200 classes) but fails for LM (50K vocab).
+2. **Approach B (correct per-sample Fisher):** Real curvature is too small (~10⁻⁵) to overcome any reasonable damping. The loss landscape is flat in FFN weight directions at convergence.
+
+This is a scientifically valuable negative result: it demonstrates that post-hoc Bayesianization via diagonal Laplace cannot substitute for train-time variational inference (A2: 1.43x) for epistemic uncertainty in language models. The curvature structure from a converged model lacks the informative variance differentiation that variational posteriors learn during training.
 
 ---
 
-## Future Work (Parked)
-Non-Bayesian improvements — after A2 tuning complete:
-- RoPE, SwiGLU, KV-cache, PEFT
-- Mixed precision: **DONE** (AMP auto-enabled)
+## Research Plan
 
-## Papers (B1-relevant)
-- **BLoB** (NeurIPS 2024) — Bayesian LoRA by backprop. [PDF](https://proceedings.neurips.cc/paper_files/paper/2024/file/7d53575463291ea6b5a23cf6e571f59b-Paper-Conference.pdf)
-- **Training-Free Bayesianization for LoRA** (2024) — post-hoc variance search. [arXiv:2412.05723](https://arxiv.org/pdf/2412.05723)
-- **Laplace-LoRA** (2023) — Laplace approximation on LoRA params. [arXiv:2308.13111](https://arxiv.org/pdf/2308.13111)
-- **ScalaBL** (2025) — Bayesian inference in low-dim subspace. [arXiv:2506.21408](https://arxiv.org/pdf/2506.21408)
+**Comparative study:** 2x2 matrix — (variational vs post-hoc) x (full weights vs LoRA). See `specs/comparative-bayesian-llm-study.md`.
+
+| | Full weights | LoRA adapters |
+|---|---|---|
+| **Variational (train-time)** | A-series (done) | B2 BLoB (planned) |
+| **Post-hoc (no training)** | B1 Laplace (done, negative) | B3 TFB/Laplace-LoRA (planned) |
+
+Execution order: ~~B1 (finish)~~ → B2 (BLoB LoRA) → B3 (TFB/Laplace-LoRA) → comparison paper.
+
+## Future Work (Parked)
+Non-Bayesian improvements:
+- RoPE, SwiGLU, KV-cache
+- Mixed precision: **DONE** (AMP auto-enabled)
+- Optional: HuggingFace scaling check (one experiment on a larger model as appendix)
+
+## References
+- **BLoB** (NeurIPS 2024) — Bayesian LoRA by backprop. [arXiv:2406.11675](https://arxiv.org/abs/2406.11675)
+- **TFB** (NeurIPS 2025) — Training-Free Bayesianization for LoRA. [arXiv:2412.05723](https://arxiv.org/abs/2412.05723)
+- **Laplace-LoRA** (2023) — Laplace approximation on LoRA params. [arXiv:2308.13111](https://arxiv.org/abs/2308.13111)
+- **ScalaBL** (2025) — Bayesian inference in low-dim subspace. [arXiv:2506.21408](https://arxiv.org/abs/2506.21408)
+- **ICLA** (WACV 2025) — Identity Curvature Laplace for OOD. [arXiv:2312.10464](https://arxiv.org/abs/2312.10464)
+- **Laplace Redux** (NeurIPS 2021) — Effortless Bayesian Deep Learning. [arXiv:2106.14806](https://arxiv.org/abs/2106.14806)

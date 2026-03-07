@@ -88,6 +88,9 @@ def main() -> None:
     if args.laplace_state:
         print(f"Loading pre-fitted Laplace state: {args.laplace_state}")
         state = load_laplace_state(args.laplace_state)
+        # Override damping/sample_scale from config (allows tuning without re-fitting)
+        state.damping = damping
+        state.sample_scale = sample_scale
         for name in state.param_names:
             state.phi_hat[name] = state.phi_hat[name].to(device)
             state.curvature[name] = state.curvature[name].to(device)
@@ -163,12 +166,13 @@ def main() -> None:
                 state.phi_hat[n].numel() for n in state.param_names
             )
             log_common_mlflow(cfg, tokenizer, n_params, "b1")
+            # laplace.damping/sample_scale/selection_mode/n_curvature_batches
+            # are already logged by log_common_mlflow via config flattening.
+            # Only log computed/CLI params here.
             mlflow.log_params({
-                "laplace.selection_mode": selection_mode,
-                "laplace.damping": str(damping),
-                "laplace.sample_scale": str(sample_scale),
-                "laplace.n_curvature_batches": str(n_curv_batches),
                 "laplace.num_selected_params": str(n_selected),
+                "skip_train": str(args.skip_train),
+                "laplace_state_path": args.laplace_state or "",
             })
             mlflow.log_params(
                 {f"laplace.{k}": f"{v:.6f}" for k, v in curv_stats.items()},

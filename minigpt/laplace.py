@@ -68,13 +68,17 @@ def fit_laplace(
     damping: float,
     sample_scale: float = 1.0,
 ) -> LaplaceState:
-    """Fit diagonal Laplace posterior via empirical Fisher (squared gradients).
+    """Fit diagonal Laplace posterior via empirical Fisher (per-sample squared gradients).
+
+    Processes sequences one at a time to get correct diagonal Fisher:
+    F_ii = E[(dL/dθ_i)²].
+    Batch-averaged gradients cancel at convergence; per-sample gradients don't.
 
     Args:
         model: deterministic model at MAP weights.
         data: flat token tensor for curvature accumulation.
         block_size: context window size.
-        batch_size: batch size for curvature batches.
+        batch_size: batch size for drawing batches (each sample processed individually).
         selection: dict from select_params() -- names to target.
         n_batches: number of mini-batches for curvature accumulation.
         damping: regularization added to diagonal curvature.
@@ -91,20 +95,24 @@ def fit_laplace(
     phi_hat = {name: selection[name].detach().clone() for name in param_names}
     curvature_acc = {name: torch.zeros_like(selection[name]) for name in param_names}
 
+    total_samples = 0
     for _ in range(n_batches):
         x, y = get_batch(data, block_size, batch_size, device)
-        model.zero_grad()
-        logits, loss = model(x, y)
-        loss.backward()
+        # Process each sequence individually for correct per-sample Fisher
+        for b in range(x.size(0)):
+            model.zero_grad()
+            logits, loss = model(x[b : b + 1], y[b : b + 1])
+            loss.backward()
 
-        for name in param_names:
-            grad = selection[name].grad
-            if grad is not None:
-                curvature_acc[name].add_(grad.detach() ** 2)
+            for name in param_names:
+                grad = selection[name].grad
+                if grad is not None:
+                    curvature_acc[name].add_(grad.detach() ** 2)
+            total_samples += 1
 
-    # Average over batches
+    # Average over total samples seen
     for name in param_names:
-        curvature_acc[name].div_(n_batches)
+        curvature_acc[name].div_(total_samples)
 
     # Clean up: zero gradients so caller sees no side effects
     model.zero_grad()
