@@ -398,6 +398,7 @@ class TestSelectParams:
     def test_unknown_mode_raises(self):
         """Unknown selection mode should raise ValueError."""
         import pytest
+
         from minigpt.laplace import select_params
 
         model, _, _ = _make_model_and_data()

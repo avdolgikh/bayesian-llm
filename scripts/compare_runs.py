@@ -57,8 +57,14 @@ def _read_qual_ratio(run) -> tuple[float | None, float | None, float | None]:
     if not isinstance(data, list):
         return None, None, None
 
-    id_vals = [row.get("prompt_mi") for row in data if isinstance(row, dict) and row.get("split") == "ID"]
-    ood_vals = [row.get("prompt_mi") for row in data if isinstance(row, dict) and row.get("split") == "OOD"]
+    id_vals = [
+        row.get("prompt_mi") for row in data
+        if isinstance(row, dict) and row.get("split") == "ID"
+    ]
+    ood_vals = [
+        row.get("prompt_mi") for row in data
+        if isinstance(row, dict) and row.get("split") == "OOD"
+    ]
     id_vals = [float(v) for v in id_vals if isinstance(v, (int, float))]
     ood_vals = [float(v) for v in ood_vals if isinstance(v, (int, float))]
 
@@ -231,7 +237,10 @@ def _build_rows(summaries: list[RunSummary], baseline: RunSummary | None) -> lis
                 "sigma_mean": _fmt(s.sigma_mean, 3),
                 "sigma_std": _fmt(s.sigma_std, 3),
                 "kl_final_m": _fmt(None if s.kl_final is None else s.kl_final / 1e6, 3),
-                "kl_delta_m": _fmt(None if s.kl_summary.delta is None else s.kl_summary.delta / 1e6, 3),
+                "kl_delta_m": _fmt(
+                    None if s.kl_summary.delta is None
+                    else s.kl_summary.delta / 1e6, 3
+                ),
                 "kl_steps": f"{s.kl_summary.down_steps}/{s.kl_summary.up_steps}",
                 "d_batch": _fmt(d_batch, 2),
                 "d_qual": _fmt(d_qual, 2),

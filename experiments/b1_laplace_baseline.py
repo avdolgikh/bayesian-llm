@@ -14,6 +14,16 @@ from pathlib import Path
 
 import mlflow
 import torch
+from eval_utils import eval_mi_suite, eval_perplexity_suite, run_qualitative_suite
+from experiment_setup import parse_base_args, resolve_device, setup_data, setup_model
+from mlflow_utils import (
+    log_common_mlflow,
+    log_mi_mlflow,
+    log_perplexity_mlflow,
+    log_qualitative_mlflow,
+    log_train_meta_mlflow,
+    mlflow_context,
+)
 
 from minigpt.config import build_train_config
 from minigpt.laplace import (
@@ -25,17 +35,6 @@ from minigpt.laplace import (
     select_params,
 )
 from minigpt.train import load_checkpoint, train
-
-from eval_utils import eval_mi_suite, eval_perplexity_suite, run_qualitative_suite
-from experiment_setup import parse_base_args, resolve_device, setup_data, setup_model
-from mlflow_utils import (
-    log_common_mlflow,
-    log_mi_mlflow,
-    log_perplexity_mlflow,
-    log_qualitative_mlflow,
-    log_train_meta_mlflow,
-    mlflow_context,
-)
 
 
 def main() -> None:

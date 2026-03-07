@@ -15,7 +15,7 @@ import torch
 
 from minigpt.config import DEFAULT_CONFIG, build_gpt_config, deep_merge, load_yaml
 from minigpt.model import MiniGPT
-from minigpt.train import get_batch, _configure_optimizer
+from minigpt.train import _configure_optimizer, get_batch
 
 
 def profile(model, optimizer, data, block_size, batch_size, device, use_amp=False,
@@ -162,7 +162,9 @@ def main():
     fp32_results = run_sweep("FP32", gpt_cfg, data, block_size, batch_sizes, device, use_amp=False)
 
     # AMP
-    amp_results = run_sweep("AMP (float16)", gpt_cfg, data, block_size, batch_sizes, device, use_amp=True)
+    amp_results = run_sweep(
+        "AMP (float16)", gpt_cfg, data, block_size, batch_sizes, device, use_amp=True
+    )
 
     # Summary
     print("\n=== SUMMARY ===")
