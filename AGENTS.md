@@ -38,6 +38,7 @@ data/             # Local datasets (gitignored)
 - **Document on the fly** in this file — during implementation, not after.
 - **No unsolicited AGENTS.md cleanup.** Do not reformat, normalize typography/encoding, or rewrite text unless explicitly requested; only apply the exact requested doc change.
 - **Explicit configs.** Every parameter in YAML — never rely on code defaults.
+- **LaTeX formulas in specs.** All formulas in `specs/` documents must use LaTeX (`$...$` inline, `$$...$$` display).
 
 ## Datasets
 

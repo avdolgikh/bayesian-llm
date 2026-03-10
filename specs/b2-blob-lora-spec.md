@@ -29,67 +29,61 @@ Evaluate MI on ID vs OOD, same protocol as A2 and B1.
 
 LoRA decomposes the weight update as:
 
-```
-h = (W_0 + (alpha/r) * B @ A) @ x
-```
+$$\mathbf{h} = \left(\mathbf{W}_0 + \frac{\alpha}{r} \mathbf{B} \mathbf{A}\right) \mathbf{x}$$
 
-- `W_0` (d_out x d_in): frozen pretrained weight.
-- `B` (d_out x r): low-rank down-projection. Initialized to zeros.
-- `A` (r x d_in): low-rank up-projection. Initialized with Kaiming uniform.
-- `alpha/r`: scaling factor. `alpha=2r` is standard (scale = 2.0).
-- Only B and A are trained; W_0 is frozen.
-- At initialization, B=0 so LoRA contribution is zero — model starts as the pretrained model.
+- $\mathbf{W}_0 \in \mathbb{R}^{d_\text{out} \times d_\text{in}}$: frozen pretrained weight.
+- $\mathbf{B} \in \mathbb{R}^{d_\text{out} \times r}$: low-rank down-projection. Initialized to zeros.
+- $\mathbf{A} \in \mathbb{R}^{r \times d_\text{in}}$: low-rank up-projection. Initialized with Kaiming uniform.
+- $\alpha / r$: scaling factor. $\alpha = 2r$ is standard (scale $= 2.0$).
+- Only $\mathbf{B}$ and $\mathbf{A}$ are trained; $\mathbf{W}_0$ is frozen.
+- At initialization, $\mathbf{B} = 0$ so LoRA contribution is zero — model starts as the pretrained model.
 
 ### 3.2 BLoB Asymmetric Design
 
 BLoB Bayesianizes **only the A matrix**; B remains deterministic.
 
-**Rationale (BLoB Theorem 3.1):** If both A and B are stochastic, `E[BA] != E[B]E[A]`,
-which makes the mean of the weight update not equal to the product of means. With B
-initialized at zeros, the posterior mean would be stuck at zero early in training. Fixing B
-as deterministic avoids this and halves the Bayesian parameter overhead.
+**Rationale (BLoB Theorem 3.1):** If both $\mathbf{A}$ and $\mathbf{B}$ are stochastic,
+$\mathbb{E}[\mathbf{B}\mathbf{A}] \neq \mathbb{E}[\mathbf{B}]\,\mathbb{E}[\mathbf{A}]$,
+which makes the mean of the weight update not equal to the product of means. With $\mathbf{B}$
+initialized at zeros, the posterior mean would be stuck at zero early in training. Fixing
+$\mathbf{B}$ as deterministic avoids this and halves the Bayesian parameter overhead.
 
 **Posterior on A:**
-```
-q(A | theta) = product_ij N(A_ij | M_ij, sigma_ij^2)
-```
 
-- `M` (r x d_in): posterior mean matrix. Trainable. Init: Kaiming uniform.
-- `G` (r x d_in): variance parameter. `sigma_ij = G_ij^2`. Trainable. Init: U(eps/sqrt(2), eps).
-- The G-squared parameterization (not softplus) is the BLoB convention, providing stronger
+$$q(\mathbf{A} \mid \boldsymbol{\theta}) = \prod_{i,j} \mathcal{N}\!\left(A_{ij} \mid M_{ij},\; \sigma_{ij}^2\right)$$
+
+- $\mathbf{M} \in \mathbb{R}^{r \times d_\text{in}}$: posterior mean matrix. Trainable. Init: Kaiming uniform.
+- $\mathbf{G} \in \mathbb{R}^{r \times d_\text{in}}$: variance parameter, $\sigma_{ij} = G_{ij}^2$. Trainable. Init: $\mathcal{U}(\varepsilon/\sqrt{2},\; \varepsilon)$.
+- The $G^2$ parameterization (not softplus) is the BLoB convention, providing stronger
   initial gradients for faster variance learning.
 
 **Sampling (reparameterization trick):**
-```
-A_sample = M + G^2 * epsilon,    epsilon ~ N(0, I)
-h = (W_0 + (alpha/r) * B @ A_sample) @ x
-```
+
+$$\hat{\mathbf{A}} = \mathbf{M} + \mathbf{G}^2 \odot \boldsymbol{\epsilon}, \quad \boldsymbol{\epsilon} \sim \mathcal{N}(\mathbf{0}, \mathbf{I})$$
+
+$$\mathbf{h} = \left(\mathbf{W}_0 + \frac{\alpha}{r}\,\mathbf{B}\,\hat{\mathbf{A}}\right) \mathbf{x}$$
 
 No Flipout in B2. Standard reparameterization is sufficient for 4L miniGPT with batch_size=32.
 Flipout is reserved for C milestone (16L, batch_size=8).
 
 ### 3.3 KL Computation (BLoB Theorem 3.2)
 
-The low-rank posterior on A induces a full-weight posterior on W. BLoB proves that the KL
-in full weight space reduces to a cheap diagonal KL in A-space:
+The low-rank posterior on $\mathbf{A}$ induces a full-weight posterior on $\mathbf{W}$. BLoB
+proves that the KL in full weight space reduces to a cheap diagonal KL in A-space:
 
-```
-KL[q(A|theta) || p(A)] = sum_ij [ (1/(2*sigma_p^2)) * (M_ij^2 + sigma_ij^2) - log(sigma_ij / sigma_p) - 0.5 ]
-```
+$$\mathrm{KL}\!\left[q(\mathbf{A}\mid\boldsymbol{\theta})\;\|\;p(\mathbf{A})\right] = \sum_{i,j}\left[\frac{M_{ij}^2 + \sigma_{ij}^2}{2\sigma_p^2} - \ln\frac{\sigma_{ij}}{\sigma_p} - \frac{1}{2}\right]$$
 
-where `p(A) = N(0, sigma_p^2 * I)` is the prior on A elements.
+where $p(\mathbf{A}) = \mathcal{N}(\mathbf{0},\; \sigma_p^2\,\mathbf{I})$ is the prior on A elements.
 
-This is the same form as our existing BayesianLinear KL, just with G^2 parameterization
-instead of softplus(rho).
+This is the same form as our existing `BayesianLinear` KL, just with $G^2$ parameterization
+instead of $\text{softplus}(\rho)$.
 
 ### 3.4 ELBO Objective
 
-```
-loss = CE(data | A_sample, B) + kl_weight * KL[q(A|theta) || p(A)] / num_train_tokens
-```
+$$\mathcal{L} = \mathrm{CE}\!\left(\mathcal{D} \mid \hat{\mathbf{A}}, \mathbf{B}\right) + \frac{\lambda_\text{kl}}{N_\text{tokens}}\;\mathrm{KL}\!\left[q(\mathbf{A}\mid\boldsymbol{\theta})\;\|\;p(\mathbf{A})\right]$$
 
-Same ELBO structure as A2. The existing training loop handles this via `kl_weight` and
-`model.kl_loss()`.
+Same ELBO structure as A2. The existing training loop handles this via `kl_weight` ($\lambda_\text{kl}$)
+and `model.kl_loss()`.
 
 ## 4. Architecture
 
@@ -97,7 +91,7 @@ Same ELBO structure as A2. The existing training loop handles this via `kl_weigh
 
 #### `LoRAConfig` dataclass
 
-```
+```python
 rank: int = 8               # LoRA rank r
 alpha: float = 16.0         # scaling factor (effective scale = alpha / rank)
 target: str = "ffn"         # which layers to inject: "ffn"
@@ -111,16 +105,21 @@ The core new layer. Wraps a frozen `nn.Linear` and adds a Bayesian LoRA adapter.
 
 **Parameters:**
 - `base_linear` (nn.Linear): frozen pretrained weight. Not a parameter — stored but not trained.
-- `lora_B` (nn.Parameter): (d_out x r). Deterministic, trainable. Init: zeros.
-- `lora_A_mu` (nn.Parameter): (r x d_in). Posterior mean. Init: Kaiming uniform.
-- `lora_A_g` (nn.Parameter): (r x d_in). Variance param. Init: U(init_g/sqrt(2), init_g).
-  `sigma = lora_A_g^2`.
-- `scaling` (float): alpha / rank.
+- `lora_B` (nn.Parameter): $\mathbb{R}^{d_\text{out} \times r}$. Deterministic, trainable. Init: zeros.
+- `lora_A_mu` (nn.Parameter): $\mathbb{R}^{r \times d_\text{in}}$. Posterior mean. Init: Kaiming uniform.
+- `lora_A_g` (nn.Parameter): $\mathbb{R}^{r \times d_\text{in}}$. Variance param. Init: $\mathcal{U}(\texttt{init\_g}/\sqrt{2},\; \texttt{init\_g})$.
+  $\sigma = \texttt{lora\_A\_g}^{\,2}$.
+- `scaling` (float): $\alpha / r$.
 
 **Forward pass:**
-```
+
+$$\hat{\mathbf{A}} = \mathbf{M} + \mathbf{G}^2 \odot \boldsymbol{\epsilon}, \quad \boldsymbol{\epsilon} \sim \mathcal{N}(\mathbf{0}, \mathbf{I})$$
+
+$$\mathbf{y} = \mathbf{W}_0\,\mathbf{x} + \frac{\alpha}{r}\;\mathbf{B}\,\hat{\mathbf{A}}\,\mathbf{x}$$
+
+```python
 base_out = base_linear(x)                           # frozen, no grad
-A_sample = lora_A_mu + lora_A_g^2 * epsilon         # reparameterization
+A_sample = lora_A_mu + lora_A_g**2 * epsilon        # reparameterization
 lora_out = (x @ A_sample.T) @ lora_B.T * scaling    # B @ A_sample @ x
 return base_out + lora_out
 ```
@@ -129,7 +128,8 @@ When `_use_mean` is True (deterministic eval): use `lora_A_mu` directly, no samp
 When `_frozen_weight` is set (MC eval): use cached A sample for coherent multi-token scoring.
 
 **`kl_loss()` method:**
-Diagonal KL between q(A) = N(M, diag(G^4)) and p(A) = N(0, sigma_p^2 * I).
+Diagonal KL between $q(\mathbf{A}) = \mathcal{N}(\mathbf{M},\;\mathrm{diag}(\mathbf{G}^4))$
+and $p(\mathbf{A}) = \mathcal{N}(\mathbf{0},\;\sigma_p^2\,\mathbf{I})$.
 Same formula as Section 3.3.
 
 **`freeze_sample()` / `unfreeze_sample()`:**
@@ -154,22 +154,22 @@ Target mapping for `target="ffn"`:
 
 Total LoRA adapters: 2 per block x 4 blocks = 8 adapters.
 
-#### Parameter count estimate (rank=8, n_embd=256)
+#### Parameter count estimate ($r = 8$, $d_\text{embd} = 256$)
 
-Per adapter (e.g., MLP.fc: 256 -> 1024):
-- `lora_B`: 1024 x 8 = 8,192 (deterministic)
-- `lora_A_mu`: 8 x 256 = 2,048 (Bayesian mean)
-- `lora_A_g`: 8 x 256 = 2,048 (Bayesian variance)
-- Total per adapter: 12,288
+Per adapter (e.g., MLP.fc: $256 \to 1024$):
+- `lora_B`: $1024 \times 8 = 8{,}192$ (deterministic)
+- `lora_A_mu`: $8 \times 256 = 2{,}048$ (Bayesian mean)
+- `lora_A_g`: $8 \times 256 = 2{,}048$ (Bayesian variance)
+- Total per adapter: $12{,}288$
 
-Per adapter (e.g., MLP.proj: 1024 -> 256):
-- `lora_B`: 256 x 8 = 2,048
-- `lora_A_mu`: 8 x 1024 = 8,192
-- `lora_A_g`: 8 x 1024 = 8,192
-- Total per adapter: 18,432
+Per adapter (e.g., MLP.proj: $1024 \to 256$):
+- `lora_B`: $256 \times 8 = 2{,}048$
+- `lora_A_mu`: $8 \times 1024 = 8{,}192$
+- `lora_A_g`: $8 \times 1024 = 8{,}192$
+- Total per adapter: $18{,}432$
 
-4 blocks x (12,288 + 18,432) = **122,880 total LoRA params**.
-Of those, Bayesian params (A_mu + A_g): **81,920** (~82K).
+$4 \text{ blocks} \times (12{,}288 + 18{,}432) = \mathbf{122{,}880}$ **total LoRA params**.
+Of those, Bayesian params ($\mathbf{M}$ + $\mathbf{G}$): $\mathbf{81{,}920}$ (~82K).
 Compared to A2: 4.2M Bayesian params. **~51x parameter reduction.**
 
 ### 4.2 Integration with Existing Infrastructure
@@ -192,8 +192,8 @@ Alternative: refactor these context managers to operate on `BayesianModule` with
 `has_stochastic_forward` property, so new stochastic module types are handled automatically.
 
 #### `sigma_summary` (layers.py)
-Currently collects `softplus(weight_rho)` from `BayesianLinear`. Must be extended to
-also collect `lora_A_g^2` from `BLoBLoRALinear` layers for variance diagnostics.
+Currently collects $\text{softplus}(\rho)$ from `BayesianLinear`. Must be extended to
+also collect $G^2$ from `BLoBLoRALinear` layers for variance diagnostics.
 
 #### `_configure_optimizer` (train.py)
 Filters `requires_grad` — works correctly since base model is frozen. For Phase 2:
@@ -254,7 +254,7 @@ Key settings:
 1. Load pretrained checkpoint from Phase 1.
 2. Inject BLoB LoRA adapters into FFN layers via `inject_lora()`.
 3. Verify: all base params frozen, only LoRA params trainable.
-4. Train with ELBO (CE + kl_weight * KL / num_train_tokens).
+4. Train with ELBO ($\mathcal{L} = \mathrm{CE} + \lambda_\text{kl} \cdot \mathrm{KL} / N_\text{tokens}$).
 5. Save best checkpoint (ELBO criterion).
 6. Evaluate: perplexity (ID/OOD), MI (ID/OOD), qualitative prompt panel.
 7. Log everything to MLflow.
@@ -274,7 +274,7 @@ Phase 2 evaluation flow mirrors `runner.py`:
 2. Generated sample.
 3. MI suite (MC sampling).
 4. Qualitative prompt panel.
-5. Sigma summary (LoRA G^2 stats).
+5. Sigma summary (LoRA $G^2$ stats).
 6. Final KL.
 
 ## 6. Configuration
@@ -406,12 +406,12 @@ Same as A2, B1. No changes to evaluation methodology — this is critical for co
 |---|---|---|
 | Test ID perplexity | Mean weights (no sampling) | Should be lower than A2 (pretrain+finetune advantage) |
 | Test OOD perplexity | Mean weights (no sampling) | Higher than ID = good |
-| MI (ID) | N=20 MC passes, full forward | Stochasticity from LoRA A sampling |
-| MI (OOD) | N=20 MC passes, full forward | Should be higher than MI (ID) |
-| MI ratio (batch) | MI_OOD / MI_ID | Primary success metric |
+| MI (ID) | $N=20$ MC passes, full forward | Stochasticity from LoRA $\mathbf{A}$ sampling |
+| MI (OOD) | $N=20$ MC passes, full forward | Should be higher than MI (ID) |
+| MI ratio (batch) | $\mathrm{MI}_\text{OOD} / \mathrm{MI}_\text{ID}$ | Primary success metric |
 | MI ratio (qualitative) | Per-prompt scoring, category averages | Curated prompts |
 | Flip rate | Top-1 argmax disagreement across MC samples | Sanity check |
-| Sigma summary | G^2 statistics across all LoRA A params | Posterior learning diagnostic |
+| Sigma summary | $G^2$ statistics across all LoRA $\mathbf{A}$ params | Posterior learning diagnostic |
 | KL trajectory | Per-eval-step KL values | Should decrease or stabilize (healthy) |
 
 **Key comparisons:**
@@ -459,14 +459,14 @@ Same as A2, B1. No changes to evaluation methodology — this is critical for co
 3. **LoRA initialization preserves model.** At initialization (B=0), the model output is
    identical to the pretrained base model (forward pass produces same logits).
 4. **KL is correct.** `model.kl_loss()` returns the sum of diagonal KL terms from all
-   BLoBLoRALinear layers. KL is zero when M=0 and sigma=prior_std.
+   `BLoBLoRALinear` layers. KL is zero when $\mathbf{M} = 0$ and $\sigma = \sigma_p$.
 5. **MC sampling produces variation.** With LoRA Bayesian params, different MC samples produce
-   different logits (stochasticity comes from A matrix sampling).
+   different logits (stochasticity comes from $\mathbf{A}$ matrix sampling).
 6. **Checkpoint save/load roundtrip.** Save LoRA model state -> load -> identical forward pass
    (both base weights and LoRA params restored correctly).
 7. **Perplexity evaluation uses mean weights.** `use_mean_weights` context manager correctly
    disables sampling in BLoBLoRALinear layers.
-8. **Sigma summary reports G^2 statistics.** `sigma_summary()` includes LoRA variance params.
+8. **Sigma summary reports $G^2$ statistics.** `sigma_summary()` includes LoRA variance params.
 9. **All existing tests pass.** No regressions in the 56 existing tests.
 
 ### Scientific (expected, not hard-gated)
@@ -477,7 +477,7 @@ Same as A2, B1. No changes to evaluation methodology — this is critical for co
     ID perplexity (adaptation is working).
 12. **MI ratio > 1.0x.** OOD MI is measurably higher than ID MI (epistemic signal exists
     in LoRA params). This is the primary scientific hypothesis.
-13. **Sigma statistics show learned posteriors.** G^2 values are not collapsed to near-zero
+13. **Sigma statistics show learned posteriors.** $G^2$ values are not collapsed to near-zero
     (posterior collapse) or blown up uniformly (noise). Range should show differentiation
     (some params more uncertain than others).
 14. **KL trajectory is healthy.** Decreasing or stable over training, not pathologically rising.
@@ -501,14 +501,14 @@ For the first run, use BLoB paper defaults adapted to our scale:
 | rank | 8 | BLoB default. Reasonable for n_embd=256. |
 | alpha | 16 | scale=2.0, standard LoRA convention |
 | prior_std | 0.2 | BLoB default (bayes_beta) |
-| init_g | 0.05 | BLoB default (bayes_eps). Gives initial sigma ~0.0025 |
+| init_g | 0.05 | BLoB default (bayes_eps). Gives initial $\sigma \approx 0.0025$ |
 | kl_weight | 0.2 | Same as A2 (our validated value) |
 | lr | 1e-4 | Lower than pretrain (fine-tuning convention) |
 | weight_decay | 0.0 | BLoB convention (KL regularizes) |
 | steps | 10,000 | Start here, adjust based on val loss curve |
 
 If first run shows issues:
-- **Posterior collapse (sigma -> 0):** Increase init_g (0.1, 0.2). Decrease kl_weight.
+- **Posterior collapse ($\sigma \to 0$):** Increase init_g (0.1, 0.2). Decrease kl_weight.
 - **Too much noise (MI high but equal for ID/OOD):** Decrease init_g. Increase kl_weight.
 - **Slow adaptation:** Increase lr (3e-4). Increase rank (16).
 - **Overfitting:** Decrease steps. Add dropout to LoRA (not standard, last resort).
@@ -519,10 +519,10 @@ One variable at a time. Document each run in AGENTS.md.
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| LoRA rank too small for 256d model | No meaningful adaptation, trivial corrections | Try rank 4, 8, 16. With n_embd=256, even rank 4 captures ~1.5% of the weight space. |
+| LoRA rank too small for 256d model | No meaningful adaptation, trivial corrections | Try rank 4, 8, 16. With $d_\text{embd}=256$, even rank 4 captures ~1.5% of the weight space. |
 | TinyShakespeare pretrain overfits | Base model memorizes Shakespeare, poor generalization to news | Monitor val loss curve. Stop early if val loss diverges from train loss. 15K steps is conservative. |
 | Bayesian params too few for MI signal | Insufficient stochasticity for MI discrimination | LoRA A params are in the critical FFN pathway. Even ~82K params should create measurable variation. Compare flip rate to A2. |
-| G^2 parameterization numerical issues | G values too small -> sigma vanishes; too large -> sigma explodes | Init in [0.035, 0.05] range (BLoB default). Monitor sigma summary. Clamp if needed. |
+| $G^2$ parameterization numerical issues | $G$ values too small $\to$ $\sigma$ vanishes; too large $\to$ $\sigma$ explodes | Init in $[0.035, 0.05]$ range (BLoB default). Monitor sigma summary. Clamp if needed. |
 | Integration breaks existing tests | LoRA code changes affect A-series behavior | Run full test suite after every change. Existing BayesianLinear behavior must not change. |
 
 ## 12. References
