@@ -8,7 +8,7 @@ The core idea: replace point-estimate weights with learned posterior distributio
 **Current approach:** Controlled comparative study on miniGPT (AG News). Four Bayesian methods in a 2x2 matrix: (variational vs post-hoc) x (full weights vs LoRA). A-series (variational full weights) done. B-series: B1 Laplace (post-hoc full weights), B2 BLoB (variational LoRA), B3 TFB/Laplace-LoRA (post-hoc LoRA). Active spec: `specs/comparative-bayesian-llm-study.md`.
 
 ## Project Structure
-`docs/` — PDF papers (theory baseline). `specs/` — planning docs (active: `specs/comparative-bayesian-llm-study.md`). B1 tech spec: `specs/b1-laplace-tech-spec-mar2026.md`. B1 analysis: `specs/b1-laplace-analysis.md`.
+`docs/` — PDF papers (theory baseline). `specs/` — planning docs (active: `specs/comparative-bayesian-llm-study.md`). B1 tech spec: `specs/b1-laplace-tech-spec-mar2026.md`. B1 analysis: `specs/b1-laplace-analysis.md`. B2 spec: `specs/b2-blob-lora-spec.md`.
 
 ```
 minigpt/          # Python package — all model code
@@ -447,13 +447,59 @@ This is a scientifically valuable negative result: it demonstrates that post-hoc
 | **Variational (train-time)** | A-series (done) | B2 BLoB (planned) |
 | **Post-hoc (no training)** | B1 Laplace (done, negative) | B3 TFB/Laplace-LoRA (planned) |
 
-Execution order: ~~B1 (finish)~~ → B2 (BLoB LoRA) → B3 (TFB/Laplace-LoRA) → comparison paper.
+Execution order: ~~B1 (finish)~~ → B2 (BLoB LoRA) → B3 (TFB/Laplace-LoRA) → C (scaled replication) → comparison paper.
+
+### Milestone Numbering (aligned 2026-03-10)
+- **B2 = BLoB** — variational Bayesian LoRA (train-time). Asymmetric: Bayesianize A matrix, fix B.
+- **B3 = TFB / Laplace-LoRA** — post-hoc Bayesianization of trained LoRA params.
+- **C = Scaled replication** — re-run full A1–A3, B1–B3 suite on 16L miniGPT. Final comparison paper.
+
+Old B-milestone-roadmap (`specs/B-milestone-roadmap.md`) is superseded by this numbering.
+
+---
+
+## B2 Plan (BLoB-style Bayesian LoRA)
+
+### Design Decision: Option A (pretrain → LoRA fine-tune)
+The existing A0/B1 checkpoints are already trained on AG News ID. LoRA on top of that would learn near-zero residuals — no meaningful Bayesian signal. Instead:
+
+1. **Phase 1 — Pretrain:** Deterministic miniGPT on TinyShakespeare (general domain). Inherits B1 training hyperparams (lr=3e-4, weight_decay=0.1, warmup=1000, etc.), reduced to 10–20K steps (TinyShakespeare is ~304K tokens vs AG News ~2.4M — 100K steps would be ~2700 epochs). Config: `b2_pretrain_shakespeare.yaml`.
+2. **Phase 2 — LoRA fine-tune:** Freeze pretrained weights. Add BLoB LoRA adapters to FFN layers (MLP.fc + MLP.proj). Train on AG News ID with ELBO (variational inference on LoRA A matrix). Evaluate MI on ID vs OOD. Config: `b2_blob_agnews.yaml`.
+
+This mimics real-world pretrain → finetune and gives LoRA meaningful work (domain adaptation). The Bayesian uncertainty in LoRA params reflects genuine epistemic uncertainty about the domain shift.
+
+### Flipout Decision
+**Not used for B2.** Current reparameterization trick works fine for 4L/batch_size=32 — A2 trained successfully, posteriors learned, KL healthy, MI separation reproduced across seeds. Flipout is reserved for C milestone (16L/batch_size=8) where gradient variance from shared weight samples becomes a real bottleneck.
+
+---
+
+## C Milestone (Scaled Replication)
+
+### Concept
+Re-run the full experimental suite (A1–A3, B1–B3) on a scaled-up miniGPT to validate whether findings transfer across model size. This directly addresses the primary reviewer concern for a comparative paper: "does this generalize beyond a toy model?"
+
+### Architecture (tentative)
+- **16L / 8H / 512d** (~75M params), batch_size=8 on RTX 4070 (12GB VRAM)
+- Same dataset (AG News topic-split), same eval protocol, same MI metrics
+- Exact sizing TBD — will profile GPU memory before committing
+
+### New addition: Flipout
+At 16L/batch_size=8, Flipout becomes relevant:
+- Deeper network = more layers sharing one weight sample per forward pass
+- Smaller batch = fewer examples to average over = higher gradient variance
+- Flipout decorrelates per-example gradients at near-single-sample cost
+
+Flipout will be used as the VI estimator for all variational experiments (A-series, B2) at this scale.
+
+### Paper Structure
+Table 1: 4L results (current). Table 2: 16L results (C milestone). Analysis: which methods scale? Which findings transfer? The 2x2 matrix at two scales gives a clean, publishable comparison.
+
+---
 
 ## Future Work (Parked)
 Non-Bayesian improvements:
 - RoPE, SwiGLU, KV-cache
 - Mixed precision: **DONE** (AMP auto-enabled)
-- Optional: HuggingFace scaling check (one experiment on a larger model as appendix)
 
 ## References
 - **BLoB** (NeurIPS 2024) — Bayesian LoRA by backprop. [arXiv:2406.11675](https://arxiv.org/abs/2406.11675)
