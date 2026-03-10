@@ -7,6 +7,7 @@ from pathlib import Path
 import yaml
 
 from minigpt.layers import BayesConfig
+from minigpt.lora import LoRAConfig
 from minigpt.model import GPTConfig
 from minigpt.train import TrainConfig
 
@@ -162,6 +163,18 @@ def build_gpt_config(cfg: dict, vocab_size: int) -> GPTConfig:
         bayes_head=_build_bayes_config(m.get("bayes_head", {})),
         bayes_ffn=_build_bayes_config(m.get("bayes_ffn", {})),
         bayes_attn_v=_build_bayes_config(m.get("bayes_attn_v", {})),
+    )
+
+
+def build_lora_config(cfg: dict) -> LoRAConfig:
+    """Construct a LoRAConfig from the merged config dict."""
+    l = cfg.get("lora", {})
+    return LoRAConfig(
+        rank=l.get("rank", 8),
+        alpha=l.get("alpha", 16.0),
+        target=l.get("target", "ffn"),
+        prior_std=l.get("prior_std", 0.2),
+        init_g=l.get("init_g", 0.05),
     )
 
 

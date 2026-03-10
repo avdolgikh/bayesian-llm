@@ -147,7 +147,7 @@ def _configure_optimizer(model: MiniGPT, cfg: TrainConfig) -> torch.optim.AdamW:
         if not p.requires_grad:
             continue
         # Rho and g params are regularized by KL, not weight decay
-        if "_rho" in name or "_g" in name:
+        if name.endswith("_rho") or name.endswith("_g"):
             no_decay_params.append(p)
         elif p.dim() >= 2:
             decay_params.append(p)

@@ -1,0 +1,48 @@
+experiment:
+  name: b2-pretrain
+  run_name: b2-pretrain-shakespeare
+  mlflow_uri: "sqlite:///mlflow.db"
+
+data:
+  dataset: tinyshakespeare
+  val_fraction: 0.1
+  test_fraction: 0.1
+
+model:
+  block_size: 256
+  n_layer: 4
+  n_head: 4
+  n_embd: 256
+  dropout: 0.2
+  bias: true
+  bayes_head:
+    enabled: false
+  bayes_ffn:
+    enabled: false
+  bayes_attn_v:
+    enabled: false
+
+train:
+  steps: 1000  # 15000
+  batch_size: 32
+  block_size: 256
+  lr: 3.0e-4
+  weight_decay: 0.1
+  warmup_steps: 100  # 1000
+  min_lr: 1.0e-5
+  grad_clip: 1.0
+  eval_interval: 200  # 1000
+  eval_iters: 20
+  checkpoint_interval: 100  # 5000
+  checkpoint_dir: "data/checkpoints/b2_pretrain"
+  gradient_accumulation_steps: 1
+  kl_weight: 0.0
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  seed: 1337
+  device: auto
+
+eval:
+  sample_tokens: 200
+  temperature: 0.8
+  n_perplexity_batches: 20

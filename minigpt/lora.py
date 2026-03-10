@@ -99,7 +99,7 @@ class BLoBLoRALinear(BayesianModule):
         KL = sum[ (M^2 + sigma^2) / (2*sigma_p^2) - log(sigma/sigma_p) - 0.5 ]
         where sigma = G^2.
         """
-        sigma = self.lora_A_g ** 2
+        sigma = (self.lora_A_g ** 2).clamp(min=1e-8)
         prior_var = self.prior_std ** 2
         kl = (
             torch.log(self.prior_std / sigma)
