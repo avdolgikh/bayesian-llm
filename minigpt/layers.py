@@ -154,16 +154,20 @@ def sum_kl_loss(module: nn.Module) -> torch.Tensor:
 
 
 def sigma_summary(model: nn.Module) -> dict[str, float]:
-    """Compute aggregate sigma statistics across all BayesianLinear layers.
+    """Compute aggregate sigma statistics across all stochastic Bayesian layers.
 
+    Collects softplus(rho) from BayesianLinear and G^2 from BLoBLoRALinear.
     Returns dict with keys: sigma_mean, sigma_std, sigma_min, sigma_max,
     sigma_median, sigma_p5, sigma_p25, sigma_p75, sigma_p95.
-    Returns empty dict if no BayesianLinear layers found.
+    Returns empty dict if no stochastic layers found.
     """
     all_sigmas = []
     for module in model.modules():
         if isinstance(module, BayesianLinear):
             sigma = F.softplus(module.weight_rho).detach()
+            all_sigmas.append(sigma.flatten())
+        elif hasattr(module, "lora_A_g"):  # BLoBLoRALinear: sigma = G^2
+            sigma = (module.lora_A_g ** 2).detach()
             all_sigmas.append(sigma.flatten())
     if not all_sigmas:
         return {}
@@ -185,25 +189,33 @@ def sigma_summary(model: nn.Module) -> dict[str, float]:
 
 @contextmanager
 def frozen_bayesian_sample(module: nn.Module):
-    """Context manager: freeze all BayesianLinear layers for coherent generation."""
-    bayesian_layers = [m for m in module.modules() if isinstance(m, BayesianLinear)]
-    for layer in bayesian_layers:
+    """Context manager: freeze all stochastic layers for coherent generation.
+
+    Works with BayesianLinear and any module that implements freeze_sample()
+    (e.g. BLoBLoRALinear).
+    """
+    stochastic_layers = [m for m in module.modules() if hasattr(m, "freeze_sample")]
+    for layer in stochastic_layers:
         layer.freeze_sample()
     try:
         yield
     finally:
-        for layer in bayesian_layers:
+        for layer in stochastic_layers:
             layer.unfreeze_sample()
 
 
 @contextmanager
 def use_mean_weights(module: nn.Module):
-    """Context manager: use mean weights for all BayesianLinear layers."""
-    bayesian_layers = [m for m in module.modules() if isinstance(m, BayesianLinear)]
-    for layer in bayesian_layers:
+    """Context manager: use mean weights for all stochastic layers.
+
+    Works with BayesianLinear and any module that has a _use_mean flag
+    (e.g. BLoBLoRALinear).
+    """
+    stochastic_layers = [m for m in module.modules() if hasattr(m, "_use_mean")]
+    for layer in stochastic_layers:
         layer._use_mean = True
     try:
         yield
     finally:
-        for layer in bayesian_layers:
+        for layer in stochastic_layers:
             layer._use_mean = False

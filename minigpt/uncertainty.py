@@ -13,6 +13,7 @@ import torch
 from torch.nn import functional as F
 
 from minigpt.layers import BayesianLinear
+from minigpt.lora import BLoBLoRALinear
 from minigpt.model import MiniGPT
 from minigpt.train import get_batch
 
@@ -64,10 +65,10 @@ def mc_metrics_single(
 
 
 def _has_bayesian_body(model: MiniGPT) -> bool:
-    """Check if any BayesianLinear layer exists in the transformer blocks."""
+    """Check if any stochastic Bayesian layer exists in the transformer blocks."""
     for block in model.blocks:
         for m in block.modules():
-            if isinstance(m, BayesianLinear):
+            if isinstance(m, (BayesianLinear, BLoBLoRALinear)):
                 return True
     return False
 
