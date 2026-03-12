@@ -123,7 +123,7 @@ Saves full config, `best_val_loss`, RNG states. LR schedule is stateless (comput
 ## Build & Dev Commands
 ```bash
 uv sync                                          # install deps
-uv run pytest tests/ -v                          # 56 unit tests
+uv run pytest tests/ -v                          # 84 unit tests
 uv run ruff check minigpt/ experiments/ tests/   # lint
 python experiments/a0_baseline.py                # A0 training (GPU)
 python experiments/a1_bayes_output.py --config configs/a1_agnews.yaml  # A1
@@ -141,6 +141,7 @@ python scripts/eval_checkpoint.py <ckpt> --config <yaml>  # eval any checkpoint
 
 ## CI/CD
 GitHub Actions (`.github/workflows/ci.yml`): `ruff check` → `pytest`. No GPU in CI.
+**Always run lint + tests locally before committing:** `uv run ruff check minigpt/ experiments/ tests/ && uv run pytest tests/ -x`
 
 ## Coding Style
 4 spaces, 100-char lines (ruff). `snake_case` functions, `PascalCase` classes. Type hints on public APIs.

@@ -19,7 +19,6 @@ from minigpt.lora import BLoBLoRALinear, LoRAConfig, inject_lora
 from minigpt.model import GPTConfig, MiniGPT
 from minigpt.uncertainty import _has_bayesian_body
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -181,7 +180,9 @@ def test_blob_linear_unfreeze_restores_stochasticity():
 def test_blob_linear_kl_at_prior():
     """KL ≈ 0 when M=0 and sigma=prior_std (G = sqrt(prior_std))."""
     prior_std = 0.2
-    layer = BLoBLoRALinear(_make_base_linear(32, 64), rank=4, alpha=8.0, prior_std=prior_std, init_g=0.05)
+    layer = BLoBLoRALinear(
+        _make_base_linear(32, 64), rank=4, alpha=8.0, prior_std=prior_std, init_g=0.05
+    )
     with torch.no_grad():
         layer.lora_A_mu.zero_()
         layer.lora_A_g.fill_(prior_std ** 0.5)  # sigma = G^2 = prior_std
@@ -243,7 +244,9 @@ def test_lora_config_defaults():
 
 def test_lora_scaling():
     """layer.scaling == alpha / rank."""
-    layer = BLoBLoRALinear(_make_base_linear(32, 64), rank=4, alpha=12.0, prior_std=0.2, init_g=0.05)
+    layer = BLoBLoRALinear(
+        _make_base_linear(32, 64), rank=4, alpha=12.0, prior_std=0.2, init_g=0.05
+    )
     assert layer.scaling == pytest.approx(12.0 / 4)
 
 
