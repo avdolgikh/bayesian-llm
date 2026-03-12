@@ -109,13 +109,24 @@ class BLoBLoRALinear(BayesianModule):
         return kl.sum()
 
 
+_VALID_LORA_TARGETS = ("ffn",)
+
+
 def inject_lora(model: nn.Module, lora_config: LoRAConfig) -> nn.Module:
     """Inject BLoB LoRA adapters into FFN layers of a MiniGPT model.
 
     1. Freezes all base model parameters.
     2. Replaces MLP.fc and MLP.proj in every block with BLoBLoRALinear.
     3. Only LoRA parameters retain requires_grad=True.
+
+    Raises ValueError if lora_config.target is not supported.
     """
+    if lora_config.target not in _VALID_LORA_TARGETS:
+        raise ValueError(
+            f"Unsupported lora target {lora_config.target!r}, "
+            f"must be one of {_VALID_LORA_TARGETS}"
+        )
+
     # Freeze everything first
     for p in model.parameters():
         p.requires_grad_(False)

@@ -8,7 +8,7 @@ The core idea: replace point-estimate weights with learned posterior distributio
 **Current approach:** Controlled comparative study on miniGPT (AG News). Four Bayesian methods in a 2x2 matrix: (variational vs post-hoc) x (full weights vs LoRA). A-series (variational full weights) done. B-series: B1 Laplace (post-hoc full weights), B2 BLoB (variational LoRA), B3 TFB/Laplace-LoRA (post-hoc LoRA). Active spec: `specs/comparative-bayesian-llm-study.md`.
 
 ## Project Structure
-`docs/` — PDF papers (theory baseline). `specs/` — planning docs (active: `specs/comparative-bayesian-llm-study.md`). B1 tech spec: `specs/b1-laplace-tech-spec-mar2026.md`. B1 analysis: `specs/b1-laplace-analysis.md`. B2 spec: `specs/b2-blob-lora-spec.md`.
+`docs/` — PDF papers (theory baseline). `specs/` — planning docs (active: `specs/comparative-bayesian-llm-study.md`). B1 tech spec: `specs/b1-laplace-tech-spec-mar2026.md`. B1 analysis: `specs/b1-laplace-analysis.md`. B2 spec: `specs/b2-blob-lora-spec.md`. B2 R2 revised plan: `specs/b2-r2-revised-plan.md`. B2 code review: `specs/b2-blob-lora-review.md`.
 
 ```
 minigpt/          # Python package — all model code
@@ -20,14 +20,15 @@ minigpt/          # Python package — all model code
   config.py       # YAML config ↔ dataclass bridge
   uncertainty.py  # Epistemic uncertainty (MI via MC sampling)
   laplace.py      # Post-hoc Laplace: curvature fitting, sampling, context manager
+  lora.py         # BLoB LoRA: BLoBLoRALinear, LoRAConfig, inject_lora()
 configs/          # YAML config files per experiment
-experiments/      # Runnable scripts (a0_baseline, a1–a3 Bayesian, b1_laplace_baseline)
+experiments/      # Runnable scripts (a0_baseline, a1–a3 Bayesian, b1_laplace_baseline, b2_blob_lora)
   experiment_setup.py  # Shared setup: CLI parsing, config, data, model, device
   eval_utils.py        # Shared eval: perplexity suite, MI suite, qualitative eval
   mlflow_utils.py      # Shared MLflow: context, logging helpers
   runner.py            # A-series orchestrator — A1/A2/A3 are thin wrappers
 scripts/          # Utilities (dump_mlflow_run, compare_runs, profile_gpu, eval_checkpoint, fit_laplace)
-tests/            # pytest (56 tests)
+tests/            # pytest (84 tests)
 data/             # Local datasets (gitignored)
 ```
 
@@ -72,7 +73,7 @@ PyTorch + `torch.distributions`. No JAX, no TensorFlow.
 - **A2: DONE** — Bayesian FFN (MLP.fc + MLP.proj, 4 blocks). 20M params (4.2M Bayesian, weight-tied head). Best MI ratio **1.43x batch / 1.70x qualitative** (σ mean=0.147, posteriors learned). Confirmation run (seed=2352) reproduced separation at **1.36x batch / 1.55x qualitative**. See [A2 Report](#a2-report).
 - **A3: CLOSED** — Bayesian FFN + Bayesian attention value projection (`V`) with diagonal posteriors. Four runs completed (`660914c3`, `1848a95f`, `c7855477`, `910b0b43`); all underperformed A2 on MI separation and ID perplexity. Final archived A3 config (no rerun): `bayes_ffn.init_rho=-2.0`, `bayes_ffn.prior_std=1.0`, `bayes_attn_v.init_rho=-2.0`, `bayes_attn_v.prior_std=1.0`, `train.kl_weight=0.2` (reference run `1848a95f`). Spec: `specs/a3-bayesian-ffn-attention-v.md`.
 - **B1: DONE (NEGATIVE)** — Post-hoc Laplace on deterministic checkpoint. Approach A (identity-curvature sweep): MI ratio 1.00x at all scales. Approach B (per-sample Fisher): curvature non-zero but still MI ratio 1.00x. **Conclusion: diagonal Laplace on FFN params does not produce OOD-discriminative uncertainty in language models.** See [B1 Implementation Notes](#b1-implementation-notes).
-- **B2: PLANNED** — BLoB-style Bayesian LoRA (variational, train-time). LoRA adapters on FFN layers with variational inference on A matrix.
+- **B2: DONE (WEAK POSITIVE)** — BLoB-style Bayesian LoRA (variational, train-time). R1 inconclusive (TinyShakespeare pretrain too small). R2: category-split pretrain (cat 1 World, val ppl=46.5), LoRA fine-tune (cat 2 Sports), OOD eval (cats 3+4). MI ratio **1.13x batch / 1.02x qual**. Weak but positive — BLoB LoRA detects OOD at batch level with 163K Bayesian params (25x fewer than A2's 4.2M). Signal weaker than A2 (1.43x/1.70x). See [B2 Implementation Notes](#b2-implementation-notes).
 - **B3: PLANNED** — TFB / Laplace-LoRA (post-hoc LoRA). Post-hoc variance search or Laplace on trained LoRA params.
 
 ## Bayesian Layer Strategy (order)
@@ -92,7 +93,7 @@ PyTorch + `torch.distributions`. No JAX, no TensorFlow.
 ## Configuration System
 Pipeline: `DEFAULT_CONFIG → YAML file → CLI --set overrides → validate`.
 
-Configs: `a0_baseline.yaml` (TinyShakespeare), `a0_agnews.yaml`, `a1_agnews.yaml`, `a2_agnews.yaml`, `a3_agnews.yaml`, `b1_laplace_agnews.yaml`.
+Configs: `a0_baseline.yaml` (TinyShakespeare), `a0_agnews.yaml`, `a1_agnews.yaml`, `a2_agnews.yaml`, `a3_agnews.yaml`, `b1_laplace_agnews.yaml`, `b2_pretrain_shakespeare.yaml` (obsolete — R1), `b2_pretrain_agnews.yaml` (R2), `b2_blob_agnews.yaml`.
 
 Key conventions:
 - `vocab_size` always from tokenizer, never config.
@@ -109,6 +110,9 @@ python experiments/a2_bayes_ffn.py --config configs/a2_agnews.yaml
 python experiments/a3_bayes_ffn_attn_v.py --config configs/a3_agnews.yaml
 python experiments/b1_laplace_baseline.py --config configs/b1_laplace_agnews.yaml
 python experiments/b1_laplace_baseline.py --config configs/b1_laplace_agnews.yaml --skip-train --laplace-state data/checkpoints/laplace_state.pt
+python experiments/b2_blob_lora.py --phase pretrain --pretrain-config configs/b2_pretrain_agnews.yaml
+python experiments/b2_blob_lora.py --phase finetune --config configs/b2_blob_agnews.yaml
+python experiments/b2_blob_lora.py --phase full --pretrain-config configs/b2_pretrain_agnews.yaml --config configs/b2_blob_agnews.yaml
 python experiments/a0_baseline.py --config configs/a0_agnews.yaml --set train.lr=1e-3
 python experiments/a0_baseline.py --config configs/a0_agnews.yaml --resume data/checkpoints/ckpt_step500.pt
 ```
@@ -126,7 +130,10 @@ python experiments/a1_bayes_output.py --config configs/a1_agnews.yaml  # A1
 python experiments/a2_bayes_ffn.py --config configs/a2_agnews.yaml     # A2
 python experiments/a3_bayes_ffn_attn_v.py --config configs/a3_agnews.yaml  # A3
 python experiments/b1_laplace_baseline.py --config configs/b1_laplace_agnews.yaml  # B1
+python experiments/b2_blob_lora.py --phase pretrain --pretrain-config configs/b2_pretrain_agnews.yaml  # B2 pretrain
+python experiments/b2_blob_lora.py --phase finetune --config configs/b2_blob_agnews.yaml              # B2 finetune
 python scripts/dump_mlflow_run.py <run_id>       # inspect run
+python scripts/dump_mlflow_run.py latest          # inspect most recent run
 uv run python scripts/compare_runs.py --runs <run_id...> --baseline <run_id>  # compare runs vs gates
 UV_CACHE_DIR=.uv-cache uv run python scripts/compare_runs.py --runs <run_id...> --baseline <run_id>  # if uv cache permission errors
 python scripts/eval_checkpoint.py <ckpt> --config <yaml>  # eval any checkpoint
@@ -138,7 +145,7 @@ GitHub Actions (`.github/workflows/ci.yml`): `ruff check` → `pytest`. No GPU i
 ## Coding Style
 4 spaces, 100-char lines (ruff). `snake_case` functions, `PascalCase` classes. Type hints on public APIs.
 
-## Tests (56 total)
+## Tests (84 total)
 ```
 tests/
   test_model.py          # Weight tying (2), perplexity bounds (1)
@@ -148,6 +155,11 @@ tests/
                          # A1 architecture (4), MI invariants (4),
                          # A2 FFN architecture (5), A3 Attn-V architecture (3),
                          # path detection (3)
+  test_lora.py           # B2 LoRA: injection (3), BLoBLoRALinear forward/KL/sampling (5),
+                         # config (3), context managers (3), sigma_summary (2),
+                         # freeze/grad (2), inject_lora validation (2), optimizer (2),
+                         # uncertainty detection (2), checkpoint roundtrip (2),
+                         # prior_std/init_g wiring (2), alpha scaling (1), rank sweep (1)
   test_laplace.py        # B1 Laplace: curvature shapes (1), damping (1),
                          # sampling reproducibility (2), zero scale (1),
                          # logit variation (1), pipeline integration (2),
@@ -445,10 +457,10 @@ This is a scientifically valuable negative result: it demonstrates that post-hoc
 
 | | Full weights | LoRA adapters |
 |---|---|---|
-| **Variational (train-time)** | A-series (done) | B2 BLoB (planned) |
-| **Post-hoc (no training)** | B1 Laplace (done, negative) | B3 TFB/Laplace-LoRA (planned) |
+| **Variational (train-time)** | A-series (done, **1.43x**) | B2 BLoB (done, **1.13x**) |
+| **Post-hoc (no training)** | B1 Laplace (done, **1.00x** negative) | B3 TFB/Laplace-LoRA (planned) |
 
-Execution order: ~~B1 (finish)~~ → B2 (BLoB LoRA) → B3 (TFB/Laplace-LoRA) → C (scaled replication) → comparison paper.
+Execution order: ~~B1 (finish)~~ → ~~B2 (BLoB LoRA)~~ → B3 (TFB/Laplace-LoRA) → C (scaled replication) → comparison paper.
 
 ### Milestone Numbering (aligned 2026-03-10)
 - **B2 = BLoB** — variational Bayesian LoRA (train-time). Asymmetric: Bayesianize A matrix, fix B.
@@ -461,16 +473,270 @@ Old B-milestone-roadmap (`specs/B-milestone-roadmap.md`) is superseded by this n
 
 ## B2 Plan (BLoB-style Bayesian LoRA)
 
-### Design Decision: Option A (pretrain → LoRA fine-tune)
-The existing A0/B1 checkpoints are already trained on AG News ID. LoRA on top of that would learn near-zero residuals — no meaningful Bayesian signal. Instead:
+### Design Decision: Category-Split Pretrain → LoRA Fine-Tune
 
-1. **Phase 1 — Pretrain:** Deterministic miniGPT on TinyShakespeare (general domain). Inherits B1 training hyperparams (lr=3e-4, weight_decay=0.1, warmup=1000, etc.), reduced to 10–20K steps (TinyShakespeare is ~304K tokens vs AG News ~2.4M — 100K steps would be ~2700 epochs). Config: `b2_pretrain_shakespeare.yaml`.
-2. **Phase 2 — LoRA fine-tune:** Freeze pretrained weights. Add BLoB LoRA adapters to FFN layers (MLP.fc + MLP.proj). Train on AG News ID with ELBO (variational inference on LoRA A matrix). Evaluate MI on ID vs OOD. Config: `b2_blob_agnews.yaml`.
+**R1 approach (TinyShakespeare pretrain) failed.** TinyShakespeare (~304K tokens) is 50x too small for 16M params. Catastrophic overfitting: best val ppl=160 at step 800–1000, then diverges to val ppl=1646 by 15K steps. The resulting base was too poor for LoRA to bridge Shakespeare→News.
 
-This mimics real-world pretrain → finetune and gives LoRA meaningful work (domain adaptation). The Bayesian uncertainty in LoRA params reflects genuine epistemic uncertainty about the domain shift.
+**R2 approach: AG News category-split.**
+
+| Phase | Categories | Purpose |
+|-------|-----------|---------|
+| Pretrain (deterministic) | 1 = World | Base LM learns news language in one domain |
+| LoRA fine-tune (BLoB) | 2 = Sports | Adapter specializes for a related but different domain |
+| OOD eval | 3+4 = Business, Sci/Tech | Truly unseen by both base and adapter |
+
+**Why not pretrain on ALL AG News categories:** If the base already knows Business/Sci-Tech, the base output dominates LoRA's small delta at OOD eval time. MC LoRA samples create tiny perturbations on a confident base → MI signal suppressed. We'd measure uncertainty in an irrelevant residual, not genuine epistemic uncertainty.
+
+**Why category-split works:**
+- OOD is truly unseen by both base AND adapter → clean uncertainty attribution.
+- LoRA does genuine work (World→Sports adaptation) → meaningful gradients → posteriors properly trained.
+- Mirrors real-world pretrain→finetune: pretrain domain ≠ finetune domain ≠ OOD domain.
+
+Full rationale and proof: `specs/b2-r2-revised-plan.md`.
 
 ### Flipout Decision
 **Not used for B2.** Current reparameterization trick works fine for 4L/batch_size=32 — A2 trained successfully, posteriors learned, KL healthy, MI separation reproduced across seeds. Flipout is reserved for C milestone (16L/batch_size=8) where gradient variance from shared weight samples becomes a real bottleneck.
+
+## B2 Implementation Notes
+
+### Implementation status
+- Added `minigpt/lora.py` with `LoRAConfig`, `BLoBLoRALinear`, and `inject_lora()`.
+- Added configs: `configs/b2_pretrain_agnews.yaml` (R2 pretrain) and `configs/b2_blob_agnews.yaml` (R2 finetune). Old `configs/b2_pretrain_shakespeare.yaml` is obsolete (R1).
+- Added experiment entrypoint: `experiments/b2_blob_lora.py`.
+- Added tests: `tests/test_lora.py`.
+- Extended integration points:
+  - `minigpt/layers.py` context managers now work with LoRA layers via capability checks (`freeze_sample`, `_use_mean`).
+  - `sigma_summary()` now includes LoRA `G^2` values.
+  - `minigpt/uncertainty.py::_has_bayesian_body()` now detects `BLoBLoRALinear`.
+  - `minigpt/config.py` now builds `LoRAConfig`.
+  - `minigpt/train.py::_configure_optimizer()` excludes `_g` params from weight decay, like `_rho`.
+
+Validation:
+- `uv run pytest tests/ -q` → `84 passed`
+
+### B2 code review findings (2026-03-10) — ALL FIXED (2026-03-11)
+Review doc: `specs/b2-blob-lora-review.md`
+
+1. **~~Invalid LoRA config can silently freeze the entire model.~~** FIXED.
+   - `inject_lora()` now raises `ValueError` for unsupported `lora.target` values.
+   - `validate_config()` now validates LoRA section when present: `target` in allowed set, `rank > 0` (int), `alpha > 0`, `prior_std > 0`, `init_g > 0`.
+
+2. **~~B2 phase-2 CLI can silently run with the wrong config if `--config` is omitted.~~** FIXED.
+   - `b2_blob_lora.py` now requires `--config` for `--phase finetune` and `--phase full`.
+   - Missing `--config` raises a clear `ValueError` with usage hint.
+
+3. **~~Generated sample is mislabeled as "mean weights".~~** FIXED.
+   - Sample generation is now wrapped in `use_mean_weights(model)` context manager.
+   - The "mean weights" label is now accurate.
+
+None of these fixes affect B2 R1 metrics (configs were valid, `--config` was passed, generation label is cosmetic).
+
+### MLflow duplicate-param bug discovered in B2
+First attempted finetune command:
+
+```bash
+python experiments/b2_blob_lora.py --phase finetune --config configs/b2_blob_agnews.yaml
+```
+
+Observed failure:
+- MLflow run: `a42eac1756f847aca76cf9a506e3d89d`
+- Crash happened before training started.
+- Error:
+  - `Changing param values is not allowed`
+  - offending key: `lora.base_checkpoint`
+  - old value: `data/checkpoints/b2_pretrain/ckpt_best.pt`
+  - new value: `data\checkpoints\b2_pretrain\ckpt_best.pt`
+
+Root cause:
+- `log_common_mlflow()` flattens and logs the full config, including `lora.base_checkpoint`.
+- `experiments/b2_blob_lora.py` then logs `lora.rank`, `lora.alpha`, `lora.prior_std`, `lora.init_g`, and `lora.base_checkpoint` again explicitly.
+- On Windows, the explicit `str(Path(...))` form uses backslashes, so MLflow sees a second value for the same key and throws.
+
+Specific redundancy:
+- First log source: `log_common_mlflow()` via flattened config.
+- Second log source: explicit `mlflow.log_params({...})` in `experiments/b2_blob_lora.py`.
+- The second log is redundant for all `lora.*` keys because they are already included in the flattened config.
+
+### B2 R1 — First completed finetune run (negative / inconclusive)
+- Command: `python experiments/b2_blob_lora.py --phase finetune --config configs/b2_blob_agnews.yaml`
+- MLflow run: `e1f60bfcd2bc41aaa33a6839e453fedf`
+- Status: `FINISHED`
+- Dataset: AG News
+  - ID categories: World + Sports
+  - OOD categories: Business + Sci/Tech
+  - Train/val/test_id/test_ood tokens: `2,701,999 / 337,750 / 337,750 / 3,498,051`
+- Base checkpoint: `data/checkpoints/b2_pretrain/ckpt_best.pt`
+- Base model params before injection: `16,090,880`
+- LoRA params after injection:
+  - total LoRA params: `122,880`
+  - Bayesian LoRA params: `81,920`
+- Training:
+  - steps: `10,000`
+  - best val loss (ELBO criterion): `8.1399` at step `8,000`
+  - training time: `641.3s`
+- Final eval:
+  - val perplexity: `3388.95`
+  - test ID perplexity: `3487.13`
+  - test OOD perplexity: `4360.15`
+  - MI (ID/OOD): `0.000576 / 0.000600`
+  - batch MI ratio: `1.04x`
+  - flip rate (ID/OOD): `0.0211 / 0.0210`
+  - final KL: `137,856`
+- Sigma stats:
+  - mean=`0.004775`, std=`0.002177`, min=`0.000527`, max=`0.019830`
+  - median=`0.004324`, p5=`0.001986`, p25=`0.003129`, p75=`0.006137`, p95=`0.008738`
+
+Metric history:
+- `train_loss`: `11.2686` at step 1 → `8.1493` at step 10,000
+- `val_loss`: `11.2481` at step 1 → `8.1378` at step 10,000
+- `val_loss` plateaued around `8.13–8.15` after the early phase; best checkpoint was step `8,000`
+- `kl_loss`: `172,664.875` at step 1 → `137,310.875` at step 10,000 (overall decreasing)
+- `effective_kl_weight`: linearly annealed to `0.2`, then stayed there
+- `lr`: cosine-decayed to `1.0e-5` by step `10,000`
+
+Qualitative eval:
+- Average MI — ID: `0.0004`, OOD: `0.0006`, ratio: `1.32x`
+- Absolute MI values remained tiny.
+- Generated text and qualitative continuations were gibberish / non-news-like, indicating the model did not adapt to AG News well enough for the uncertainty signal to be scientifically meaningful.
+
+Interpretation:
+- The Bayesian LoRA machinery appears to be functioning:
+  - KL decreases over training
+  - sigma values move above the tiny init scale
+  - MI is non-zero
+- But the mean model quality is catastrophically poor:
+  - perplexity remains in the `3.4k–4.4k` range
+  - samples are incoherent
+- Therefore B2 R1 is **not** evidence that Bayesian LoRA fails in principle.
+- More likely, the current setup is too weak:
+  - TinyShakespeare pretrain is too mismatched to AG News
+  - rank-8 FFN-only LoRA on a frozen 4L miniGPT is insufficient to recover a competent news model
+- As a result, this run is not yet a fair scientific comparison to A2.
+
+B2 R1 conclusion:
+1. B2 implementation is landed and test-covered (84 tests).
+2. Code review issues (config validation, CLI footgun, sample label) — all fixed 2026-03-11.
+3. MLflow duplicate-param bug — fixed earlier (commented out redundant explicit logging).
+4. B2 R1 (`e1f60bfc`) is inconclusive: TinyShakespeare pretrain was structurally inadequate (304K tokens for 16M params). Not evidence that BLoB LoRA fails.
+5. B2 R2 plan: category-split pretrain (cat 1 World → cat 2 Sports LoRA → cats 3+4 OOD). Revised hyperparams. Full spec: `specs/b2-r2-revised-plan.md`.
+
+### B2 Pretrain Runs (TinyShakespeare — ABANDONED)
+
+| Run | Steps | Train ppl | Val ppl | Status | MLflow |
+|-----|-------|-----------|---------|--------|--------|
+| `9ae3327a` | 15,000 | **1.37** | **1,646** | Catastrophic overfit | Prior run |
+| `1fae7c40` | 1,000 | 65.7 | 161.0 | Best achievable (early stop) | Used for R1 |
+
+TinyShakespeare pretrain is abandoned. 304K tokens for 16M params → structural overfitting ceiling at val ppl ~160. Not viable as a base for LoRA adaptation.
+
+### B2 R2 — Revised Hyperparameters
+
+**Pretrain (Phase 1):** AG News category 1 (World), ~1.08M train tokens.
+- Config: `configs/b2_pretrain_agnews.yaml`
+- Steps: 15,000. Same architecture/optimizer as R1 pretrain (lr=3e-4, dropout=0.2, weight_decay=0.1).
+- Expected val ppl: 60–100.
+
+**Finetune (Phase 2):** AG News category 2 (Sports). OOD: categories 3+4 (Business + Sci/Tech).
+
+| Parameter | R1 | R2 | Rationale |
+|-----------|----|----|-----------|
+| `data.id_categories` | [1, 2] | **[2]** | Sports only (LoRA trains on this) |
+| `lora.rank` | 8 | **16** | More capacity for cross-category adaptation |
+| `lora.alpha` | 16.0 | **32.0** | Keep alpha/rank=2 |
+| `train.lr` | 1e-4 | **3e-4** | Standard LoRA LR; matches A-series and BLoB paper |
+| `lora.init_g` | 0.05 | **0.1** | Initial σ=0.01 (4x wider → more room for posterior differentiation) |
+| `lora.prior_std` | 0.2 | 0.2 | Keep |
+| `train.kl_weight` | 0.2 | 0.2 | Keep |
+| `train.steps` | 10,000 | 10,000 | Keep |
+
+### B2 R2 Pretrain — AG News Cat 1 (World)
+
+- Command: `python experiments/b2_blob_lora.py --phase pretrain --pretrain-config configs/b2_pretrain_agnews.yaml`
+- MLflow run: `96c2a7862d0b4025b0fa3ea30b0deb8a`
+- Config: `configs/b2_pretrain_agnews.yaml`
+- Dataset: AG News category 1 (World), ~1.08M train tokens
+- Steps: 15,000
+- Best val loss: `3.8385` at step `15,000` (no overfitting — kept improving throughout)
+- Val ppl: **46.46** (better than expected 60–100 range)
+- Test ID ppl: **44.84**
+- Train ppl: 11.81 (moderate gap = healthy regularization, not catastrophic overfit)
+- Training time: 942s
+
+Comparison to prior pretrains:
+
+| Corpus | Train tokens | Ratio | Val ppl | Outcome |
+|--------|-------------|-------|---------|---------|
+| TinyShakespeare | 243K | 1:66 | 161 | Structural overfitting |
+| AG News cat 1 (World) | ~1.08M | 1:15 | **46.5** | Functional base LM |
+| AG News cats 1+2 (A0) | ~2.16M | 1:7 | 49.1 | A0 baseline |
+
+Cat-1-only pretrain achieved comparable quality to the full A0 baseline (46.5 vs 49.1), confirming AG News provides sufficient signal even from a single category.
+
+### B2 R2 Finetune — BLoB LoRA on Cat 2 (Sports)
+
+- Command: `python experiments/b2_blob_lora.py --phase finetune --config configs/b2_blob_agnews.yaml`
+- MLflow run: `8ddcdf26503043e794de1a7bbbac6e5a`
+- Status: `FINISHED`
+- Dataset: AG News
+  - ID categories: Sports [2]
+  - OOD categories: Business + Sci/Tech [3, 4]
+- Base checkpoint: `data/checkpoints/b2_pretrain/ckpt_best.pt` (val ppl=46.5)
+- LoRA params after injection:
+  - total LoRA params: `245,760`
+  - Bayesian LoRA params: `163,840`
+- Training:
+  - steps: `10,000`
+  - best val loss (ELBO criterion): `5.4515` at step `6,500`
+  - training time: `637s`
+- Final eval:
+  - test ID perplexity: `226.85`
+  - test OOD perplexity: `533.69`
+  - MI (ID/OOD): `0.00601 / 0.00679`
+  - **batch MI ratio: 1.13x**
+  - flip rate (ID/OOD): `0.0605 / 0.0624`
+  - final KL: `226,988`
+- Sigma stats:
+  - mean=`0.0083`, std=`0.0027`, min=`0.0004`, max=`0.0316`
+  - median=`0.0081`, p5=`0.0044`, p25=`0.0064`, p75=`0.0100`, p95=`0.0132`
+
+Qualitative MI (prompt-token scoring, 5 prompts per category):
+- Sports (ID): 0.0064
+- Business (OOD): 0.0069
+- Sci/Tech (OOD): 0.0063
+- Overall: ID=0.0064, OOD=0.0065, **qualitative ratio=1.02x**
+
+Generated text (mean weights): semi-coherent news-style fragments with sports vocabulary leaking into other topics. Better than R1 gibberish but still low quality (ppl=227).
+
+### B2 R2 Cross-Run Comparison
+
+| Metric | B2 R1 (TinyShakespeare) | **B2 R2 (AG News split)** | A2 best |
+|--------|------------------------|--------------------------|---------|
+| Base val ppl | 161 | **46.5** | 49.1 (same model) |
+| Test ID ppl | 3,487 | **226.9** | 53.5 |
+| Test OOD ppl | 4,360 | **533.7** | 595 |
+| MI ratio (batch) | 1.04x | **1.13x** | 1.43x |
+| MI ratio (qual) | 1.32x | **1.02x** | 1.70x |
+| Sigma mean | 0.0048 | **0.0083** | 0.147 |
+| Bayesian params | 81,920 | **163,840** | 4,200,000 |
+| KL (final) | 137K | **227K** | 3.2M |
+
+### B2 Closure Decision
+
+**B2 is DONE — weak positive result.**
+
+1. **BLoB LoRA produces OOD-discriminative uncertainty** at the batch level (MI ratio 1.13x), clearing the >1.1x target. This is directional evidence that variational LoRA can detect OOD via epistemic uncertainty.
+
+2. **The signal is much weaker than full-weight variational inference** (A2: 1.43x batch, 1.70x qual). This is expected: rank-16 LoRA has 163K Bayesian params vs A2's 4.2M — a 25x reduction in posterior expressiveness.
+
+3. **Qualitative MI ratio (1.02x) is flat.** The per-prompt MI values are too small (0.006) for reliable separation at 5 prompts per category. Batch-level aggregation over thousands of tokens is needed to detect the signal.
+
+4. **Posteriors are constrained.** Sigma mean=0.0083 (close to init σ=0.01), range [0.0004, 0.032]. Posteriors moved but didn't differentiate as dramatically as A2's [0.036, 0.966]. The low-rank subspace constrains how much posterior variance the model can express.
+
+5. **ID ppl=227 is higher than expected** (target was 80–200). World→Sports is a genuine domain shift. The LoRA adapted but not fully — there's room for improvement at larger scale.
+
+6. **Key takeaway for the paper:** Variational LoRA (BLoB) works but produces weaker OOD signals than full-weight variational inference at 4L miniGPT scale. The question of whether this gap narrows or widens at 16L scale (C milestone) is the central contribution of the comparison paper.
+
+7. **No further B2 runs planned.** The current result is sufficient for the 2x2 comparison. Scaling experiments (C milestone) will test whether BLoB LoRA's MI ratio improves with a larger model and more data.
 
 ---
 

@@ -1,19 +1,19 @@
 """B2 — BLoB Bayesian LoRA on MiniGPT.
 
 Two-phase pipeline:
-  Phase 1 (pretrain): Train deterministic miniGPT on TinyShakespeare.
+  Phase 1 (pretrain): Train deterministic miniGPT on AG News (single category).
   Phase 2 (finetune): Inject BLoB LoRA into FFN layers, fine-tune on
-                      AG News ID topics with ELBO objective.
+                      a different AG News category with ELBO objective.
 
 Usage:
   # Full pipeline (Phase 1 then Phase 2):
   python experiments/b2_blob_lora.py --phase full \\
-      --pretrain-config configs/b2_pretrain_shakespeare.yaml
+      --pretrain-config configs/b2_pretrain_agnews.yaml \\
       --config configs/b2_blob_agnews.yaml
 
   # Phase 1 only:
   python experiments/b2_blob_lora.py --phase pretrain \\
-      --pretrain-config configs/b2_pretrain_shakespeare.yaml
+      --pretrain-config configs/b2_pretrain_agnews.yaml
 
   # Phase 2 only (base checkpoint path from config or --base-checkpoint):
   python experiments/b2_blob_lora.py --phase finetune \\
@@ -51,9 +51,9 @@ from minigpt.uncertainty import compute_uncertainty_metrics
 
 
 def _run_phase1(pretrain_cfg: dict, use_mlflow: bool) -> Path:
-    """Train deterministic model on TinyShakespeare. Returns best checkpoint path."""
+    """Train deterministic base model. Returns best checkpoint path."""
     print("\n" + "=" * 60)
-    print("Phase 1: Pretrain on TinyShakespeare")
+    print("Phase 1: Pretrain deterministic base model")
     print("=" * 60)
 
     torch.manual_seed(pretrain_cfg["train"]["seed"])
@@ -176,12 +176,13 @@ def _run_phase2(cfg: dict, base_ckpt_path: str, use_mlflow: bool) -> None:
         if use_mlflow:
             log_perplexity_mlflow(ppl_results)
 
-        # Generated sample
-        sample = generate_text(
-            model, tokenizer,
-            max_new_tokens=eval_cfg.get("sample_tokens", 200),
-            temperature=eval_cfg.get("temperature", 0.8),
-        )
+        # Generated sample (mean weights — deterministic)
+        with use_mean_weights(model):
+            sample = generate_text(
+                model, tokenizer,
+                max_new_tokens=eval_cfg.get("sample_tokens", 200),
+                temperature=eval_cfg.get("temperature", 0.8),
+            )
         print(f"\n=== generated sample (mean weights) ===\n{sample}\n{'=' * 40}")
         if use_mlflow:
             mlflow.log_text(sample, "generated_sample.txt")
@@ -263,6 +264,11 @@ def main() -> None:
             return
 
     # --- Phase 2: BLoB LoRA fine-tune on AG News ---
+    if phase in ("finetune", "full") and args.config is None:
+        raise ValueError(
+            "--config is required for --phase finetune/full\n"
+            "  e.g.: --config configs/b2_blob_agnews.yaml"
+        )
     if phase in ("finetune", "full"):
         if args.base_checkpoint:
             base_ckpt = args.base_checkpoint

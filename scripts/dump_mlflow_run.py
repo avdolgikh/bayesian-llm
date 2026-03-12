@@ -6,12 +6,26 @@ import mlflow
 
 
 def main():
-    if len(sys.argv) < 2:
-        print("Usage: python scripts/dump_mlflow_run.py <run_id>")
-        sys.exit(1)
-
-    run_id = sys.argv[1]
     mlflow.set_tracking_uri("sqlite:///mlflow.db")
+
+    if len(sys.argv) < 2 or sys.argv[1] == "latest":
+        # No arg or "latest" → fetch the most recent run
+        client = mlflow.tracking.MlflowClient()
+        all_experiments = client.search_experiments()
+        exp_ids = [e.experiment_id for e in all_experiments]
+        runs = client.search_runs(
+            experiment_ids=exp_ids,
+            order_by=["start_time DESC"],
+            max_results=1,
+        )
+        if not runs:
+            print("No runs found.")
+            sys.exit(1)
+        run_id = runs[0].info.run_id
+        print(f"(latest run: {run_id})\n")
+    else:
+        run_id = sys.argv[1]
+
     run = mlflow.get_run(run_id)
 
     print("=== PARAMS ===")

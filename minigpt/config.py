@@ -7,7 +7,7 @@ from pathlib import Path
 import yaml
 
 from minigpt.layers import BayesConfig
-from minigpt.lora import LoRAConfig
+from minigpt.lora import _VALID_LORA_TARGETS, LoRAConfig  # noqa: F401
 from minigpt.model import GPTConfig
 from minigpt.train import TrainConfig
 
@@ -168,13 +168,13 @@ def build_gpt_config(cfg: dict, vocab_size: int) -> GPTConfig:
 
 def build_lora_config(cfg: dict) -> LoRAConfig:
     """Construct a LoRAConfig from the merged config dict."""
-    l = cfg.get("lora", {})
+    lora = cfg.get("lora", {})
     return LoRAConfig(
-        rank=l.get("rank", 8),
-        alpha=l.get("alpha", 16.0),
-        target=l.get("target", "ffn"),
-        prior_std=l.get("prior_std", 0.2),
-        init_g=l.get("init_g", 0.05),
+        rank=lora.get("rank", 8),
+        alpha=lora.get("alpha", 16.0),
+        target=lora.get("target", "ffn"),
+        prior_std=lora.get("prior_std", 0.2),
+        init_g=lora.get("init_g", 0.05),
     )
 
 
@@ -230,6 +230,28 @@ def validate_config(cfg: dict) -> None:
         raise ValueError(
             f"val_fraction ({val_frac}) + test_fraction ({test_frac}) must be < 1.0"
         )
+
+    # LoRA validation (only when lora section is present)
+    if "lora" in cfg:
+        lora = cfg["lora"]
+        target = lora.get("target", "ffn")
+        if target not in _VALID_LORA_TARGETS:
+            raise ValueError(
+                f"lora.target {target!r} is not supported, "
+                f"must be one of {_VALID_LORA_TARGETS}"
+            )
+        rank = lora.get("rank", 8)
+        if not isinstance(rank, int) or rank <= 0:
+            raise ValueError(f"lora.rank must be a positive integer, got {rank}")
+        alpha = lora.get("alpha", 16.0)
+        if alpha <= 0:
+            raise ValueError(f"lora.alpha must be positive, got {alpha}")
+        prior_std = lora.get("prior_std", 0.2)
+        if prior_std <= 0:
+            raise ValueError(f"lora.prior_std must be positive, got {prior_std}")
+        init_g = lora.get("init_g", 0.05)
+        if init_g <= 0:
+            raise ValueError(f"lora.init_g must be positive, got {init_g}")
 
 
 def config_to_flat_params(cfg: dict, prefix: str = "") -> dict[str, str]:
