@@ -8,7 +8,7 @@ The core idea: replace point-estimate weights with learned posterior distributio
 **Current approach:** Controlled comparative study on miniGPT (AG News). Four Bayesian methods in a 2x2 matrix: (variational vs post-hoc) x (full weights vs LoRA). A-series (variational full weights) done. B-series: B1 Laplace (post-hoc full weights), B2 BLoB (variational LoRA), B3 TFB/Laplace-LoRA (post-hoc LoRA). Active spec: `specs/comparative-bayesian-llm-study.md`.
 
 ## Project Structure
-`docs/` — PDF papers (theory baseline). `specs/` — planning docs (active: `specs/comparative-bayesian-llm-study.md`). B1 tech spec: `specs/b1-laplace-tech-spec-mar2026.md`. B1 analysis: `specs/b1-laplace-analysis.md`. B2 spec: `specs/b2-blob-lora-spec.md`. B2 R2 revised plan: `specs/b2-r2-revised-plan.md`. B2 code review: `specs/b2-blob-lora-review.md`.
+`docs/` — PDF papers (theory baseline). `specs/` — planning docs (active: `specs/comparative-bayesian-llm-study.md`). B1 tech spec: `specs/b1-laplace-tech-spec-mar2026.md`. B1 analysis: `specs/b1-laplace-analysis.md`. B2 spec: `specs/b2-blob-lora-spec.md`. B2 R2 revised plan: `specs/b2-r2-revised-plan.md`. B2 code review: `specs/b2-blob-lora-review.md`. B3 spec: `specs/b3-post-hoc-lora-spec.md`.
 
 ```
 minigpt/          # Python package — all model code
@@ -20,9 +20,10 @@ minigpt/          # Python package — all model code
   config.py       # YAML config ↔ dataclass bridge
   uncertainty.py  # Epistemic uncertainty (MI via MC sampling)
   laplace.py      # Post-hoc Laplace: curvature fitting, sampling, context manager
-  lora.py         # BLoB LoRA: BLoBLoRALinear, LoRAConfig, inject_lora()
+  lora.py         # LoRA: BLoBLoRALinear, DeterministicLoRALinear, LoRAConfig, inject_lora()
+  tfb.py          # TFB: Training-Free Bayesianization (SVD variance search, sampling)
 configs/          # YAML config files per experiment
-experiments/      # Runnable scripts (a0_baseline, a1–a3 Bayesian, b1_laplace_baseline, b2_blob_lora)
+experiments/      # Runnable scripts (a0_baseline, a1–a3 Bayesian, b1_laplace_baseline, b2_blob_lora, b3_post_hoc_lora)
   experiment_setup.py  # Shared setup: CLI parsing, config, data, model, device
   eval_utils.py        # Shared eval: perplexity suite, MI suite, qualitative eval
   mlflow_utils.py      # Shared MLflow: context, logging helpers
@@ -74,7 +75,7 @@ PyTorch + `torch.distributions`. No JAX, no TensorFlow.
 - **A3: CLOSED** — Bayesian FFN + Bayesian attention value projection (`V`) with diagonal posteriors. Four runs completed (`660914c3`, `1848a95f`, `c7855477`, `910b0b43`); all underperformed A2 on MI separation and ID perplexity. Final archived A3 config (no rerun): `bayes_ffn.init_rho=-2.0`, `bayes_ffn.prior_std=1.0`, `bayes_attn_v.init_rho=-2.0`, `bayes_attn_v.prior_std=1.0`, `train.kl_weight=0.2` (reference run `1848a95f`). Spec: `specs/a3-bayesian-ffn-attention-v.md`.
 - **B1: DONE (NEGATIVE)** — Post-hoc Laplace on deterministic checkpoint. Approach A (identity-curvature sweep): MI ratio 1.00x at all scales. Approach B (per-sample Fisher): curvature non-zero but still MI ratio 1.00x. **Conclusion: diagonal Laplace on FFN params does not produce OOD-discriminative uncertainty in language models.** See [B1 Implementation Notes](#b1-implementation-notes).
 - **B2: DONE (WEAK POSITIVE)** — BLoB-style Bayesian LoRA (variational, train-time). R1 inconclusive (TinyShakespeare pretrain too small). R2: category-split pretrain (cat 1 World, val ppl=46.5), LoRA fine-tune (cat 2 Sports), OOD eval (cats 3+4). MI ratio **1.13x batch / 1.02x qual**. Weak but positive — BLoB LoRA detects OOD at batch level with 163K Bayesian params (25x fewer than A2's 4.2M). Signal weaker than A2 (1.43x/1.70x). See [B2 Implementation Notes](#b2-implementation-notes).
-- **B3: PLANNED** — TFB / Laplace-LoRA (post-hoc LoRA). Post-hoc variance search or Laplace on trained LoRA params.
+- **B3: IN PROGRESS (Stage #1 spec done)** — Post-hoc Bayesianization of deterministic LoRA. Two approaches: B3-TFB (SVD-based variance search, NeurIPS 2025) and B3-LAP (diagonal Laplace on LoRA A params). Reuses B2 pretrain base (cat 1 World). Pipeline: deterministic LoRA train (cat 2 Sports) → post-hoc fitting → MC eval. Spec: `specs/b3-post-hoc-lora-spec.md`.
 
 ## Bayesian Layer Strategy (order)
 1. Output head (A1) — simplest, proves pipeline
@@ -93,7 +94,7 @@ PyTorch + `torch.distributions`. No JAX, no TensorFlow.
 ## Configuration System
 Pipeline: `DEFAULT_CONFIG → YAML file → CLI --set overrides → validate`.
 
-Configs: `a0_baseline.yaml` (TinyShakespeare), `a0_agnews.yaml`, `a1_agnews.yaml`, `a2_agnews.yaml`, `a3_agnews.yaml`, `b1_laplace_agnews.yaml`, `b2_pretrain_shakespeare.yaml` (obsolete — R1), `b2_pretrain_agnews.yaml` (R2), `b2_blob_agnews.yaml`.
+Configs: `a0_baseline.yaml` (TinyShakespeare), `a0_agnews.yaml`, `a1_agnews.yaml`, `a2_agnews.yaml`, `a3_agnews.yaml`, `b1_laplace_agnews.yaml`, `b2_pretrain_shakespeare.yaml` (obsolete — R1), `b2_pretrain_agnews.yaml` (R2), `b2_blob_agnews.yaml`, `b3_lora_agnews.yaml` (B3 — deterministic LoRA + TFB/Laplace).
 
 Key conventions:
 - `vocab_size` always from tokenizer, never config.
@@ -113,6 +114,10 @@ python experiments/b1_laplace_baseline.py --config configs/b1_laplace_agnews.yam
 python experiments/b2_blob_lora.py --phase pretrain --pretrain-config configs/b2_pretrain_agnews.yaml
 python experiments/b2_blob_lora.py --phase finetune --config configs/b2_blob_agnews.yaml
 python experiments/b2_blob_lora.py --phase full --pretrain-config configs/b2_pretrain_agnews.yaml --config configs/b2_blob_agnews.yaml
+python experiments/b3_post_hoc_lora.py --phase train --config configs/b3_lora_agnews.yaml
+python experiments/b3_post_hoc_lora.py --phase tfb --config configs/b3_lora_agnews.yaml
+python experiments/b3_post_hoc_lora.py --phase laplace --config configs/b3_lora_agnews.yaml
+python experiments/b3_post_hoc_lora.py --phase full --config configs/b3_lora_agnews.yaml
 python experiments/a0_baseline.py --config configs/a0_agnews.yaml --set train.lr=1e-3
 python experiments/a0_baseline.py --config configs/a0_agnews.yaml --resume data/checkpoints/ckpt_step500.pt
 ```
@@ -132,6 +137,9 @@ python experiments/a3_bayes_ffn_attn_v.py --config configs/a3_agnews.yaml  # A3
 python experiments/b1_laplace_baseline.py --config configs/b1_laplace_agnews.yaml  # B1
 python experiments/b2_blob_lora.py --phase pretrain --pretrain-config configs/b2_pretrain_agnews.yaml  # B2 pretrain
 python experiments/b2_blob_lora.py --phase finetune --config configs/b2_blob_agnews.yaml              # B2 finetune
+python experiments/b3_post_hoc_lora.py --phase train --config configs/b3_lora_agnews.yaml             # B3 det LoRA
+python experiments/b3_post_hoc_lora.py --phase tfb --config configs/b3_lora_agnews.yaml               # B3 TFB
+python experiments/b3_post_hoc_lora.py --phase laplace --config configs/b3_lora_agnews.yaml           # B3 Laplace
 python scripts/dump_mlflow_run.py <run_id>       # inspect run
 python scripts/dump_mlflow_run.py latest          # inspect most recent run
 uv run python scripts/compare_runs.py --runs <run_id...> --baseline <run_id>  # compare runs vs gates
