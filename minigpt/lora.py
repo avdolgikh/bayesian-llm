@@ -109,16 +109,60 @@ class BLoBLoRALinear(BayesianModule):
         return kl.sum()
 
 
+class DeterministicLoRALinear(nn.Module):
+    """Standard (non-Bayesian) LoRA adapter wrapper.
+
+    Forward: y = W0*x + (alpha/rank) * B * A * x
+    Parameters: lora_A (trainable), lora_B (trainable), base_linear (frozen).
+    """
+
+    def __init__(
+        self,
+        base_linear: nn.Linear,
+        rank: int,
+        alpha: float,
+    ) -> None:
+        super().__init__()
+        in_features = base_linear.in_features
+        out_features = base_linear.out_features
+
+        # Store frozen base weight
+        self.base_linear = base_linear
+        for p in self.base_linear.parameters():
+            p.requires_grad_(False)
+
+        self.rank = rank
+        self.scaling = alpha / rank
+
+        # B: deterministic, trainable. Init zeros.
+        self.lora_B = nn.Parameter(torch.zeros(out_features, rank))
+
+        # A: deterministic, trainable. Init Kaiming uniform.
+        self.lora_A = nn.Parameter(torch.empty(rank, in_features))
+        nn.init.kaiming_uniform_(self.lora_A, a=5 ** 0.5)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        base_out = self.base_linear(x)
+        lora_out = (x @ self.lora_A.T) @ self.lora_B.T * self.scaling
+        return base_out + lora_out
+
+
 _VALID_LORA_TARGETS = ("ffn",)
 
 
-def inject_lora(model: nn.Module, lora_config: LoRAConfig) -> nn.Module:
-    """Inject BLoB LoRA adapters into FFN layers of a MiniGPT model.
+def inject_lora(model: nn.Module, lora_config: LoRAConfig, bayesian: bool = True) -> nn.Module:
+    """Inject LoRA adapters into FFN layers of a MiniGPT model.
+
+    Args:
+        model: the MiniGPT model to modify.
+        lora_config: configuration for rank, alpha, targets, etc.
+        bayesian: if True, injects BLoBLoRALinear; if False, DeterministicLoRALinear.
 
     1. Freezes all base model parameters.
-    2. Replaces MLP.fc and MLP.proj in every block with BLoBLoRALinear.
+    2. Replaces MLP.fc and MLP.proj in every block with the selected LoRA type.
     3. Only LoRA parameters retain requires_grad=True.
 
+    Returns the modified model.
     Raises ValueError if lora_config.target is not supported.
     """
     if lora_config.target not in _VALID_LORA_TARGETS:
@@ -133,19 +177,31 @@ def inject_lora(model: nn.Module, lora_config: LoRAConfig) -> nn.Module:
 
     if lora_config.target == "ffn":
         for block in model.blocks:
-            block.mlp.fc = BLoBLoRALinear(
-                block.mlp.fc.linear,
-                rank=lora_config.rank,
-                alpha=lora_config.alpha,
-                prior_std=lora_config.prior_std,
-                init_g=lora_config.init_g,
-            )
-            block.mlp.proj = BLoBLoRALinear(
-                block.mlp.proj.linear,
-                rank=lora_config.rank,
-                alpha=lora_config.alpha,
-                prior_std=lora_config.prior_std,
-                init_g=lora_config.init_g,
-            )
+            if bayesian:
+                block.mlp.fc = BLoBLoRALinear(
+                    block.mlp.fc.linear if hasattr(block.mlp.fc, "linear") else block.mlp.fc,
+                    rank=lora_config.rank,
+                    alpha=lora_config.alpha,
+                    prior_std=lora_config.prior_std,
+                    init_g=lora_config.init_g,
+                )
+                block.mlp.proj = BLoBLoRALinear(
+                    block.mlp.proj.linear if hasattr(block.mlp.proj, "linear") else block.mlp.proj,
+                    rank=lora_config.rank,
+                    alpha=lora_config.alpha,
+                    prior_std=lora_config.prior_std,
+                    init_g=lora_config.init_g,
+                )
+            else:
+                block.mlp.fc = DeterministicLoRALinear(
+                    block.mlp.fc.linear if hasattr(block.mlp.fc, "linear") else block.mlp.fc,
+                    rank=lora_config.rank,
+                    alpha=lora_config.alpha,
+                )
+                block.mlp.proj = DeterministicLoRALinear(
+                    block.mlp.proj.linear if hasattr(block.mlp.proj, "linear") else block.mlp.proj,
+                    rank=lora_config.rank,
+                    alpha=lora_config.alpha,
+                )
 
     return model

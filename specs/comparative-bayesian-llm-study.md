@@ -94,8 +94,9 @@ The base model is already trained on ID data. LoRA would learn near-zero residua
 | A0 Deterministic | baseline | 0 | -- | -- | 49.1 | baseline |
 | A2 Variational FFN | train-time, full | 4.2M | 1.43x | 1.70x | 53.5 | 1x |
 | B1 Laplace FFN | post-hoc, full | 2.1M (post-hoc) | 1.00x | 0.99x | 41.0 | 0.01x fit |
-| B2 BLoB LoRA | train-time, LoRA | ~50K (rank 8) | ? | ? | ? | ~0.3x |
-| B3 TFB LoRA | post-hoc, LoRA | ~50K (post-hoc) | ? | ? | ? | 0.01x search |
+| B2 BLoB LoRA | train-time, LoRA | 163K (rank 16) | 1.13x | 1.02x | 226.9 | 0.1x |
+| B3 TFB LoRA | post-hoc, LoRA | 82K (post-hoc) | 1.10x | TBD | 224.6 | 0.01x search |
+| B3 Laplace-LoRA | post-hoc, LoRA | 82K (post-hoc) | 1.00x | 1.00x | 224.6 | 0.001x fit |
 
 ## Concerns and Mitigations
 

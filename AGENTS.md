@@ -75,7 +75,7 @@ PyTorch + `torch.distributions`. No JAX, no TensorFlow.
 - **A3: CLOSED** — Bayesian FFN + Bayesian attention value projection (`V`) with diagonal posteriors. Four runs completed (`660914c3`, `1848a95f`, `c7855477`, `910b0b43`); all underperformed A2 on MI separation and ID perplexity. Final archived A3 config (no rerun): `bayes_ffn.init_rho=-2.0`, `bayes_ffn.prior_std=1.0`, `bayes_attn_v.init_rho=-2.0`, `bayes_attn_v.prior_std=1.0`, `train.kl_weight=0.2` (reference run `1848a95f`). Spec: `specs/a3-bayesian-ffn-attention-v.md`.
 - **B1: DONE (NEGATIVE)** — Post-hoc Laplace on deterministic checkpoint. Approach A (identity-curvature sweep): MI ratio 1.00x at all scales. Approach B (per-sample Fisher): curvature non-zero but still MI ratio 1.00x. **Conclusion: diagonal Laplace on FFN params does not produce OOD-discriminative uncertainty in language models.** See [B1 Implementation Notes](#b1-implementation-notes).
 - **B2: DONE (WEAK POSITIVE)** — BLoB-style Bayesian LoRA (variational, train-time). R1 inconclusive (TinyShakespeare pretrain too small). R2: category-split pretrain (cat 1 World, val ppl=46.5), LoRA fine-tune (cat 2 Sports), OOD eval (cats 3+4). MI ratio **1.13x batch / 1.02x qual**. Weak but positive — BLoB LoRA detects OOD at batch level with 163K Bayesian params (25x fewer than A2's 4.2M). Signal weaker than A2 (1.43x/1.70x). See [B2 Implementation Notes](#b2-implementation-notes).
-- **B3: IN PROGRESS (Stage #1 spec done)** — Post-hoc Bayesianization of deterministic LoRA. Two approaches: B3-TFB (SVD-based variance search, NeurIPS 2025) and B3-LAP (diagonal Laplace on LoRA A params). Reuses B2 pretrain base (cat 1 World). Pipeline: deterministic LoRA train (cat 2 Sports) → post-hoc fitting → MC eval. Spec: `specs/b3-post-hoc-lora-spec.md`.
+- **B3: DONE (MIXED)** — Post-hoc Bayesianization of deterministic LoRA. **B3-TFB: MI ratio 1.10x** (σ_q=0.013, SVD-structured variance works). **B3-LAP: MI ratio 1.00x** (diagonal curvature too flat, same failure as B1). TFB succeeds post-hoc because it uses structural information (SVD of B), not curvature. See [B3 Implementation Notes](#b3-implementation-notes). Spec: `specs/b3-post-hoc-lora-spec.md`.
 
 ## Bayesian Layer Strategy (order)
 1. Output head (A1) — simplest, proves pipeline
@@ -128,7 +128,7 @@ Saves full config, `best_val_loss`, RNG states. LR schedule is stateless (comput
 ## Build & Dev Commands
 ```bash
 uv sync                                          # install deps
-uv run pytest tests/ -v                          # 84 unit tests
+uv run pytest tests/ -v                          # 103 unit tests
 uv run ruff check minigpt/ experiments/ tests/   # lint
 python experiments/a0_baseline.py                # A0 training (GPU)
 python experiments/a1_bayes_output.py --config configs/a1_agnews.yaml  # A1
@@ -154,7 +154,7 @@ GitHub Actions (`.github/workflows/ci.yml`): `ruff check` → `pytest`. No GPU i
 ## Coding Style
 4 spaces, 100-char lines (ruff). `snake_case` functions, `PascalCase` classes. Type hints on public APIs.
 
-## Tests (84 total)
+## Tests (103 total)
 ```
 tests/
   test_model.py          # Weight tying (2), perplexity bounds (1)
@@ -175,7 +175,18 @@ tests/
                          # checkpoint roundtrip (1), param scope (2),
                          # selection modes (4), curvature invariants (3),
                          # scale/damping modulation (2), fit side effects (2),
-                         # loaded state sampling (1), e2e smoke (1)
+                         # loaded state sampling (1), e2e smoke (1),
+                         # B3 Laplace-LoRA: lora selection (1), curvature shapes (1),
+                         # sampling changes logits (1)
+  test_b3_deterministic_lora.py  # B3 DeterministicLoRALinear: forward matches base (1),
+                         # no kl (1), params trainable (1), forward deterministic (1),
+                         # inject_lora bayesian=False (1), freeze base (1),
+                         # param count (1)
+  test_tfb.py            # B3 TFB: SVD shapes (1), variance structure (1),
+                         # sampling reproducible (1), zero sigma (1),
+                         # search converges (1), save/load roundtrip (1),
+                         # search respects tolerance (1),
+                         # sampling changes logits (1), MC metrics protocol (1)
 ```
 
 ## Commit Guidelines
@@ -458,6 +469,110 @@ Fix `fit_laplace()` to process sequences one-at-a-time instead of batch-averaged
 
 This is a scientifically valuable negative result: it demonstrates that post-hoc Bayesianization via diagonal Laplace cannot substitute for train-time variational inference (A2: 1.43x) for epistemic uncertainty in language models. The curvature structure from a converged model lacks the informative variance differentiation that variational posteriors learn during training.
 
+### B3 Implementation Notes
+
+- **Architecture:** Implemented `DeterministicLoRALinear` in `minigpt/lora.py` and updated `inject_lora` to support both BLoB (Variational) and Deterministic adapters via a `bayesian` flag.
+- **TFB (Training-Free Bayesianization):**
+  - Implemented in `minigpt/tfb.py`.
+  - Structures posterior variance in LoRA $A$ matrix based on SVD of deterministic $B$ matrix: $\Omega_{ij} = \sigma_q / s_i$.
+  - Binary search for optimal noise scale $\sigma_q$ on fixed anchor batches within performance tolerance $\epsilon$.
+  - Max iteration safeguard (`max_iterations=100`) prevents infinite loops.
+- **Laplace-LoRA:**
+  - Extended `minigpt/laplace.py` with `"lora"` selection mode targeting `lora_A` parameters.
+  - Fits diagonal Fisher curvature specifically on adapter weights.
+- **Unified Pipeline:** Created `experiments/b3_post_hoc_lora.py` supporting three phases: `train` (deterministic baseline), `tfb` (post-hoc fitting), and `laplace` (post-hoc fitting). CLI: `--phase`, `--lora-checkpoint`, `--base-checkpoint`, `--no-mlflow`.
+
+### B3 Code Review (2026-03-13) — ALL FIXED
+
+Review doc: `specs/b3-implementation-review.md`
+
+Critical bugs found and fixed:
+1. **Base checkpoint loaded after LoRA injection** — FFN weights silently dropped (`fc.linear.weight` vs `fc.base_linear.weight` mismatch). Fix: load base BEFORE `inject_lora()`, matching B2's pattern.
+2. **`torch.device("auto")` crash** — main config has `device: auto` which is invalid. Fix: use shared `resolve_device()`.
+3. **MLflow URI/experiment never set** — runs went to default `mlruns/` instead of sqlite. Fix: use shared `mlflow_context()`.
+
+Medium issues found and fixed:
+4. **TFB binary search used different random batches per step** — now draws fixed anchor batches once and reuses them.
+5. **`--no-mlflow` flag ignored** — now threaded through all phase functions via `mlflow_context`.
+6. **No max iteration limit on binary search** — added `max_iterations=100`.
+7. **2 of 19 spec tests missing** — added `test_tfb_search_respects_tolerance` and `test_tfb_sampling_changes_logits`.
+8. **`load_tfb_state`/`load_laplace_state` lacked `map_location`** — added to both.
+9. **Seed reuse across batches in MC eval** — fixed in both `compute_tfb_uncertainty` and `compute_laplace_uncertainty` to use `(batch_idx * batch_size + b) * n_samples`.
+
+Verification:
+- 19 new unit tests added (103 total).
+- Smoke test (100 steps, `--phase full --no-mlflow`) completes end-to-end on CPU.
+- All 3 standalone phases (`train`, `tfb`, `laplace`) work with MLflow enabled.
+
+### B3 Phase 1 — Deterministic LoRA Training
+
+- Command: `python experiments/b3_post_hoc_lora.py --phase train --config configs/b3_lora_agnews.yaml`
+- MLflow run: `d6c513442f7e45aea034956f90e42745`
+- Base checkpoint: `data/checkpoints/b2_pretrain/ckpt_best.pt` (cat 1 World, val ppl=46.5)
+- LoRA: rank=16, alpha=32, target=ffn. 163,840 total LoRA params (81,920 in A matrices).
+- Training: 10K steps, lr=3e-4, batch_size=32. Training time: ~556s.
+- Best val loss: 5.4188 (val ppl=225.6)
+- **Test ID ppl: 224.6** / **Test OOD ppl: 531.7**
+- Very close to B2 R2 (226.9 / 533.7) — same base, same LoRA capacity, deterministic vs Bayesian training has negligible effect on point-estimate quality.
+
+### B3 Phase 2a — TFB (Training-Free Bayesianization)
+
+- Command: `python experiments/b3_post_hoc_lora.py --phase tfb --config configs/b3_lora_agnews.yaml`
+- MLflow run: `0081274d19cd4567abca58300cfb2ac0`
+- Config: epsilon=0.1, n_search_samples=10, n_anchor_batches=20
+- Anchor loss: 5.3519
+- **σ_q = 0.0131** — non-trivial! Binary search found real noise level within ε=0.1 tolerance.
+- Fit time: 112s (~2 min)
+- **MI (ID/OOD): 0.0917 / 0.1006 → MI ratio 1.10x**
+- Flip rate (ID/OOD): 0.215 / 0.221
+- Predictive entropy (ID/OOD): 5.151 / 5.349
+
+Interpretation:
+- Post-hoc LoRA (TFB) **works** — unlike post-hoc on full weights (B1: 1.00x), adding SVD-structured noise to LoRA A matrices produces OOD-discriminative uncertainty.
+- σ_q=0.013 is small but meaningful. The SVD structure ($\Omega_{ij} = \sigma_q / s_i$) concentrates variance on directions with small singular values in B — this is informative structure that uniform noise (B1) lacks.
+- MI ratio 1.10x approaches variational LoRA (B2: 1.13x) with zero Bayesian training cost — just a 2-minute binary search on a trained checkpoint.
+- Potential room to improve: wider ε or different search range may yield higher σ_q and stronger MI signal.
+
+### B3 Cross-Method Comparison (so far)
+
+| Method | Type | Bayesian params | MI ratio (batch) | Test ID ppl | Cost |
+|--------|------|----------------|-----------------|-------------|------|
+| A2 | variational, full | 4.2M | **1.43x** | 53.5 | 1x (100K steps) |
+| B2 | variational, LoRA | 163K | **1.13x** | 226.9 | 0.1x (10K steps) |
+| B3-TFB | post-hoc, LoRA | 82K (post-hoc) | **1.10x** | 224.6 | 0.01x (2 min search) |
+| B1 | post-hoc, full | 2.1M (post-hoc) | **1.00x** | 41.0 | 0.001x (8s fit) |
+
+### B3 Phase 2b — Laplace-LoRA (NEGATIVE)
+
+- Command: `python experiments/b3_post_hoc_lora.py --phase laplace --config configs/b3_lora_agnews.yaml`
+- MLflow run: `10261b6765c245f488aabf0c1a92b0c1`
+- Config: damping=1.0, sample_scale=1.0, selection_mode=lora, n_curvature_batches=20
+- Curvature: mean=2.509e-5, std=3.758e-5, max=0.00242
+- Fit time: 4.0s
+- **MI (ID/OOD): 1.7444 / 1.7440 → MI ratio 1.00x**
+- Flip rate (ID/OOD): 0.884 / 0.884
+- Predictive entropy (ID/OOD): 8.677 / 8.677
+
+**Same failure mode as B1.** Curvature on LoRA A params is as flat as on full FFN params (B1: mean=1.8e-5, B3-LAP: mean=2.5e-5). With damping=1.0, posterior variance ≈ 1.0 everywhere — catastrophic uniform noise. Flip rate 0.88 confirms near-random MC samples. MI is high but identical for ID/OOD because the noise has no structure.
+
+**Why TFB works and Laplace doesn't:** TFB uses the SVD of the deterministic $B$ matrix to structure variance ($\Omega_{ij} = \sigma_q / s_i$). Directions with large singular values get small variance — this is an *architectural* prior baked into the LoRA structure, not a data-derived curvature estimate. Diagonal Laplace relies on curvature from the loss landscape, which is uniformly flat at convergence for both full weights and LoRA.
+
+### B3 Final Results — Complete 2x2 Matrix
+
+| Method | Type | Bayesian params | MI ratio (batch) | Test ID ppl | Cost |
+|--------|------|----------------|-----------------|-------------|------|
+| A2 | variational, full | 4.2M | **1.43x** | 53.5 | 1x (100K steps) |
+| B2 | variational, LoRA | 163K | **1.13x** | 226.9 | 0.1x (10K steps) |
+| B3-TFB | post-hoc, LoRA | 82K (post-hoc) | **1.10x** | 224.6 | 0.01x (2 min search) |
+| B3-LAP | post-hoc, LoRA | 82K (post-hoc) | **1.00x** | 224.6 | 0.001x (4s fit) |
+| B1 | post-hoc, full | 2.1M (post-hoc) | **1.00x** | 41.0 | 0.001x (8s fit) |
+
+Key findings from the complete matrix:
+1. **Variational methods work.** Both full-weight (A2: 1.43x) and LoRA (B2: 1.13x) produce OOD-discriminative uncertainty. Train-time posterior learning is the gold standard.
+2. **Diagonal Laplace fails universally.** Both on full weights (B1) and LoRA params (B3-LAP). The curvature at convergence is too flat for informative posteriors — this is a fundamental limitation of diagonal post-hoc Laplace for LM uncertainty.
+3. **TFB is the exception.** It works post-hoc (1.10x) because it uses structural information from the LoRA architecture (SVD of B), not curvature from the loss landscape. This is a meaningful contribution: SVD-structured noise > curvature-informed noise for post-hoc LM Bayesianization.
+4. **LoRA subspace matters.** Post-hoc fails on full weights (B1: 1.00x) but succeeds on LoRA with the right variance structure (TFB: 1.10x). The low-rank constraint provides enough inductive bias for meaningful posterior estimation.
+
 ---
 
 ## Research Plan
@@ -467,9 +582,9 @@ This is a scientifically valuable negative result: it demonstrates that post-hoc
 | | Full weights | LoRA adapters |
 |---|---|---|
 | **Variational (train-time)** | A-series (done, **1.43x**) | B2 BLoB (done, **1.13x**) |
-| **Post-hoc (no training)** | B1 Laplace (done, **1.00x** negative) | B3 TFB/Laplace-LoRA (planned) |
+| **Post-hoc (no training)** | B1 Laplace (done, **1.00x** negative) | B3-TFB (**1.10x**) / B3-LAP (**1.00x** negative) |
 
-Execution order: ~~B1 (finish)~~ → ~~B2 (BLoB LoRA)~~ → B3 (TFB/Laplace-LoRA) → C (scaled replication) → comparison paper.
+Execution order: ~~B1 (finish)~~ → ~~B2 (BLoB LoRA)~~ → ~~B3 (TFB + Laplace-LoRA)~~ → C (scaled replication) → comparison paper.
 
 ### Milestone Numbering (aligned 2026-03-10)
 - **B2 = BLoB** — variational Bayesian LoRA (train-time). Asymmetric: Bayesianize A matrix, fix B.

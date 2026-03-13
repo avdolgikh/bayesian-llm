@@ -31,7 +31,7 @@ def select_params(model: nn.Module, mode: str) -> dict[str, torch.Tensor]:
 
     Args:
         model: deterministic MiniGPT model.
-        mode: 'ffn' | 'head' | 'all'.
+        mode: 'ffn' | 'head' | 'all' | 'lora'.
 
     Returns:
         dict mapping param name -> param tensor (references, not copies).
@@ -53,6 +53,14 @@ def select_params(model: nn.Module, mode: str) -> dict[str, torch.Tensor]:
         for name, param in model.named_parameters():
             if "weight" in name and "ln" not in name and "emb" not in name:
                 selected[name] = param
+        return selected
+    elif mode == "lora":
+        selected = {}
+        from minigpt.lora import DeterministicLoRALinear
+        for name, module in model.named_modules():
+            if isinstance(module, DeterministicLoRALinear):
+                # We only Bayesianize A, matching TFB and BLoB
+                selected[f"{name}.lora_A"] = module.lora_A
         return selected
     else:
         raise ValueError(f"Unknown selection mode: {mode!r}")
@@ -213,9 +221,9 @@ def save_laplace_state(state: LaplaceState, path: str | Path) -> None:
     }, path)
 
 
-def load_laplace_state(path: str | Path) -> LaplaceState:
+def load_laplace_state(path: str | Path, map_location=None) -> LaplaceState:
     """Load LaplaceState from disk."""
-    data = torch.load(path, weights_only=False)
+    data = torch.load(path, weights_only=False, map_location=map_location)
     return LaplaceState(
         param_names=data["param_names"],
         phi_hat=data["phi_hat"],
@@ -285,12 +293,13 @@ def compute_laplace_uncertainty(
     all_exp_ent = []
     all_flip = []
 
-    for _ in range(n_batches):
+    for batch_idx in range(n_batches):
         x, _ = get_batch(data, block_size, batch_size, device)
 
         for b in range(x.size(0)):
             x_single = x[b:b + 1]
-            seed_offset = b * n_samples
+            # Unique seeds across all batches and elements
+            seed_offset = (batch_idx * batch_size + b) * n_samples
 
             def get_logits(s: int, _x=x_single, _off=seed_offset) -> torch.Tensor:
                 sampled = sample_laplace_params(state, seed=s + _off)

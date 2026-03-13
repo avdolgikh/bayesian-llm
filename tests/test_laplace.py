@@ -642,3 +642,79 @@ class TestEndToEndSmoke:
         )
         assert metrics["mi_mean"] >= 0
         assert metrics["flip_rate"] >= 0
+
+
+# ---------------------------------------------------------------------------
+# 15. LoRA-specific Laplace tests (B3)
+# ---------------------------------------------------------------------------
+
+class TestLaplaceLoRA:
+    def test_select_params_lora_mode(self):
+        """test_select_params_lora_mode: select_params(model, 'lora') returns only lora_A params."""
+        from minigpt.laplace import select_params
+        from minigpt.lora import LoRAConfig, inject_lora
+        from minigpt.model import GPTConfig, MiniGPT
+
+        config = GPTConfig(vocab_size=100, block_size=16, n_layer=1, n_head=1, n_embd=32)
+        model = MiniGPT(config)
+        inject_lora(model, LoRAConfig(rank=4), bayesian=False)
+
+        selected = select_params(model, "lora")
+        assert len(selected) > 0
+        for name in selected:
+            assert "lora_A" in name
+            assert "lora_B" not in name
+
+    def test_laplace_on_lora_curvature_shapes(self):
+        """test_laplace_on_lora_curvature_shapes: Curvature tensors match LoRA A shapes."""
+        import torch
+
+        from minigpt.laplace import fit_laplace, select_params
+        from minigpt.lora import LoRAConfig, inject_lora
+        from minigpt.model import GPTConfig, MiniGPT
+
+        config = GPTConfig(vocab_size=100, block_size=16, n_layer=1, n_head=1, n_embd=32)
+        model = MiniGPT(config)
+        inject_lora(model, LoRAConfig(rank=4), bayesian=False)
+
+        data = torch.randint(0, 100, (100,))
+        selected = select_params(model, "lora")
+        state = fit_laplace(
+            model, data, block_size=16, batch_size=2,
+            selection=selected, n_batches=1, damping=1.0
+        )
+        for name, param in selected.items():
+            assert state.curvature[name].shape == param.shape
+
+    def test_laplace_on_lora_sampling_changes_logits(self):
+        """test_laplace_on_lora_sampling_changes_logits: Sampled LoRA A params change logits."""
+        import torch
+
+        from minigpt.laplace import (
+            apply_sampled_params,
+            fit_laplace,
+            sample_laplace_params,
+            select_params,
+        )
+        from minigpt.lora import LoRAConfig, inject_lora
+        from minigpt.model import GPTConfig, MiniGPT
+
+        config = GPTConfig(vocab_size=100, block_size=16, n_layer=1, n_head=1, n_embd=32)
+        model = MiniGPT(config)
+        inject_lora(model, LoRAConfig(rank=4), bayesian=False)
+
+        data = torch.randint(0, 100, (100,))
+        selected = select_params(model, "lora")
+        state = fit_laplace(
+            model, data, block_size=16, batch_size=2,
+            selection=selected, n_batches=1, damping=1.0, sample_scale=10.0
+        )
+        x = data[:16].unsqueeze(0)
+        with torch.no_grad():
+            logits_map, _ = model(x)
+
+        sampled = sample_laplace_params(state, seed=42)
+        with apply_sampled_params(model, sampled):
+            logits_sampled, _ = model(x)
+
+        assert not torch.allclose(logits_map, logits_sampled)

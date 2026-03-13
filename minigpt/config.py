@@ -77,6 +77,20 @@ DEFAULT_CONFIG: dict = {
         "qualitative_max_new_tokens": 100,
         "qualitative_seed": 42,
     },
+    "tfb": {
+        "epsilon": 0.1,
+        "n_search_samples": 10,
+        "n_anchor_batches": 20,
+        "search_min": 1e-4,
+        "search_max": 10.0,
+        "search_precision": 1e-4,
+    },
+    "laplace": {
+        "damping": 1.0,
+        "sample_scale": 1.0,
+        "n_curvature_batches": 20,
+        "selection_mode": "lora",
+    },
 }
 
 
