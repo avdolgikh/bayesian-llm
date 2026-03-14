@@ -907,6 +907,17 @@ AG News (~5M tokens) is structurally inadequate for 76M params. Using The Pile (
 ### Pipeline
 `experiments/c_pipeline.py` — CLI orchestrator. `--milestone c0..c4`, `--resume`, `--compare`. State in `.pipeline-state/`. Max 4 runs/method, 48h GPU budget.
 
+### Implementation Progress (2026-03-13)
+
+**Phase 0 (Preparation) — DONE:**
+- GPU profiling script: `scripts/profile_c_gpu.py`
+- C milestone spec: `specs/c-milestone-spec.md`
+- Pile data loader BDD: `specs/pile-data-loader-spec.md`
+- Pile data loader TDD: `tests/test_pile_data.py` (31 tests, frozen)
+- Codex handoff: `specs/pile-data-loader-tdd-handoff.md`
+
+**Next: implement `load_pile_data()` in `minigpt/data.py`** to make 31 frozen tests green. New dep: `datasets` (HuggingFace). Then BDD for the pipeline orchestrator.
+
 ### Paper Structure
 Table 1: 4L results (existing). Table 2: 16L results (C milestone). Analysis: which methods scale? Which findings transfer? The 2×2 matrix at two scales gives a clean, publishable comparison.
 

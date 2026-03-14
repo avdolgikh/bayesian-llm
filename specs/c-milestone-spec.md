@@ -402,7 +402,8 @@ Key analysis questions:
 
 ### Phase 1: Implementation (BDD → TDD → Code)
 - [x] BDD: Data loader spec (`specs/pile-data-loader-spec.md`)
-- [ ] TDD: Data loader tests
+- [x] TDD: Data loader tests (`tests/test_pile_data.py` — 31 tests, reviewed & frozen)
+- [ ] Code: `load_pile_data()` implementation
 - [ ] Code: `load_pile_domains()` implementation
 - [ ] BDD: Pipeline orchestrator spec
 - [ ] TDD: Pipeline tests
