@@ -866,24 +866,49 @@ Generated text (mean weights): semi-coherent news-style fragments with sports vo
 
 ## C Milestone (Scaled Replication)
 
+Full spec: `specs/c-milestone-spec.md`.
+
 ### Concept
-Re-run the full experimental suite (A1–A3, B1–B3) on a scaled-up miniGPT to validate whether findings transfer across model size. This directly addresses the primary reviewer concern for a comparative paper: "does this generalize beyond a toy model?"
+Re-run the 2×2 matrix on a scaled-up miniGPT to validate whether findings transfer across model size. Addresses the reviewer concern: "does this generalize beyond a toy model?"
 
-### Architecture (tentative)
-- **16L / 8H / 512d** (~75M params), batch_size=8 on RTX 4070 (12GB VRAM)
-- Same dataset (AG News topic-split), same eval protocol, same MI metrics
-- Exact sizing TBD — will profile GPU memory before committing
+### Architecture (CONFIRMED)
+- **16L / 8H / 512d** (~76.3M params)
+- Same `model.py`, only config changes. Weight tying preserved.
 
-### New addition: Flipout
-At 16L/batch_size=8, Flipout becomes relevant:
-- Deeper network = more layers sharing one weight sample per forward pass
-- Smaller batch = fewer examples to average over = higher gradient variance
-- Flipout decorrelates per-example gradients at near-single-sample cost
+### GPU Profiling (2026-03-13)
 
-Flipout will be used as the VI estimator for all variational experiments (A-series, B2) at this scale.
+Script: `scripts/profile_c_gpu.py`. RTX 4070 (12GB), AMP, seq=256.
+
+| Variant | Params | Best batch | Peak VRAM | VRAM% | Tok/sec | Accum |
+|---------|--------|-----------|-----------|-------|---------|-------|
+| Deterministic | 76.3M | 16 | 5,653 MB | 46% | 35,584 | 2 |
+| Bayesian FFN | 109.9M | 16 | 6,422 MB | 52% | 28,420 | 2 |
+| Bayesian FFN+AttnV | 114.1M | 16 | 6,518 MB | 53% | 26,468 | 2 |
+| BLoB LoRA r=16 | 78.3M (2.0M train) | 32 | 9,021 MB | 73% | 41,869 | 1 |
+| Det LoRA r=16 | 77.6M (1.3M train) | 32 | 9,006 MB | 73% | 46,974 | 1 |
+
+**Flipout NOT needed** — batch_size=16 fits all full-weight variants with ~50% headroom. Standard reparameterization trick is sufficient. Gradient checkpointing also not needed.
+
+### Dataset: The Pile (domain-split)
+AG News (~5M tokens) is structurally inadequate for 76M params. Using The Pile (uncopyrighted) via `ArmelR/the-pile-splitted` on HuggingFace.
+
+- **ID train:** Wikipedia + StackExchange (~200M tokens total, subsampled)
+- **OOD eval:** ArXiv (scientific), FreeLaw (legal), PubMed (biomedical)
+- **LoRA fine-tune:** HackerNews (tech-adjacent, different style from ID)
+- Token/param ratio: 200M / 76M = 2.6 (vs 0.15 at 4L — much healthier)
+
+### Sub-Milestones
+- **C0:** Deterministic baseline on Pile ID
+- **C1:** Variational full-weight (A2-equiv), batch=16, accum=2
+- **C2:** Post-hoc Laplace on C0 checkpoint (expected negative)
+- **C3:** BLoB LoRA, batch=32, no accum
+- **C4:** Post-hoc LoRA: TFB + Laplace-LoRA
+
+### Pipeline
+`experiments/c_pipeline.py` — CLI orchestrator. `--milestone c0..c4`, `--resume`, `--compare`. State in `.pipeline-state/`. Max 4 runs/method, 48h GPU budget.
 
 ### Paper Structure
-Table 1: 4L results (current). Table 2: 16L results (C milestone). Analysis: which methods scale? Which findings transfer? The 2x2 matrix at two scales gives a clean, publishable comparison.
+Table 1: 4L results (existing). Table 2: 16L results (C milestone). Analysis: which methods scale? Which findings transfer? The 2×2 matrix at two scales gives a clean, publishable comparison.
 
 ---
 
