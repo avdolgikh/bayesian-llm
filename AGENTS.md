@@ -8,7 +8,7 @@ The core idea: replace point-estimate weights with learned posterior distributio
 **Current approach:** Controlled comparative study on miniGPT (AG News). Four Bayesian methods in a 2x2 matrix: (variational vs post-hoc) x (full weights vs LoRA). A-series (variational full weights) done. B-series: B1 Laplace (post-hoc full weights), B2 BLoB (variational LoRA), B3 TFB/Laplace-LoRA (post-hoc LoRA). Active spec: `specs/comparative-bayesian-llm-study.md`.
 
 ## Project Structure
-`docs/` — PDF papers (theory baseline). `specs/` — planning docs (active: `specs/comparative-bayesian-llm-study.md`). B1 tech spec: `specs/b1-laplace-tech-spec-mar2026.md`. B1 analysis: `specs/b1-laplace-analysis.md`. B2 spec: `specs/b2-blob-lora-spec.md`. B2 R2 revised plan: `specs/b2-r2-revised-plan.md`. B2 code review: `specs/b2-blob-lora-review.md`. B3 spec: `specs/b3-post-hoc-lora-spec.md`.
+`docs/` — PDF papers (theory baseline). `specs/` — planning docs (active: `specs/comparative-bayesian-llm-study.md`). B1 tech spec: `specs/b1-laplace-tech-spec-mar2026.md`. B1 analysis: `specs/b1-laplace-analysis.md`. B2 spec: `specs/b2-blob-lora-spec.md`. B2 R2 revised plan: `specs/b2-r2-revised-plan.md`. B2 code review: `specs/b2-blob-lora-review.md`. B3 spec: `specs/b3-post-hoc-lora-spec.md`. C milestone: `specs/c-milestone-spec.md`. C pipeline BDD: `specs/c-pipeline-spec.md`. C pipeline TDD handoff: `specs/c-pipeline-tdd-handoff.md`.
 
 ```
 minigpt/          # Python package — all model code
@@ -128,7 +128,7 @@ Saves full config, `best_val_loss`, RNG states. LR schedule is stateless (comput
 ## Build & Dev Commands
 ```bash
 uv sync                                          # install deps
-uv run pytest tests/ -v                          # 103 unit tests
+uv run pytest tests/ -v                          # 134 unit tests (+ 57 pipeline tests pending implementation)
 uv run ruff check minigpt/ experiments/ tests/   # lint
 python experiments/a0_baseline.py                # A0 training (GPU)
 python experiments/a1_bayes_output.py --config configs/a1_agnews.yaml  # A1
@@ -154,7 +154,7 @@ GitHub Actions (`.github/workflows/ci.yml`): `ruff check` → `pytest`. No GPU i
 ## Coding Style
 4 spaces, 100-char lines (ruff). `snake_case` functions, `PascalCase` classes. Type hints on public APIs.
 
-## Tests (103 total)
+## Tests (134 passing + 57 pipeline pending)
 ```
 tests/
   test_model.py          # Weight tying (2), perplexity bounds (1)
@@ -187,6 +187,14 @@ tests/
                          # search converges (1), save/load roundtrip (1),
                          # search respects tolerance (1),
                          # sampling changes logits (1), MC metrics protocol (1)
+  test_pile_data.py      # Pile data loader: split shapes (5), domain content (3),
+                         # config validation (6), tokenization (3), caching (2),
+                         # edge cases (4), dispatcher integration (3), determinism (2),
+                         # multiprocessing (3) — 31 tests
+  test_c_pipeline.py     # C pipeline orchestrator (57 tests, pending implementation):
+                         # TestCli (5), TestConfigGeneration (9),
+                         # TestPureHelpers (8), TestRunnerStateAndLoop (22),
+                         # TestPolicies (13)
 ```
 
 ## Commit Guidelines
@@ -905,9 +913,9 @@ AG News (~5M tokens) is structurally inadequate for 76M params. Using The Pile (
 - **C4:** Post-hoc LoRA: TFB + Laplace-LoRA
 
 ### Pipeline — Agentic Experiment Optimization (Auto-Research)
-`experiments/c_pipeline.py` — **autonomous HP optimization pipeline** (the "auto-research" layer). Run AFTER each sub-milestone's method code is implemented and tested via the usual BDD→TDD→Code process. The pipeline runs the implemented code, sends MLflow results to an LLM agent (Claude/Codex) that reasons about failures and proposes HP adjustments, then re-runs. **Each milestone is a separate invocation** — no batch mode. Workflow per sub-milestone: `BDD → TDD → Code (all green) → c_pipeline.py --milestone cN (auto-research)`. CLI: `--milestone {c0|c1|c2|c3|c4}`, `--resume <milestone>`, `--compare`, `--agent-provider`, `--no-agent`. State in `.pipeline-state/`. Max 4 runs/milestone, 12h GPU budget per milestone.
+`experiments/c_pipeline.py` — **autonomous HP optimization pipeline** (the "auto-research" layer). Run AFTER each sub-milestone's method code is implemented and tested via the usual BDD→TDD→Code process. The pipeline is a state machine (CONFIGURE → RUN → ANALYZE → DECIDE) that runs the implemented code, checks success gates, and on failure invokes an **agent via the Provider pattern** (Claude Code / Codex as subprocess — NOT API calls). The agent reads the repo, AGENTS.md, MLflow results, and proposes structured HP adjustments. Uses the same Provider adapter pattern as `vla-game-agent/pipeline`: `ClaudeProvider` → `claude -p`, `CodexProvider` → `codex exec`. **Each milestone is a separate invocation** — no batch mode. Workflow per sub-milestone: `BDD → TDD → Code (all green) → c_pipeline.py --milestone cN (auto-research)`. CLI: `--milestone {c0|c1|c2|c3|c4}`, `--resume <milestone>`, `--compare`, `--provider {claude|codex}`, `--no-agent`, `--dry-run`, `--budget`, `--state-dir`, `--no-mlflow`, `--provider-model`. State in `.pipeline-state/`. Max 4 runs/milestone, 12h GPU budget per milestone. Full spec: `specs/c-pipeline-spec.md`. TDD handoff: `specs/c-pipeline-tdd-handoff.md`.
 
-### Implementation Progress (2026-03-13)
+### Implementation Progress (2026-03-16)
 
 **Phase 0 (Preparation) — DONE:**
 - GPU profiling script: `scripts/profile_c_gpu.py`
@@ -918,9 +926,11 @@ AG News (~5M tokens) is structurally inadequate for 76M params. Using The Pile (
 
 **Pile data loader: DONE.** `load_pile_data()` in `minigpt/data.py`, Pile validation in `minigpt/config.py`, dispatcher updated. 31/31 tests green, 134/134 full suite. New dep: `datasets` (HuggingFace, lazy-imported on cache miss only).
 
-Pipeline orchestrator BDD: `specs/c-pipeline-spec.md`.
+**Pipeline orchestrator BDD: APPROVED (2026-03-16).** `specs/c-pipeline-spec.md` — rewritten to use Provider pattern (Claude Code / Codex as subprocess, not API calls). Architecture follows `vla-game-agent/pipeline`. ~310 lines (67% shorter than original draft). Covers behaviors B-1 through B-16: CLI, config generation, state management, resume, orchestration loop, run/analyze phases, agent invocation, success gates, tunable HP knobs, budget tracking, OOM recovery, divergence detection, comparison reporting.
 
-**Next: TDD for the C pipeline orchestrator** — write unit tests in `tests/test_c_pipeline.py` against `specs/c-pipeline-spec.md`. Awaiting user sign-off on the BDD spec before proceeding.
+**Pipeline orchestrator TDD: DONE (2026-03-16).** `tests/test_c_pipeline.py` — 57 tests across 5 classes (TestCli, TestConfigGeneration, TestPureHelpers, TestRunnerStateAndLoop, TestPolicies). Written by Codex via `specs/c-pipeline-tdd-handoff.md`. All tests ERROR at import (correct red phase — `experiments/c_pipeline.py` doesn't exist yet). Ruff clean. 134/134 existing tests unaffected. Uses FakeProvider mock, `tmp_path` for state, monkeypatched training/eval stack.
+
+**Next: Freeze tests → implement `experiments/c_pipeline.py`** — make 57 frozen tests green (Code stage). Can be delegated to Codex with implementation handoff.
 
 ### Paper Structure
 Table 1: 4L results (existing). Table 2: 16L results (C milestone). Analysis: which methods scale? Which findings transfer? The 2×2 matrix at two scales gives a clean, publishable comparison.
