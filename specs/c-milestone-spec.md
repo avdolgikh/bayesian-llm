@@ -215,17 +215,16 @@ Variational LoRA fine-tuning.
 
 ### Overview
 
-A single CLI orchestrator that runs C0–C4 autonomously. Each sub-milestone follows: **CONFIGURE → RUN → ANALYZE → DECIDE (accept/retry/abort)**.
+A single CLI orchestrator, run **one sub-milestone at a time**. **The primary purpose is agentic HP optimization:** for each sub-milestone, an LLM agent (Claude/Codex) analyzes MLflow results and proposes HP adjustments between retries. Each sub-milestone follows: **CONFIGURE → RUN → ANALYZE → AGENT → DECIDE (accept/retry/abort)**. See `specs/c-pipeline-spec.md` for full BDD spec.
 
 ```
-python experiments/c_pipeline.py --milestone c0
+python experiments/c_pipeline.py --milestone c0        # run one milestone (agentic HP loop)
 python experiments/c_pipeline.py --milestone c1
 python experiments/c_pipeline.py --milestone c2
 python experiments/c_pipeline.py --milestone c3
 python experiments/c_pipeline.py --milestone c4
-python experiments/c_pipeline.py --milestone all       # run everything
-python experiments/c_pipeline.py --compare             # generate comparison table
-python experiments/c_pipeline.py --resume              # resume from last incomplete
+python experiments/c_pipeline.py --compare             # generate comparison table (after all done)
+python experiments/c_pipeline.py --resume c1           # resume interrupted milestone
 ```
 
 ### Pipeline Phases
@@ -398,17 +397,16 @@ Key analysis questions:
 - [x] Write C milestone spec (this document)
 - [x] Dataset choice: The Pile (domain-split) via `ArmelR/the-pile-splitted`
 - [x] Flipout: NOT NEEDED (batch_size=16 sufficient)
-- [ ] Review and finalize pipeline design
+- [x] Review and finalize pipeline design
 
 ### Phase 1: Implementation (BDD → TDD → Code)
 - [x] BDD: Data loader spec (`specs/pile-data-loader-spec.md`)
 - [x] TDD: Data loader tests (`tests/test_pile_data.py` — 31 tests, reviewed & frozen)
-- [ ] Code: `load_pile_data()` implementation
-- [ ] Code: `load_pile_domains()` implementation
-- [ ] BDD: Pipeline orchestrator spec
-- [ ] TDD: Pipeline tests
+- [x] Code: `load_pile_data()` in `minigpt/data.py` + validation in `minigpt/config.py` (31/31 tests green, 134/134 full suite)
+- [x] BDD: Pipeline orchestrator spec (`specs/c-pipeline-spec.md`)
+- [ ] TDD: Pipeline tests (`tests/test_c_pipeline.py`) — awaiting BDD spec sign-off
 - [ ] Code: `c_pipeline.py` implementation
-- [ ] Configs: `configs/c0_baseline.yaml` through `configs/c4_post_hoc_lora.yaml`
+- [ ] Configs: generated in-memory from templates (no YAML files per spec)
 
 ### Phase 2: Execution
 - [ ] Run C0 (deterministic baseline)

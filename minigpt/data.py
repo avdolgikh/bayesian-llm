@@ -122,6 +122,95 @@ def prepare_agnews_data(
     return {"train": train_data, "val": val_data, "test_id": test_id, "test_ood": test_ood}
 
 
+# --------------- The Pile ---------------
+
+PILE_DATASET_PATH = "ArmelR/the-pile-splitted"
+
+PILE_DOMAIN_NAMES: dict[str, str] = {
+    "wikipedia_en": "Wikipedia (en)",
+    "stackexchange": "StackExchange",
+    "arxiv": "ArXiv",
+    "freelaw": "FreeLaw",
+    "pubmed_abstracts": "PubMed Abstracts",
+    "hackernews": "HackerNews",
+    "pile_cc": "Pile-CC",
+    "gutenberg": "Gutenberg (PG-19)",
+}
+
+
+def _load_domain_cached(
+    domain_key: str,
+    token_limit: int,
+    seed: int,
+    pile_dir: Path,
+    tokenizer,
+) -> torch.Tensor:
+    """Load (and cache) tokenized text from one Pile domain."""
+    cache_path = pile_dir / f"{domain_key}_{token_limit}.pt"
+    if cache_path.exists():
+        return torch.load(cache_path, weights_only=True)
+
+    import datasets as hf_datasets  # lazy — only when cache miss
+
+    display_name = PILE_DOMAIN_NAMES[domain_key]
+    stream = hf_datasets.load_dataset(
+        PILE_DATASET_PATH, name=display_name, split="train", streaming=True
+    )
+    docs = [item["text"] for item in stream]
+    rng = random.Random(seed)
+    rng.shuffle(docs)
+
+    tokens: list[int] = []
+    for text in docs:
+        tokens.extend(tokenizer.encode_ordinary(text))
+        if len(tokens) >= token_limit:
+            break
+
+    tensor = torch.tensor(tokens[:token_limit], dtype=torch.long)
+    torch.save(tensor, cache_path)
+    print(f"  {domain_key}: {len(tensor)} tokens")
+    return tensor
+
+
+def load_pile_data(cfg: dict, tokenizer) -> dict[str, torch.Tensor]:
+    """Load and prepare Pile domain-split data."""
+    data = cfg["data"]
+    seed: int = cfg["train"].get("seed", 1337)
+    id_domains: list[str] = data.get("pile_id_domains", ["wikipedia_en", "stackexchange"])
+    ood_domains: list[str] = data.get("pile_ood_domains", ["arxiv", "freelaw", "pubmed_abstracts"])
+    id_tokens: int = data.get("pile_id_tokens", 100_000_000)
+    ood_tokens: int = data.get("pile_ood_tokens", 10_000_000)
+    val_fraction: float = data.get("val_fraction", 0.1)
+    test_fraction: float = data.get("test_fraction", 0.1)
+
+    pile_dir = DATA_DIR / "pile"
+    pile_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Pile data dir: {pile_dir}")
+
+    id_tensors = [
+        _load_domain_cached(domain, id_tokens, seed, pile_dir, tokenizer)
+        for domain in id_domains
+    ]
+    all_id = torch.cat(id_tensors)
+    gen = torch.Generator()
+    gen.manual_seed(seed)
+    all_id = all_id[torch.randperm(len(all_id), generator=gen)]
+    train_end = int(len(all_id) * (1 - val_fraction - test_fraction))
+    val_end = int(len(all_id) * (1 - test_fraction))
+    result: dict[str, torch.Tensor] = {
+        "train": all_id[:train_end],
+        "val": all_id[train_end:val_end],
+        "test_id": all_id[val_end:],
+    }
+
+    for domain in ood_domains:
+        result[f"test_ood_{domain}"] = _load_domain_cached(
+            domain, ood_tokens, seed, pile_dir, tokenizer
+        )
+
+    return result
+
+
 # --------------- Dataset dispatcher ---------------
 
 def load_dataset(cfg: dict, tokenizer: tiktoken.Encoding) -> dict[str, torch.Tensor | None]:
@@ -145,5 +234,10 @@ def load_dataset(cfg: dict, tokenizer: tiktoken.Encoding) -> dict[str, torch.Ten
         return prepare_agnews_data(samples, tokenizer, id_cats, ood_cats,
                                    val_fraction, test_fraction, seed)
 
+    elif dataset == "pile":
+        return load_pile_data(cfg, tokenizer)
+
     else:
-        raise ValueError(f"Unknown dataset: {dataset!r}. Choose 'tinyshakespeare' or 'agnews'.")
+        raise ValueError(
+            f"Unknown dataset: {dataset!r}. Choose 'tinyshakespeare', 'agnews', or 'pile'."
+        )

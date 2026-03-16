@@ -904,8 +904,8 @@ AG News (~5M tokens) is structurally inadequate for 76M params. Using The Pile (
 - **C3:** BLoB LoRA, batch=32, no accum
 - **C4:** Post-hoc LoRA: TFB + Laplace-LoRA
 
-### Pipeline
-`experiments/c_pipeline.py` — CLI orchestrator. `--milestone c0..c4`, `--resume`, `--compare`. State in `.pipeline-state/`. Max 4 runs/method, 48h GPU budget.
+### Pipeline — Agentic Experiment Optimization (Auto-Research)
+`experiments/c_pipeline.py` — **autonomous HP optimization pipeline** (the "auto-research" layer). Run AFTER each sub-milestone's method code is implemented and tested via the usual BDD→TDD→Code process. The pipeline runs the implemented code, sends MLflow results to an LLM agent (Claude/Codex) that reasons about failures and proposes HP adjustments, then re-runs. **Each milestone is a separate invocation** — no batch mode. Workflow per sub-milestone: `BDD → TDD → Code (all green) → c_pipeline.py --milestone cN (auto-research)`. CLI: `--milestone {c0|c1|c2|c3|c4}`, `--resume <milestone>`, `--compare`, `--agent-provider`, `--no-agent`. State in `.pipeline-state/`. Max 4 runs/milestone, 12h GPU budget per milestone.
 
 ### Implementation Progress (2026-03-13)
 
@@ -916,7 +916,11 @@ AG News (~5M tokens) is structurally inadequate for 76M params. Using The Pile (
 - Pile data loader TDD: `tests/test_pile_data.py` (31 tests, frozen)
 - Codex handoff: `specs/pile-data-loader-tdd-handoff.md`
 
-**Next: implement `load_pile_data()` in `minigpt/data.py`** to make 31 frozen tests green. New dep: `datasets` (HuggingFace). Then BDD for the pipeline orchestrator.
+**Pile data loader: DONE.** `load_pile_data()` in `minigpt/data.py`, Pile validation in `minigpt/config.py`, dispatcher updated. 31/31 tests green, 134/134 full suite. New dep: `datasets` (HuggingFace, lazy-imported on cache miss only).
+
+Pipeline orchestrator BDD: `specs/c-pipeline-spec.md`.
+
+**Next: TDD for the C pipeline orchestrator** — write unit tests in `tests/test_c_pipeline.py` against `specs/c-pipeline-spec.md`. Awaiting user sign-off on the BDD spec before proceeding.
 
 ### Paper Structure
 Table 1: 4L results (existing). Table 2: 16L results (C milestone). Analysis: which methods scale? Which findings transfer? The 2×2 matrix at two scales gives a clean, publishable comparison.

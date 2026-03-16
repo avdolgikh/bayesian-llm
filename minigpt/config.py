@@ -23,6 +23,10 @@ DEFAULT_CONFIG: dict = {
         "test_fraction": 0.1,
         "id_categories": [1, 2],
         "ood_categories": [3, 4],
+        "pile_id_domains": ["wikipedia_en", "stackexchange"],
+        "pile_ood_domains": ["arxiv", "freelaw", "pubmed_abstracts"],
+        "pile_id_tokens": 100_000_000,
+        "pile_ood_tokens": 10_000_000,
     },
     "model": {
         "block_size": 256,
@@ -244,6 +248,35 @@ def validate_config(cfg: dict) -> None:
         raise ValueError(
             f"val_fraction ({val_frac}) + test_fraction ({test_frac}) must be < 1.0"
         )
+
+    # Pile validation
+    if cfg["data"].get("dataset") == "pile":
+        from minigpt.data import PILE_DOMAIN_NAMES  # lazy import to avoid circular dependency
+
+        id_domains = cfg["data"].get("pile_id_domains", [])
+        ood_domains = cfg["data"].get("pile_ood_domains", [])
+        id_tokens = cfg["data"].get("pile_id_tokens", 100_000_000)
+        ood_tokens = cfg["data"].get("pile_ood_tokens", 10_000_000)
+        valid_str = ", ".join(PILE_DOMAIN_NAMES.keys())
+
+        if not id_domains:
+            raise ValueError("pile_id_domains must not be empty")
+        if not ood_domains:
+            raise ValueError("pile_ood_domains must not be empty")
+        for domain in list(id_domains) + list(ood_domains):
+            if domain not in PILE_DOMAIN_NAMES:
+                raise ValueError(
+                    f"Invalid Pile domain {domain!r}. Valid domains: {valid_str}"
+                )
+        overlap = set(id_domains) & set(ood_domains)
+        if overlap:
+            raise ValueError(
+                f"pile_id_domains and pile_ood_domains overlap: {sorted(overlap)}"
+            )
+        if id_tokens <= 0:
+            raise ValueError(f"pile_id_tokens must be positive, got {id_tokens}")
+        if ood_tokens <= 0:
+            raise ValueError(f"pile_ood_tokens must be positive, got {ood_tokens}")
 
     # LoRA validation (only when lora section is present)
     if "lora" in cfg:

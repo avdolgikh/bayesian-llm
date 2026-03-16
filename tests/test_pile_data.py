@@ -8,6 +8,7 @@ import torch
 
 import minigpt.data as data_module
 from minigpt.config import DEFAULT_CONFIG, validate_config
+from minigpt.data import PILE_DOMAIN_NAMES
 
 
 class RecordingTokenizer:
@@ -36,8 +37,8 @@ def make_pile_config(
     cfg["data"].update(
         {
             "dataset": "pile",
-            "pile_id_domains": id_domains or ["wikipedia_en"],
-            "pile_ood_domains": ood_domains or ["arxiv"],
+            "pile_id_domains": id_domains if id_domains is not None else ["wikipedia_en"],
+            "pile_ood_domains": ood_domains if ood_domains is not None else ["arxiv"],
             "pile_id_tokens": id_tokens,
             "pile_ood_tokens": ood_tokens,
             "val_fraction": val_fraction,
@@ -90,8 +91,12 @@ def expected_id_splits(
     val_fraction: float,
     test_fraction: float,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    tensors = [expected_domain_tokens(domain, seed, id_tokens) for domain in id_domains]
+    display_names = [PILE_DOMAIN_NAMES[d] for d in id_domains]
+    tensors = [expected_domain_tokens(name, seed, id_tokens) for name in display_names]
     all_tokens = torch.cat(tensors)
+    gen = torch.Generator()
+    gen.manual_seed(seed)
+    all_tokens = all_tokens[torch.randperm(len(all_tokens), generator=gen)]
     train_end = int(len(all_tokens) * (1 - val_fraction - test_fraction))
     val_end = int(len(all_tokens) * (1 - test_fraction))
     return all_tokens[:train_end], all_tokens[train_end:val_end], all_tokens[val_end:]
