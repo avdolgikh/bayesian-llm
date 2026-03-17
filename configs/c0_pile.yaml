@@ -1,0 +1,55 @@
+experiment:
+  name: c0
+  run_name: c0
+  mlflow_uri: "sqlite:///mlflow.db"
+
+data:
+  dataset: pile
+  pile_id_domains: [wikipedia_en, stackexchange]
+  pile_ood_domains: [arxiv, freelaw, pubmed_abstracts]
+  pile_id_tokens: 100_000_000
+  pile_ood_tokens: 10_000_000
+
+model:
+  block_size: 256
+  n_layer: 16
+  n_head: 8
+  n_embd: 512
+  dropout: 0.2
+  bias: true
+  bayes_head:
+    enabled: false
+  bayes_ffn:
+    enabled: false
+  bayes_attn_v:
+    enabled: false
+
+train:
+  steps: 1_000  # 100_000
+  batch_size: 16
+  block_size: 256
+  lr: 3.0e-4
+  weight_decay: 0.1
+  warmup_steps: 200  # 2_000
+  min_lr: 1.0e-5
+  grad_clip: 1.0
+  eval_interval: 100
+  eval_iters: 20
+  checkpoint_interval: 200
+  checkpoint_dir: "data/checkpoints/c0"
+  gradient_accumulation_steps: 2
+  kl_weight: 0.0
+  kl_annealing_steps: 0
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  seed: 1337
+  device: auto
+
+eval:
+  sample_tokens: 200
+  temperature: 0.8
+  num_samples: 30
+  n_perplexity_batches: 20
+  qualitative_prompts_per_category: 5
+  qualitative_max_new_tokens: 100
+  qualitative_seed: 42

@@ -15,6 +15,7 @@ dependencies = [
     "tiktoken",
     "mlflow",
     "pyyaml",
+    "datasets",
 ]
 
 [dependency-groups]

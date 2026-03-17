@@ -8,7 +8,7 @@ The core idea: replace point-estimate weights with learned posterior distributio
 **Current approach:** Controlled comparative study on miniGPT (AG News). Four Bayesian methods in a 2x2 matrix: (variational vs post-hoc) x (full weights vs LoRA). A-series (variational full weights) done. B-series: B1 Laplace (post-hoc full weights), B2 BLoB (variational LoRA), B3 TFB/Laplace-LoRA (post-hoc LoRA). Active spec: `specs/comparative-bayesian-llm-study.md`.
 
 ## Project Structure
-`docs/` — PDF papers (theory baseline). `specs/` — planning docs (active: `specs/comparative-bayesian-llm-study.md`). B1 tech spec: `specs/b1-laplace-tech-spec-mar2026.md`. B1 analysis: `specs/b1-laplace-analysis.md`. B2 spec: `specs/b2-blob-lora-spec.md`. B2 R2 revised plan: `specs/b2-r2-revised-plan.md`. B2 code review: `specs/b2-blob-lora-review.md`. B3 spec: `specs/b3-post-hoc-lora-spec.md`. C milestone: `specs/c-milestone-spec.md`. C pipeline BDD: `specs/c-pipeline-spec.md`. C pipeline TDD handoff: `specs/c-pipeline-tdd-handoff.md`.
+`docs/` — PDF papers (theory baseline). `specs/` — planning docs (active: `specs/comparative-bayesian-llm-study.md`). B1 tech spec: `specs/b1-laplace-tech-spec-mar2026.md`. B1 analysis: `specs/b1-laplace-analysis.md`. B2 spec: `specs/b2-blob-lora-spec.md`. B2 R2 revised plan: `specs/b2-r2-revised-plan.md`. B2 code review: `specs/b2-blob-lora-review.md`. B3 spec: `specs/b3-post-hoc-lora-spec.md`. C milestone: `specs/c-milestone-spec.md`. C pipeline BDD: `specs/c-pipeline-spec.md`. C pipeline TDD handoff: `specs/c-pipeline-tdd-handoff.md`. C pipeline review: `specs/c-pipeline-implementation-review.md`.
 
 ```
 minigpt/          # Python package — all model code
@@ -22,14 +22,17 @@ minigpt/          # Python package — all model code
   laplace.py      # Post-hoc Laplace: curvature fitting, sampling, context manager
   lora.py         # LoRA: BLoBLoRALinear, DeterministicLoRALinear, LoRAConfig, inject_lora()
   tfb.py          # TFB: Training-Free Bayesianization (SVD variance search, sampling)
-configs/          # YAML config files per experiment
+configs/          # YAML config files per experiment (a0–b3 AG News, c0 Pile)
 experiments/      # Runnable scripts (a0_baseline, a1–a3 Bayesian, b1_laplace_baseline, b2_blob_lora, b3_post_hoc_lora)
   experiment_setup.py  # Shared setup: CLI parsing, config, data, model, device
   eval_utils.py        # Shared eval: perplexity suite, MI suite, qualitative eval
   mlflow_utils.py      # Shared MLflow: context, logging helpers
   runner.py            # A-series orchestrator — A1/A2/A3 are thin wrappers
+  pipeline_runner.py   # Generic pipeline engine: PipelineRunnerBase, MilestonePolicy, RuntimeHooks
+  c_milestones.py      # C-specific: templates, gates, knobs, comparison report
+  c_pipeline.py        # C pipeline CLI: wires hooks+policy, providers, entry point
 scripts/          # Utilities (dump_mlflow_run, compare_runs, profile_gpu, eval_checkpoint, fit_laplace)
-tests/            # pytest (84 tests)
+tests/            # pytest (191 tests: 134 core + 57 pipeline)
 data/             # Local datasets (gitignored)
 ```
 
@@ -924,13 +927,32 @@ AG News (~5M tokens) is structurally inadequate for 76M params. Using The Pile (
 - Pile data loader TDD: `tests/test_pile_data.py` (31 tests, frozen)
 - Codex handoff: `specs/pile-data-loader-tdd-handoff.md`
 
-**Pile data loader: DONE.** `load_pile_data()` in `minigpt/data.py`, Pile validation in `minigpt/config.py`, dispatcher updated. 31/31 tests green, 134/134 full suite. New dep: `datasets` (HuggingFace, lazy-imported on cache miss only).
+**Pile data loader: DONE.** `load_pile_data()` in `minigpt/data.py`, Pile validation in `minigpt/config.py`, dispatcher updated. 31/31 tests green, 134/134 full suite. Dep: `datasets` (HuggingFace) added to `pyproject.toml`.
 
 **Pipeline orchestrator BDD: APPROVED (2026-03-16).** `specs/c-pipeline-spec.md` — rewritten to use Provider pattern (Claude Code / Codex as subprocess, not API calls). Architecture follows `vla-game-agent/pipeline`. ~310 lines (67% shorter than original draft). Covers behaviors B-1 through B-16: CLI, config generation, state management, resume, orchestration loop, run/analyze phases, agent invocation, success gates, tunable HP knobs, budget tracking, OOM recovery, divergence detection, comparison reporting.
 
-**Pipeline orchestrator TDD: DONE (2026-03-16).** `tests/test_c_pipeline.py` — 57 tests across 5 classes (TestCli, TestConfigGeneration, TestPureHelpers, TestRunnerStateAndLoop, TestPolicies). Written by Codex via `specs/c-pipeline-tdd-handoff.md`. All tests ERROR at import (correct red phase — `experiments/c_pipeline.py` doesn't exist yet). Ruff clean. 134/134 existing tests unaffected. Uses FakeProvider mock, `tmp_path` for state, monkeypatched training/eval stack.
+**Pipeline orchestrator TDD: DONE (2026-03-16).** `tests/test_c_pipeline.py` — 57 tests across 5 classes (TestCli, TestConfigGeneration, TestPureHelpers, TestRunnerStateAndLoop, TestPolicies). Written by Codex via `specs/c-pipeline-tdd-handoff.md`. Ruff clean. 134/134 existing tests unaffected. Uses FakeProvider mock, `tmp_path` for state, monkeypatched training/eval stack.
 
-**Next: Freeze tests → implement `experiments/c_pipeline.py`** — make 57 frozen tests green (Code stage). Can be delegated to Codex with implementation handoff.
+**Pipeline orchestrator CODE: DONE (2026-03-16).** Implementation split into 3 files per user's "generic orchestration" requirement:
+- `experiments/pipeline_runner.py` — Generic orchestration engine: `PipelineRunnerBase`, `MilestonePolicy` (dataclass), `RuntimeHooks` (dataclass). State machine loop, JSON persistence, resume, budget tracking, OOM/divergence recovery, agent prompt construction, mechanical fallback. Zero C-specific code.
+- `experiments/c_milestones.py` — C-specific config: templates (C0–C4), gate functions, tunable knobs, 4L reference results, comparison report (reads actual state files), policy helper functions (`needs_phase1`, `needs_mi_eval`, `dependency_for`, etc.).
+- `experiments/c_pipeline.py` — Thin CLI wiring: `PipelineRunner` subclass wires `RuntimeHooks` + `MilestonePolicy`, real providers (`ClaudeProvider`, `CodexProvider`), re-exports all test-expected names. `_OSProxy` for test monkeypatching, `_sigma_std_extractor` uses `sigma_summary()`.
+- 57/57 pipeline tests green, 134/134 other tests green, ruff clean.
+- Smoke tested: `scripts/smoke_pipeline.py` — 2L/2H/64d on TinyShakespeare, 50 steps, MLflow. 4 runs, correct failure (toy model can't pass C0 gate). Qualitative eval wrapped in try/except (supplementary).
+- Implementation handoff: `specs/c-pipeline-implementation-handoff.md`. Review: `specs/c-pipeline-implementation-review.md`.
+
+**Pile end-to-end validated (2026-03-16):**
+- `scripts/smoke_pile.py` — 2L/2H/64d on real Pile data, 10 steps, CPU. Downloads 5 domains (wikipedia_en, stackexchange, arxiv, freelaw, pubmed_abstracts) via HF streaming → tokenize → cache.
+- Pile loader bug fixed: was materializing entire domain into memory (`docs = [item["text"] for item in stream]`). Now uses `stream.shuffle(buffer_size=10_000)` for HF IterableDataset, falls back to collect+shuffle for test mocks.
+- `setup_data()` fixed: handles Pile per-domain OOD keys (`test_ood_arxiv`, etc.) alongside AG News single `test_ood`.
+- `datasets` added to `pyproject.toml` dependencies (was lazy-imported but never declared). **Also needs `pip install datasets` in global env for CUDA runs** (bare `python` uses global env, not uv venv).
+- YAML config: `configs/c0_pile.yaml` — C0 template values for consistency with A/B series configs.
+- Pile cache is per-token-target: `data/pile/{domain}_{token_limit}.pt`. Smoke test cached 50K-token files; real C0 (100M tokens) will re-download.
+- 191/191 tests green, ruff clean.
+
+**Known limitations (deferred to production):** `train.steps` range for C1 is `(1, 300K)` — frozen test sends `train.steps=1`, so can't narrow to `(50K, 300K)` without test change. `run_c3_phase1` is a stub returning hardcoded path. `eval_perplexity_suite` expects single OOD tensor — pipeline/smoke scripts handle per-domain eval manually.
+
+**Next: Run C0 on GPU** — `python experiments/c_pipeline.py --milestone c0 --no-agent` (deterministic baseline, 16L/8H/512d on Pile, 100K steps).
 
 ### Paper Structure
 Table 1: 4L results (existing). Table 2: 16L results (C milestone). Analysis: which methods scale? Which findings transfer? The 2×2 matrix at two scales gives a clean, publishable comparison.

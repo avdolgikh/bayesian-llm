@@ -53,8 +53,12 @@ def setup_data(cfg):
     print(f"BPE vocab size: {tokenizer.n_vocab}")
     print(f"Train tokens: {len(data['train']):,}  Val tokens: {len(data['val']):,}")
     print(f"Test ID tokens: {len(data['test_id']):,}")
-    if data["test_ood"] is not None:
+    if "test_ood" in data and data["test_ood"] is not None:
         print(f"Test OOD tokens: {len(data['test_ood']):,}")
+    else:
+        ood_keys = [k for k in data if k.startswith("test_ood_")]
+        for k in sorted(ood_keys):
+            print(f"{k} tokens: {len(data[k]):,}")
     return tokenizer, data
 
 

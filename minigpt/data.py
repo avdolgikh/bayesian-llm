@@ -156,15 +156,23 @@ def _load_domain_cached(
     stream = hf_datasets.load_dataset(
         PILE_DATASET_PATH, name=display_name, split="train", streaming=True
     )
-    docs = [item["text"] for item in stream]
-    rng = random.Random(seed)
-    rng.shuffle(docs)
-
-    tokens: list[int] = []
-    for text in docs:
-        tokens.extend(tokenizer.encode_ordinary(text))
-        if len(tokens) >= token_limit:
-            break
+    # Shuffle: use HF IterableDataset.shuffle if available (streaming), else collect + shuffle
+    if hasattr(stream, "shuffle"):
+        stream = stream.shuffle(seed=seed, buffer_size=10_000)
+        tokens: list[int] = []
+        for item in stream:
+            tokens.extend(tokenizer.encode_ordinary(item["text"]))
+            if len(tokens) >= token_limit:
+                break
+    else:
+        docs = [item["text"] for item in stream]
+        rng = random.Random(seed)
+        rng.shuffle(docs)
+        tokens = []
+        for text in docs:
+            tokens.extend(tokenizer.encode_ordinary(text))
+            if len(tokens) >= token_limit:
+                break
 
     tensor = torch.tensor(tokens[:token_limit], dtype=torch.long)
     torch.save(tensor, cache_path)
