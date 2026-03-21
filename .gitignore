@@ -13,3 +13,4 @@ mlflow.db
 mlflow.db-journal
 /mlruns/
 .env
+.pipeline-state/

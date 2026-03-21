@@ -212,7 +212,11 @@ def make_provider(name: str, model: str):
     raise ValueError(f"Unknown provider: {name}")
 
 
-def _make_policy() -> MilestonePolicy:
+def _make_policy(max_runs_override: int | None = None) -> MilestonePolicy:
+    if max_runs_override is not None:
+        _max_runs_fn = lambda m: 1 if record_only_for(m) else max_runs_override  # noqa: E731
+    else:
+        _max_runs_fn = max_runs_for
     return MilestonePolicy(
         build_config=build_milestone_config,
         check_gate=check_gate,
@@ -225,7 +229,7 @@ def _make_policy() -> MilestonePolicy:
         needs_mi_eval=needs_mi_eval,
         reuse_dependency_checkpoint_for=reuse_dependency_checkpoint_for,
         record_only_for=record_only_for,
-        max_runs_for=max_runs_for,
+        max_runs_for=_max_runs_fn,
         should_early_abort=should_early_abort,
         comparison_payload=comparison_payload,
         comparison_report=comparison_report,
@@ -245,6 +249,7 @@ class PipelineRunner(PipelineRunnerBase):
         budget_hours: float,
         use_mlflow: bool,
         no_agent: bool = False,
+        max_runs: int | None = None,
         config_path_fn=None,
     ) -> None:
         hooks = RuntimeHooks(
@@ -274,7 +279,7 @@ class PipelineRunner(PipelineRunnerBase):
             budget_hours=budget_hours,
             use_mlflow=use_mlflow,
             no_agent=no_agent,
-            policy=_make_policy(),
+            policy=_make_policy(max_runs_override=max_runs),
             hooks=hooks,
             run_phase1=run_c3_phase1,
             ood_domains=OOD_DOMAINS,
@@ -307,6 +312,7 @@ def main() -> None:
     parser.add_argument("--state-dir", type=str, default=".pipeline-state")
     parser.add_argument("--no-mlflow", action="store_true")
     parser.add_argument("--no-agent", action="store_true")
+    parser.add_argument("--max-runs", type=int, default=None)
     parser.add_argument("--provider-model", type=str, default="sonnet")
     args = parser.parse_args()
 
@@ -351,6 +357,7 @@ def main() -> None:
         budget_hours=args.budget,
         use_mlflow=not args.no_mlflow,
         no_agent=args.no_agent,
+        max_runs=args.max_runs,
         config_path_fn=lambda mk: config_path_for(mk, REPO_ROOT),
     )
     raise SystemExit(runner.run())
