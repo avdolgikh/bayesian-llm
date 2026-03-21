@@ -24,6 +24,7 @@ class TrainConfig:
     checkpoint_dir: str = "data/checkpoints"
     gradient_accumulation_steps: int = 1
     patience_evals: int = 10
+    patience_min_delta: float = 0.001
     kl_annealing_steps: int = 0
     adam_beta1: float = 0.9
     adam_beta2: float = 0.95
@@ -229,6 +230,7 @@ def train(
     total_tokens = 0
     no_improve_count = 0
     early_stop_reason = None
+    eval_history: list[dict[str, float]] = []
     for step in range(start_step, cfg.steps + 1):
         # Update learning rate (cosine schedule with warmup)
         lr = _get_lr(step, cfg)
@@ -299,14 +301,18 @@ def train(
             else:
                 val_criterion = val_metrics["loss"]
             is_best = val_criterion < best_val_loss
+            # Significant = enough improvement to reset patience counter
+            sig_threshold = best_val_loss * (1 - cfg.patience_min_delta)
+            is_significant = val_criterion < sig_threshold
             if is_best:
                 best_val_loss = val_criterion
                 best_val_step = step
-                no_improve_count = 0
                 save_checkpoint(
                     model, optimizer, step, cfg_dict,
                     best_val_loss=best_val_loss, path=best_path,
                 )
+            if is_significant:
+                no_improve_count = 0
             else:
                 no_improve_count += 1
 
@@ -322,6 +328,13 @@ def train(
             if is_best:
                 status += "  *best"
             print(status)
+
+            eval_history.append({
+                "step": step,
+                "val_loss": val_metrics["loss"],
+                "train_loss": train_metrics["loss"],
+                "lr": lr,
+            })
 
             if mlflow_run is not None:
                 import mlflow
@@ -368,14 +381,17 @@ def train(
     print(f"  -> reloading best checkpoint (val loss {best_val_loss:.4f}): {best_path}")
     load_checkpoint(best_path, model)
 
+    steps_completed = step if early_stop_reason else cfg.steps
     train_time = time.time() - start
     tokens_per_sec = total_tokens / train_time if train_time > 0 else 0.0
     metadata = {
         "best_val_loss": best_val_loss,
         "best_val_step": best_val_step,
+        "steps_completed": steps_completed,
         "train_time_sec": train_time,
         "tokens_per_sec": tokens_per_sec,
         "early_stop_reason": early_stop_reason,
+        "eval_history": eval_history,
     }
     return model, metadata
 

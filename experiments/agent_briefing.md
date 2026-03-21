@@ -42,8 +42,12 @@ Measure mutual information (MI) between weight samples: high MI ratio
   Fix: warmup = 4% of steps (e.g., 4000 for 100K steps).
 
 ### Symptom: Loss plateaus early (patience early-stop)
-- **Cause 1: LR too low.** Model gets stuck in a flat region.
-  Fix: increase train.lr by 2-3x.
+This is the MOST COMMON failure mode. Typical pattern: loss drops rapidly
+in the first 1-5% of steps, then flatlines. >50% of training steps are
+wasted after the best checkpoint with no meaningful improvement.
+- **Cause 1 (most likely): LR too low.** Model converges to a shallow local
+  minimum and can't escape. Fix: increase train.lr by 2-3x (e.g., 3e-4 → 6e-4).
+  This is almost always the right first move for a plateau.
 - **Cause 2: Warmup too short.** LR jumps too fast, optimizer overshoots
   then gets stuck. Fix: increase warmup_steps.
 - **Cause 3: Dropout too high.** Excessive regularization prevents learning.
@@ -83,3 +87,8 @@ Measure mutual information (MI) between weight samples: high MI ratio
 - If two runs show same PPL: something structural is wrong (LR/warmup ratio).
 - Prefer changing one knob at a time for clear signal, but if gap is >10x,
   change multiple knobs aggressively.
+- If early_stop_reason=patience AND best_val_step < 20% of steps_completed:
+  the model learned fast then got stuck. INCREASE LR (2-3x) — this is the
+  single most effective fix for plateau. Do NOT increase steps (wastes time).
+- If steps_completed = steps_planned AND PPL still high: model needs more
+  steps. Increase train.steps AND scale warmup proportionally (4% of steps).

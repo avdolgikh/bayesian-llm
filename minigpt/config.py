@@ -229,6 +229,7 @@ def build_train_config(cfg: dict) -> TrainConfig:
         checkpoint_dir=t.get("checkpoint_dir", "data/checkpoints"),
         gradient_accumulation_steps=t.get("gradient_accumulation_steps", 1),
         patience_evals=t.get("patience_evals", 10),
+        patience_min_delta=t.get("patience_min_delta", 0.001),
         kl_annealing_steps=t.get("kl_annealing_steps", 0),
         adam_beta1=t.get("adam_beta1", 0.9),
         adam_beta2=t.get("adam_beta2", 0.95),

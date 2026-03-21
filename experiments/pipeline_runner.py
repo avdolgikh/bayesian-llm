@@ -9,7 +9,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-
 _AGENT_RESPONSE_SCHEMA = {
     "type": "object",
     "properties": {
@@ -365,9 +364,20 @@ class PipelineRunnerBase:
                 "test_ood_ppl": ppl_result.get("test_ood_ppl") or self._empty_ood_result(),
                 "best_val_loss": train_meta["best_val_loss"],
                 "best_val_step": train_meta.get("best_val_step", 0),
+                "steps_completed": train_meta.get("steps_completed", cfg["train"].get("steps", 0)),
                 "steps_planned": cfg["train"].get("steps", 0),
                 "early_stop_reason": train_meta.get("early_stop_reason"),
                 "training_time_seconds": train_meta["train_time_sec"],
+                "effective_params": {
+                    "lr": cfg["train"].get("lr"),
+                    "warmup_steps": cfg["train"].get("warmup_steps"),
+                    "batch_size": cfg["train"].get("batch_size"),
+                    "dropout": cfg["model"].get("dropout"),
+                    "gradient_accumulation_steps": cfg["train"].get(
+                        "gradient_accumulation_steps", 1
+                    ),
+                },
+                "eval_history": train_meta.get("eval_history", []),
             }
 
             if self.policy.needs_mi_eval(self.milestone):
@@ -692,41 +702,125 @@ class PipelineRunnerBase:
         gate_desc = self.policy.gate_description_for(self.milestone)
         latest = runs[-1].get("result", {})
 
+        # Effective params used
+        eff = latest.get("effective_params", {})
+        if eff:
+            lines.append(
+                f"Effective params: lr={eff.get('lr')}, "
+                f"warmup={eff.get('warmup_steps')}, "
+                f"bs={eff.get('batch_size')}, "
+                f"dropout={eff.get('dropout')}, "
+                f"grad_accum={eff.get('gradient_accumulation_steps')}"
+            )
+
         # Gap analysis
         ppl = latest.get("test_id_ppl")
         if ppl is not None:
-            lines.append(f"Current test_id_ppl={ppl:.1f}, target <80, "
-                         f"gap={ppl / 80:.1f}x away.")
+            gap = ppl / 80
+            severity = (
+                "EXTREME — needs aggressive LR/steps changes"
+                if gap > 10
+                else "LARGE — significant HP changes needed"
+                if gap > 3
+                else "MODERATE — fine-tuning may suffice"
+                if gap > 1.5
+                else "CLOSE — minor adjustments"
+            )
+            lines.append(
+                f"Current test_id_ppl={ppl:.1f}, target <80, "
+                f"gap={gap:.1f}x. Severity: {severity}."
+            )
 
         mi = latest.get("mi_ratio_mean")
         if mi is not None:
             target = 1.2 if "1.2" in gate_desc else 1.05
-            lines.append(f"Current mi_ratio_mean={mi:.3f}, "
-                         f"target >{target}.")
+            lines.append(
+                f"Current mi_ratio_mean={mi:.3f}, "
+                f"target >{target}."
+            )
 
-        # Step efficiency
+        # Step efficiency & convergence analysis
         best_step = latest.get("best_val_step", 0)
+        steps_completed = latest.get("steps_completed", 0)
         planned = latest.get("steps_planned", 0)
         if planned > 0 and best_step > 0:
             util = best_step / planned * 100
             lines.append(
-                f"Best val loss at step {best_step} of "
-                f"{planned} planned ({util:.0f}% utilization)."
+                f"Best val loss at step {best_step}/{planned} "
+                f"planned ({util:.0f}% utilization)."
             )
+        if steps_completed > 0 and planned > 0:
+            lines.append(
+                f"Training completed {steps_completed}/{planned} "
+                f"steps ({steps_completed / planned * 100:.0f}%)."
+            )
+        # Convergence pattern
+        if best_step > 0 and steps_completed > 0:
+            wasted = steps_completed - best_step
+            if wasted > 0:
+                wasted_pct = wasted / steps_completed * 100
+                if wasted_pct > 50:
+                    lines.append(
+                        f"WARNING: {wasted_pct:.0f}% of training "
+                        f"was wasted after best step ({wasted} "
+                        f"steps with no meaningful improvement). "
+                        f"This is a strong signal that the model "
+                        f"is stuck. Increase LR or reduce steps."
+                    )
 
         # Early stop
         reason = latest.get("early_stop_reason")
         if reason == "patience":
             lines.append(
-                "Training stopped early: loss plateaued "
-                "(patience exhausted). Consider higher LR, "
-                "shorter warmup ratio, or different dropout."
+                "EARLY STOP: Loss plateaued (patience "
+                "exhausted). The model converged to a local "
+                "minimum. Primary fix: increase LR to escape "
+                "the plateau. Secondary: adjust warmup ratio "
+                "or dropout."
             )
         elif reason == "nan":
             lines.append(
-                "Training stopped early: NaN loss detected. "
-                "LR is likely too high or warmup too short."
+                "EARLY STOP: NaN loss detected. LR is too "
+                "high or warmup too short. Halve LR or "
+                "double warmup_steps."
             )
+
+        # Loss curve summary (from eval history)
+        eval_hist = latest.get("eval_history", [])
+        if len(eval_hist) >= 3:
+            lines.append("")
+            lines.append("Loss curve (val_loss @ step):")
+            # Show first, best, last, and a few samples
+            sampled = self._summarize_eval_history(eval_hist)
+            for entry in sampled:
+                marker = ""
+                if entry["step"] == best_step:
+                    marker = " <-- best"
+                lines.append(
+                    f"  step {entry['step']:>6d}: "
+                    f"val={entry['val_loss']:.4f} "
+                    f"train={entry['train_loss']:.4f} "
+                    f"lr={entry['lr']:.2e}{marker}"
+                )
+            # Convergence rate
+            first_loss = eval_hist[0]["val_loss"]
+            best_loss = latest.get("best_val_loss", first_loss)
+            total_drop = first_loss - best_loss
+            if total_drop > 0 and len(eval_hist) >= 2:
+                # Where did 90% of the drop happen?
+                drop_90 = first_loss - 0.9 * total_drop
+                for entry in eval_hist:
+                    if entry["val_loss"] <= drop_90:
+                        pct_of_training = (
+                            entry["step"] / eval_hist[-1]["step"]
+                            * 100
+                        )
+                        lines.append(
+                            f"90% of loss improvement happened "
+                            f"by step {entry['step']} "
+                            f"({pct_of_training:.0f}% of training)."
+                        )
+                        break
 
         # Run-over-run deltas
         if len(runs) >= 2:
@@ -741,19 +835,29 @@ class PipelineRunnerBase:
                 delta = ""
                 if prev_ppl and curr_ppl:
                     if curr_ppl < prev_ppl:
-                        delta = (f"PPL {prev_ppl:.0f}->"
-                                 f"{curr_ppl:.0f} (improved)")
+                        delta = (
+                            f"PPL {prev_ppl:.0f}->"
+                            f"{curr_ppl:.0f} (improved)"
+                        )
                     elif curr_ppl > prev_ppl:
-                        delta = (f"PPL {prev_ppl:.0f}->"
-                                 f"{curr_ppl:.0f} (regressed)")
+                        delta = (
+                            f"PPL {prev_ppl:.0f}->"
+                            f"{curr_ppl:.0f} (regressed)"
+                        )
                     else:
                         delta = f"PPL unchanged at {curr_ppl:.0f}"
                 override_str = ", ".join(
                     f"{k}={v}" for k, v in overrides.items()
                 )
+                prev_reason = prev_r.get("early_stop_reason", "")
+                reason_note = (
+                    f" [prev stopped: {prev_reason}]"
+                    if prev_reason else ""
+                )
                 lines.append(
                     f"  Run {i}->{i + 1}: "
-                    f"changed [{override_str}] -> {delta}"
+                    f"changed [{override_str}] -> "
+                    f"{delta}{reason_note}"
                 )
 
         return "\n".join(lines)
@@ -766,9 +870,15 @@ class PipelineRunnerBase:
         )
         history_lines = []
         for run in state.get("runs", []):
+            # Exclude eval_history from verbose dump (already
+            # summarized in diagnostics)
+            result_for_prompt = {
+                k: v for k, v in run.get("result", {}).items()
+                if k != "eval_history"
+            }
             history_lines.append(
                 f"Run {run['run_number']}: "
-                f"result={json.dumps(run.get('result', {}), indent=2)}\n"
+                f"result={json.dumps(result_for_prompt, indent=2)}\n"
                 f"  overrides={run.get('config_overrides', {})}"
             )
         history_text = (
@@ -818,13 +928,45 @@ class PipelineRunnerBase:
             return {}
         knob_family = self.policy.knob_family_for(self.milestone)
         allowed = self.policy.tunable_knobs.get(knob_family, {})
+        validated: dict[str, Any] = {}
         for key, value in adjustment.items():
             if key not in allowed:
-                raise ValueError(f"{key} not allowed")
+                print(f"WARNING: agent suggested unknown knob "
+                      f"'{key}', skipping")
+                continue
             lower, upper = allowed[key]
             if value < lower or value > upper:
-                raise ValueError(f"{key} out of range")
-        return adjustment
+                clamped = max(lower, min(value, upper))
+                print(f"WARNING: agent value {key}={value} "
+                      f"out of range [{lower}, {upper}], "
+                      f"clamping to {clamped}")
+                validated[key] = clamped
+            else:
+                validated[key] = value
+        return validated
+
+    @staticmethod
+    def _summarize_eval_history(
+        history: list[dict[str, float]], max_points: int = 10,
+    ) -> list[dict[str, float]]:
+        """Sample key points from eval history for the agent prompt."""
+        if len(history) <= max_points:
+            return history
+        # Always include first and last
+        indices = {0, len(history) - 1}
+        # Find best val_loss entry
+        best_idx = min(
+            range(len(history)),
+            key=lambda i: history[i]["val_loss"],
+        )
+        indices.add(best_idx)
+        # Evenly space remaining points
+        remaining = max_points - len(indices)
+        if remaining > 0:
+            step = len(history) / (remaining + 1)
+            for i in range(1, remaining + 1):
+                indices.add(int(i * step))
+        return [history[i] for i in sorted(indices)]
 
     def _mechanical_fallback(
         self,
@@ -835,21 +977,43 @@ class PipelineRunnerBase:
             return {"train.lr": cfg["train"]["lr"] / 2.0}
 
         knob_family = self.policy.knob_family_for(self.milestone)
+        early_reason = result.get("early_stop_reason")
 
         if knob_family == "c0":
+            current_lr = cfg["train"].get("lr", 3e-4)
+            lr_range = self.policy.tunable_knobs.get("c0", {}).get(
+                "train.lr", (1e-5, 1e-3),
+            )
+            # Patience plateau → model is stuck → increase LR
+            if early_reason == "patience":
+                new_lr = min(current_lr * 2.0, lr_range[1])
+                if new_lr != current_lr:
+                    return {"train.lr": new_lr}
+            # Completed all steps but PPL still high → more steps
             current_steps = cfg["train"].get("steps", 100_000)
             step_range = self.policy.tunable_knobs.get("c0", {}).get(
                 "train.steps", (50_000, 300_000),
             )
-            new_steps = min(max(current_steps * 2, step_range[0]), step_range[1])
+            new_steps = min(
+                max(current_steps * 2, step_range[0]), step_range[1],
+            )
             if new_steps != current_steps:
-                # Scale warmup proportionally (4% of steps, clamped to knob range)
                 warmup_range = self.policy.tunable_knobs.get("c0", {}).get(
                     "train.warmup_steps", (500, 10_000),
                 )
-                new_warmup = int(min(max(new_steps * 0.04, warmup_range[0]), warmup_range[1]))
-                return {"train.steps": new_steps, "train.warmup_steps": new_warmup}
-            return {"train.lr": cfg["train"]["lr"] / 2.0}
+                new_warmup = int(min(
+                    max(new_steps * 0.04, warmup_range[0]),
+                    warmup_range[1],
+                ))
+                return {
+                    "train.steps": new_steps,
+                    "train.warmup_steps": new_warmup,
+                }
+            # LR increase as last resort
+            new_lr = min(current_lr * 2.0, lr_range[1])
+            if new_lr != current_lr:
+                return {"train.lr": new_lr}
+            return {}
 
         if knob_family == "c1" and result.get("sigma_std", 0.0) < 0.01:
             init_rho = cfg["model"]["bayes_ffn"].get("init_rho", -2.0)

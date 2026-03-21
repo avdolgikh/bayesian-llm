@@ -572,16 +572,10 @@ class TestPolicies:
             seen_cfgs[0]["model"]["bayes_ffn"]["init_rho"] + 1.0
         )
 
-    @pytest.mark.parametrize(
-        ("adjustment", "pattern"),
-        [
-            ({"train.not_a_real_knob": 1}, "allowed|not_a_real_knob"),
-            ({"train.kl_weight": 10.0}, "kl_weight|range"),
-        ],
-    )
-    def test_invalid_agent_adjustments_are_rejected(
-        self, pipeline_module, monkeypatch, state_dir, adjustment, pattern,
+    def test_unknown_knob_is_skipped_not_raised(
+        self, pipeline_module, monkeypatch, state_dir, capsys,
     ):
+        """Unknown knobs from agent are warned and skipped, not raised."""
         install_runner_stubs(
             pipeline_module,
             monkeypatch,
@@ -589,10 +583,36 @@ class TestPolicies:
             [False, True],
         )
         provider = FakeProvider(
-            responses=[{"diagnosis": "bad", "reasoning": "bad", "adjustment": adjustment}]
+            responses=[{
+                "diagnosis": "bad", "reasoning": "bad",
+                "adjustment": {"train.not_a_real_knob": 1},
+            }]
         )
-        with pytest.raises(ValueError, match=pattern):
-            make_runner(pipeline_module, state_dir, provider=provider).run()
+        # Should NOT raise — unknown knob is silently dropped
+        make_runner(pipeline_module, state_dir, provider=provider).run()
+        captured = capsys.readouterr()
+        assert "unknown knob" in captured.out.lower()
+
+    def test_out_of_range_knob_is_clamped(
+        self, pipeline_module, monkeypatch, state_dir, capsys,
+    ):
+        """Out-of-range values from agent are clamped, not raised."""
+        install_runner_stubs(
+            pipeline_module,
+            monkeypatch,
+            [result_dict(mi_ratio_mean=1.04), result_dict()],
+            [False, True],
+        )
+        provider = FakeProvider(
+            responses=[{
+                "diagnosis": "bad", "reasoning": "bad",
+                "adjustment": {"train.kl_weight": 10.0},
+            }]
+        )
+        # Should NOT raise — value is clamped to range
+        make_runner(pipeline_module, state_dir, provider=provider).run()
+        captured = capsys.readouterr()
+        assert "clamping" in captured.out.lower()
 
     def test_budget_exceeded_fails_before_next_run(self, pipeline_module, monkeypatch, state_dir):
         install_runner_stubs(pipeline_module, monkeypatch, [result_dict()], [True])
