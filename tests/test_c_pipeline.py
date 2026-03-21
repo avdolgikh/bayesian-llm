@@ -211,7 +211,7 @@ class TestConfigGeneration:
         cfg = pipeline_module.build_milestone_config("c1")
         assert cfg["model"]["bayes_ffn"]["enabled"] is True
         assert cfg["model"]["bayes_ffn"]["init_rho"] == pytest.approx(-2.0)
-        assert cfg["train"]["kl_weight"] == pytest.approx(0.2)
+        assert cfg["train"]["kl_weight"] == pytest.approx(0.1)
 
     def test_c3_phase2_template_contains_lora_defaults(self, pipeline_module):
         cfg = pipeline_module.build_milestone_config("c3_phase2")

@@ -50,7 +50,7 @@ C1_TEMPLATE = deep_merge(
         },
         "train": {
             "checkpoint_dir": "data/checkpoints/c1",
-            "kl_weight": 0.2,
+            "kl_weight": 0.1,
             "kl_annealing_steps": 5_000,
         },
     },

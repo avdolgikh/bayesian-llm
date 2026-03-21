@@ -97,13 +97,18 @@ class ClaudeProvider:
     name = "claude"
 
     def __init__(self, *, model: str) -> None:
+        import shutil
+
         self.model = model
+        self._claude_path = shutil.which("claude") or "claude"
+        if self._claude_path != "claude":
+            print(f"[provider] resolved claude CLI: {self._claude_path}")
 
     def run_role(self, *, role, prompt, repo_root, schema=None):
         command = [
-            "claude",
+            self._claude_path,
             "-p",
-            prompt,
+            "-",
             "--model",
             self.model,
             "--output-format",
@@ -121,6 +126,7 @@ class ClaudeProvider:
             role=role,
             model=self.model,
             repo_root=repo_root,
+            stdin_text=prompt,
         )
 
 
@@ -158,6 +164,7 @@ def _run_provider_command(
     role: str,
     model: str,
     repo_root: Path,
+    stdin_text: str | None = None,
 ) -> SimpleNamespace:
     # Strip Claude Code recursion-prevention env vars (VLA pipeline pattern)
     env = {k: v for k, v in _os.environ.items() if "CLAUDECODE" not in k.upper()}
@@ -170,6 +177,8 @@ def _run_provider_command(
             check=False,
             env=env,
             timeout=600,
+            input=stdin_text,
+            encoding="utf-8",
         )
     except subprocess.TimeoutExpired:
         raise RuntimeError(f"{provider_name} CLI timed out after 600s")

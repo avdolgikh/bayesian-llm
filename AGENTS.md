@@ -1057,6 +1057,15 @@ Claude Code CLI's `--max-turns` controls how many reasoning/tool cycles the agen
 *Bug 5 — `structured_output` envelope extraction:*
 When `--json-schema` is passed, Claude CLI returns the result in `structured_output` field (not `result`). `_run_provider_command` only checked `envelope.get("result")` → fell through → `parse_agent_response` got the raw envelope string (with session_id etc.) → no `diagnosis` key at top level → always empty. Fixed: check `structured_output` first, then `result`.
 
+*Bug 6 — Windows command-line length limit:*
+Injecting full AGENTS.md (~91KB) + agent_briefing.md (~5KB) into the prompt made the `claude -p <prompt>` command line ~96KB, exceeding Windows' ~32K character limit for `CreateProcess`. `subprocess.run` raises `FileNotFoundError` on Windows when this happens (misleading error — the binary IS found, the argument list is too long). Fixed: pass prompt via stdin (`-p -` + `input=prompt` in `subprocess.run`). No length limit via stdin.
+
+*Bug 7 — Windows charmap encoding:*
+`subprocess.run(text=True)` uses the system default encoding on Windows (cp1252/charmap), which can't handle Unicode characters like `→` in AGENTS.md. Error: `'charmap' codec can't encode character '\u2192'`. Fixed: `encoding="utf-8"` in `subprocess.run`.
+
+*Bug 8 — PATH resolution:*
+`claude` CLI at `C:\Users\alexe\.local\bin\claude.EXE` was sometimes not found by subprocess PATH resolution. Fixed: `shutil.which("claude")` at provider init to resolve full path upfront.
+
 *Subprocess timeout:* Increased to 600s (was 300s) to accommodate multi-turn agent.
 
 **Agent context injection (2026-03-21):**
@@ -1093,12 +1102,39 @@ Exception: C2/C4 deliberately reuse C0/C3 checkpoints (post-hoc methods don't re
 - Session 2 (2026-03-20): YAML immutability fixed, patience early-stop added, agent briefing system added. 5 runs: agent still returned empty (max-turns=1 too restrictive). Mechanical fallback escalated LR 3e-4→6e-4→1e-3→NaN→doubled steps. ALL runs plateaued at PPL ~1600. Root cause: data bug (token-level shuffle).
 - Session 3 (2026-03-21): All bugs fixed. Template HPs (lr=6e-4, warmup=4000, dropout=0.1). **Results: PPL 75 by step 2000, PPL 17 by step 26K.** C0 gate (PPL<80) passed at step 2000. Model still converging. Agent initial call still returned empty (structured_output bug — fixed mid-run, will take effect on next invocation). Training speed: ~167s per 1K steps.
 
-**Confirmed results (2026-03-21):**
-- Data fix confirmed: loss dropped below 7.0 by step 1000 (was stuck at 7.37 forever). Sequential text patterns being learned.
-- Residual scaling confirmed: no gradient instability through 16 layers. Smooth convergence.
-- Flash Attention confirmed: training speed ~167s per 1K steps on CUDA.
-- C0 convergence trajectory: PPL 54129 → 329 → 75 → 52 → 37 → 29 → 24 → 21 → 18 → 17 (steps 1 → 1K → 2K → 3K → 4K → 5K → 7K → 12K → 19K → 26K). Flattening around PPL 17, patience may fire in 40-60K range.
-- For reference: 4L model on AG News reached PPL=49. 16L on Pile reaching PPL ~17 is expected — bigger model, more data, longer training.
+**C0 FINAL RESULTS (2026-03-21) — PASSED:**
+
+| Metric | Value |
+|--------|-------|
+| Status | completed, Run 1/1 |
+| Best val loss | 2.437 at step 88K |
+| Test ID PPL | **14.3** |
+| Test OOD PPL | arxiv=29.3, freelaw=75.8, pubmed=140.4 |
+| Gate | 14.3 < 80 ✓ AND freelaw(75.8) & pubmed(140.4) > 2×14.3=28.6 ✓ |
+| Early stop | patience at step 98K (best at 88K, last 10K wasted) |
+| Training time | 4.5 hours (16,276s) |
+| MLflow run | `6215391b` |
+| Checkpoint | `data/checkpoints/c0/ckpt_best.pt` |
+| Pipeline state | `.pipeline-state/c0.json` |
+
+Convergence trajectory (val loss → PPL):
+- Step 1: 10.86 → 51970 (random init)
+- Step 1K: 4.94 → 140 (data fix confirmed — sequential patterns learned)
+- Step 2K: 4.32 → 75 (**C0 gate passed here**)
+- Step 5K: 3.36 → 29
+- Step 19K: 2.91 → 18
+- Step 37K: 2.78 → 16
+- Step 60K: 2.70 → 15
+- Step 70K: 2.57 → 13
+- Step 88K: 2.44 → 11.4 (**best**)
+- Step 98K: 2.54 → 12.6 (patience fired, 10 evals no >0.1% improvement)
+
+Key observations:
+- 76M model converges well on Pile domain-split data. PPL 14.3 is strong for this corpus.
+- OOD discrimination clear: pubmed (140.4) is 10x ID PPL, arxiv (29.3) is 2x, freelaw (75.8) is 5x.
+- Training speed: ~167s per 1K steps on CUDA (Flash Attention).
+- Patience mechanism worked correctly: saved ~10% of compute by stopping at 98K instead of 100K.
+- For reference: 4L model on AG News reached test_id_ppl=49. 16L on Pile reaching 14.3 is expected — bigger model, more diverse data, longer training.
 
 **Ideas considered but deferred:**
 
@@ -1113,15 +1149,63 @@ Exception: C2/C4 deliberately reuse C0/C3 checkpoints (post-hoc methods don't re
 | Anthropic API provider | Direct SDK call (no tools, no CLI overhead). Considered as fix for agent-empty issue. User prefers Claude Code CLI as smart multi-turn agent. | If agent still fails |
 | Document-level interleaving for Pile splits | Currently train/val/test are contiguous slices of concatenated domains. Wikipedia tokens come first, then StackExchange. A document-level interleave would give each split a mix of both domains. Low priority — the model will learn from whatever text it sees, and domain mixing mainly affects eval representativeness. | After C0 passes |
 
+**C1 readiness analysis (2026-03-21):**
+
+C1 = Variational Bayesian FFN. Same 16L/8H/512d architecture, but FFN layers (MLP.fc + MLP.proj in all 16 blocks) are BayesianLinear. Training minimizes ELBO = CE + kl_weight × KL. Gate: mi_ratio_mean > 1.2.
+
+Code review (thorough, all 10 components checked):
+- ✓ BayesianLinear: proper closed-form KL, weight sampling (μ + softplus(ρ) × ε)
+- ✓ KL in training: added once per optimizer step (not per micro-batch), annealed per-step
+- ✓ Checkpoint criterion: ELBO for Bayesian models (CE for deterministic)
+- ✓ MI evaluation pipeline: complete (MC sampling → per-domain MI → ratio → gate)
+- ✓ Config validation: enforces kl_weight > 0 when Bayesian enabled
+- ✓ Pipeline wiring: all hooks connected (train, eval_mi_suite, uncertainty_eval_fn, sigma_std)
+- ✓ Unit tests: 50+ covering Bayesian layers, uncertainty invariants, path selection
+- No red flags found.
+
+KL scaling analysis (4L → 16L):
+- Bayesian weight elements: 16L has ~33.6M (16 blocks × 2 layers × 512×2048) vs 4L's ~524K → 64x more KL terms
+- KL-to-data ratio: 33.6M/160M = 0.21 at 16L vs 524K/5M = 0.105 at 4L → **2x stronger KL pressure** with same kl_weight
+- Decision: **Reduced kl_weight from 0.2 to 0.1** in C1_TEMPLATE to compensate. Keeps effective KL pressure ~same as 4L A2 (which achieved 1.43x MI ratio)
+
+C1 template HPs (final):
+- lr=6e-4, warmup=4000, steps=100K, bs=16, accum=2 (same as C0)
+- bayes_ffn: enabled=True, init_rho=-2.0, prior_std=1.0
+- **kl_weight=0.1** (was 0.2 — reduced for 16L scaling)
+- kl_annealing_steps=5000 (5% ramp)
+- dropout=0.1
+
+Expected training time: ~6-7 hours (1.5x C0 due to BayesianLinear overhead in FFN)
+
+**Agent first successful reasoning (2026-03-21) — C1 initial call:**
+
+After fixing bugs 4-8, the agent produced its first intelligent response. Key qualities:
+- **Evidence-based**: cited C0 results (PPL 14.3, convergence at 88K), 4L A2 results (MI ratio 1.43x)
+- **Understood KL scaling math**: correctly identified 33.6M/160M = 0.21 ratio vs 4L's 0.105
+- **Cited failure modes**: referenced init_rho=-3 freezing posteriors from A2 experiments
+- **Compared to literature**: GPT-2-small scaling (lr=2.5e-4, batch 64x larger)
+- **Correct conclusion**: no adjustments needed — template defaults are optimal
+- **Identified diagnostics to watch**: "if posteriors collapse, σ_std < 0.01 is the diagnostic"
+- Cost: $0.097 (Sonnet), 2 turns, 140s
+
+This validates the pipeline architecture: Claude Code CLI as subprocess with full AGENTS.md context produces research-quality reasoning. The agent is not a mechanical fallback — it's an informed researcher.
+
+Total bugs fixed to get agent working: 8 (max-turns, structured_output envelope, YAML persistence, mechanical fallback logic, prompt quality, Windows cmd-line length, charmap encoding, PATH resolution).
+
+**C1 GPU run (2026-03-21):**
+- Session 1: Running. Agent approved template defaults (no adjustments). 109.9M params (76M deterministic + 33.6M Bayesian μ/ρ). ELBO criterion. Initial KL=52.8M (expected: 33.6M elements × ~1.58 nats each). KL contribution to loss at init: kl_scale × KL = (0.1/160M) × 52.8M ≈ 0.033 (tiny vs CE ~10.9). KL will grow as posteriors diverge from prior during training.
+
 **Next steps — ordered plan:**
 
-1. **C0 Session 3 completing** (in progress, PPL ~17 and improving). C0 gate (PPL<80) already passed. Wait for run to finish or patience-stop.
-2. **Verify agent works:** On next pipeline invocation (C1), the `structured_output` fix + AGENTS.md injection will be active. First real test of intelligent agent reasoning. Monitor diagnosis/reasoning quality.
-3. **Run C1** (variational FFN): `python experiments/c_pipeline.py --milestone c1 --provider claude --provider-model sonnet --initial-agent --max-runs 5`. Gate: mi_ratio_mean > 1.2. At 4L this achieved 1.43x — expect similar or better at 16L.
-4. **Run C2** (Laplace on C0 checkpoint): Record-only, single run. Expected negative result (diagonal curvature too flat — same as B1 at 4L).
-5. **Run C3** (BLoB LoRA): Gate: mi_ratio_mean > 1.05. At 4L this achieved 1.13x.
-6. **Run C4-TFB and C4-LAP** (post-hoc on C3 checkpoint): Record-only. TFB expected positive (1.10x at 4L), LAP expected negative.
-7. **Generate comparison report:** `python experiments/c_pipeline.py --compare`. Write up Table 2 for the paper.
+1. **Monitor C1 Run 1** (in progress). Key checkpoints:
+   - Does CE converge similarly to C0? (confirms Bayesian overhead doesn't break optimization)
+   - Does sigma_std > 0.01? (confirms posteriors are differentiating, not collapsed)
+   - Does mi_ratio_mean > 1.2? (C1 gate)
+   - If gate fails: agent should diagnose (posterior collapse? KL too strong? not enough steps?)
+2. **Run C2** (Laplace on C0 checkpoint): Record-only, single run. Expected negative result (diagonal curvature too flat — same as B1 at 4L).
+3. **Run C3** (BLoB LoRA): Gate: mi_ratio_mean > 1.05. At 4L this achieved 1.13x.
+4. **Run C4-TFB and C4-LAP** (post-hoc on C3 checkpoint): Record-only. TFB expected positive (1.10x at 4L), LAP expected negative.
+5. **Generate comparison report:** `python experiments/c_pipeline.py --compare`. Write up Table 2 for the paper.
 
 ### Paper Structure
 Table 1: 4L results (existing). Table 2: 16L results (C milestone). Analysis: which methods scale? Which findings transfer? The 2×2 matrix at two scales gives a clean, publishable comparison.
