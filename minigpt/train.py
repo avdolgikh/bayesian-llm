@@ -23,6 +23,7 @@ class TrainConfig:
     checkpoint_interval: int = 500
     checkpoint_dir: str = "data/checkpoints"
     gradient_accumulation_steps: int = 1
+    patience_evals: int = 10
     kl_annealing_steps: int = 0
     adam_beta1: float = 0.9
     adam_beta2: float = 0.95
@@ -226,6 +227,8 @@ def train(
 
     start = time.time()
     total_tokens = 0
+    no_improve_count = 0
+    early_stop_reason = None
     for step in range(start_step, cfg.steps + 1):
         # Update learning rate (cosine schedule with warmup)
         lr = _get_lr(step, cfg)
@@ -299,10 +302,13 @@ def train(
             if is_best:
                 best_val_loss = val_criterion
                 best_val_step = step
+                no_improve_count = 0
                 save_checkpoint(
                     model, optimizer, step, cfg_dict,
                     best_val_loss=best_val_loss, path=best_path,
                 )
+            else:
+                no_improve_count += 1
 
             # Print status
             status = (
@@ -332,6 +338,26 @@ def train(
                     metrics_to_log["train_elbo_loss"] = train_metrics["elbo_loss"]
                 mlflow.log_metrics(metrics_to_log, step=step)
 
+            # Early-stop on NaN to avoid wasting GPU time
+            if math.isnan(train_metrics["loss"]) or math.isnan(val_metrics["loss"]):
+                print(f"  -> NaN detected at step {step}, stopping early")
+                early_stop_reason = "nan"
+                break
+
+            # Early-stop on stale loss (only after warmup)
+            if (
+                cfg.patience_evals > 0
+                and step > cfg.warmup_steps
+                and no_improve_count >= cfg.patience_evals
+            ):
+                print(
+                    f"  -> patience exhausted at step {step} "
+                    f"({no_improve_count} evals without improvement), "
+                    f"stopping early"
+                )
+                early_stop_reason = "patience"
+                break
+
         if cfg.checkpoint_interval and step % cfg.checkpoint_interval == 0:
             ckpt_path = save_checkpoint(
                 model, optimizer, step, cfg_dict, best_val_loss=best_val_loss,
@@ -349,6 +375,7 @@ def train(
         "best_val_step": best_val_step,
         "train_time_sec": train_time,
         "tokens_per_sec": tokens_per_sec,
+        "early_stop_reason": early_stop_reason,
     }
     return model, metadata
 

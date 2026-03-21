@@ -10,6 +10,17 @@ from pathlib import Path
 from typing import Any, Callable
 
 
+_AGENT_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "diagnosis": {"type": "string"},
+        "reasoning": {"type": "string"},
+        "adjustment": {"type": "object"},
+    },
+    "required": ["diagnosis", "reasoning", "adjustment"],
+}
+
+
 @dataclass(frozen=True)
 class RuntimeHooks:
     os_replace: Callable[[str, str], None]
@@ -67,6 +78,7 @@ class PipelineRunnerBase:
         hooks: RuntimeHooks,
         run_phase1: Callable[..., str],
         ood_domains: tuple[str, ...],
+        config_path_fn: Callable[[str], Path] | None = None,
     ) -> None:
         self.repo_root = Path(repo_root)
         self.milestone = milestone
@@ -79,6 +91,7 @@ class PipelineRunnerBase:
         self.hooks = hooks
         self.run_phase1 = run_phase1
         self.ood_domains = ood_domains
+        self.config_path_fn = config_path_fn
 
     def run(self) -> int:
         pipeline_state = self._load_pipeline_state()
@@ -95,8 +108,9 @@ class PipelineRunnerBase:
         state["status"] = "running"
         overrides = self._initial_overrides_from_state(state)
         oom_retries = 0
+        max_runs = self.policy.max_runs_for(self.milestone)
 
-        while len(state["runs"]) < self.policy.max_runs_for(self.milestone):
+        while len(state["runs"]) < max_runs:
             if self._budget_exceeded(pipeline_state, state):
                 state["status"] = "failed"
                 state["reason"] = "budget_exceeded"
@@ -105,6 +119,8 @@ class PipelineRunnerBase:
 
             cfg = self._build_current_config(overrides, dependency_checkpoint, phase1_checkpoint)
             run_number = len(state["runs"]) + 1
+
+            self._log_run_banner(run_number, max_runs, cfg, overrides)
 
             try:
                 run_record = self._execute_run(run_number, cfg, overrides, dependency_checkpoint)
@@ -120,6 +136,8 @@ class PipelineRunnerBase:
                 overrides["train.batch_size"] = max(1, cfg["train"]["batch_size"] // 2)
                 grad_accum = cfg["train"].get("gradient_accumulation_steps", 1)
                 overrides["train.gradient_accumulation_steps"] = grad_accum * 2
+                print(f"OOM — halving batch to {overrides['train.batch_size']}, "
+                      f"doubling accum to {overrides['train.gradient_accumulation_steps']}")
                 continue
 
             oom_retries = 0
@@ -132,6 +150,8 @@ class PipelineRunnerBase:
             result = run_record["result"]
             passed = self.policy.check_gate(self.milestone, result)
             diverged = self._is_diverged(result.get("best_val_loss"))
+
+            self._log_gate_result(result, passed)
 
             if self.policy.record_only_for(self.milestone):
                 run_record["decision"] = (
@@ -163,25 +183,38 @@ class PipelineRunnerBase:
             if diverged:
                 run_record["decision"] = "retry"
                 overrides["train.lr"] = cfg["train"]["lr"] / 2.0
+                print(f"\nDiverged — halving LR to {overrides['train.lr']:.2e}")
                 self._persist(state, pipeline_state)
                 continue
 
             if self.no_agent:
+                fallback = self._mechanical_fallback(cfg, result)
                 run_record["decision"] = "retry"
-                overrides.update(self._mechanical_fallback(cfg, result))
+                overrides.update(fallback)
+                self._log_fallback(fallback)
                 self._persist(state, pipeline_state)
                 continue
 
             try:
                 agent_response = self._request_agent_adjustment(state)
-            except Exception:
+            except Exception as exc:
+                print(f"\nAgent error: {exc}")
+                fallback = self._mechanical_fallback(cfg, result)
                 run_record["decision"] = "retry"
-                overrides.update(self._mechanical_fallback(cfg, result))
+                overrides.update(fallback)
+                self._log_fallback(fallback)
                 self._persist(state, pipeline_state)
                 continue
 
-            adjustment = self._validate_adjustment(agent_response.get("adjustment", {}))
+            self._log_agent_response(agent_response)
             run_record["agent_response"] = agent_response
+            adjustment = agent_response.get("adjustment", {})
+            if adjustment:
+                adjustment = self._validate_adjustment(adjustment)
+            else:
+                print("WARNING: Agent returned empty adjustment, using mechanical fallback")
+                adjustment = self._mechanical_fallback(cfg, result)
+                self._log_fallback(adjustment)
             run_record["decision"] = "retry"
             overrides.update(adjustment)
             self._persist(state, pipeline_state)
@@ -189,6 +222,51 @@ class PipelineRunnerBase:
         state["status"] = "failed"
         self._persist(state, pipeline_state)
         return 1
+
+    # -- Logging helpers (inspired by VLA pipeline) --
+
+    def _log_run_banner(
+        self, run_number: int, max_runs: int, cfg: dict[str, Any], overrides: dict[str, Any],
+    ) -> None:
+        print(f"\n{'=' * 60}")
+        print(f"RUN {run_number}/{max_runs} -- {self.milestone}")
+        print(f"{'=' * 60}")
+        train = cfg.get("train", {})
+        print(f"  steps={train.get('steps')}  lr={train.get('lr'):.2e}  "
+              f"warmup={train.get('warmup_steps')}  bs={train.get('batch_size')}")
+        if overrides:
+            print(f"  overrides: {json.dumps(overrides)}")
+
+    def _log_gate_result(self, result: dict[str, Any], passed: bool) -> None:
+        gate_desc = self.policy.gate_description_for(self.milestone)
+        status = "PASSED" if passed else "FAILED"
+        print(f"\n--- GATE {status}: {gate_desc} ---")
+        for key in ("test_id_ppl", "test_ood_ppl", "mi_ratio_mean", "sigma_std", "best_val_loss"):
+            if key in result:
+                val = result[key]
+                if isinstance(val, float):
+                    print(f"  {key}: {val:.4f}")
+                else:
+                    print(f"  {key}: {val}")
+
+    def _log_agent_response(self, response: dict[str, Any]) -> None:
+        print(f"\n--- Agent Response (provider={self.provider.name}) ---")
+        print(f"  Diagnosis: {response.get('diagnosis') or '(empty)'}")
+        print(f"  Reasoning: {response.get('reasoning') or '(empty)'}")
+        adj = response.get("adjustment", {})
+        if adj:
+            for k, v in adj.items():
+                print(f"  {k}: {v}")
+        else:
+            print("  Adjustment: (none)")
+
+    def _log_fallback(self, fallback: dict[str, Any]) -> None:
+        print("\n--- Mechanical Fallback ---")
+        if fallback:
+            for k, v in fallback.items():
+                print(f"  {k}: {v}")
+        else:
+            print("  (no adjustments available)")
 
     def write_compare_outputs(self) -> None:
         self.state_dir.mkdir(parents=True, exist_ok=True)
@@ -205,11 +283,34 @@ class PipelineRunnerBase:
         phase1_checkpoint: str | None,
     ) -> dict[str, Any]:
         milestone_key = self.policy.milestone_key_for(self.milestone)
-        cfg = self.policy.build_config(milestone_key, overrides)
+        if self.config_path_fn is not None:
+            cfg = self._build_config_from_yaml(milestone_key, overrides)
+        else:
+            cfg = self.policy.build_config(milestone_key, overrides)
         if dependency_checkpoint is not None:
             cfg["train"]["resume_checkpoint"] = dependency_checkpoint
         if phase1_checkpoint is not None:
             cfg["train"]["resume_checkpoint"] = phase1_checkpoint
+        return cfg
+
+    def _build_config_from_yaml(
+        self, milestone_key: str, overrides: dict[str, Any]
+    ) -> dict[str, Any]:
+        from minigpt.config import apply_dict_overrides, load_yaml, save_yaml, validate_config
+
+        yaml_path = self.config_path_fn(milestone_key)
+        if not yaml_path.exists():
+            # Generate initial YAML from template
+            cfg = self.policy.build_config(milestone_key, None)
+            yaml_path.parent.mkdir(parents=True, exist_ok=True)
+            save_yaml(yaml_path, cfg)
+
+        cfg = load_yaml(yaml_path)
+        if overrides:
+            apply_dict_overrides(cfg, overrides)
+            save_yaml(yaml_path, cfg)
+
+        validate_config(cfg)
         return cfg
 
     def _execute_run(
@@ -467,32 +568,59 @@ class PipelineRunnerBase:
 
     def _request_agent_adjustment(self, state: dict[str, Any]) -> dict[str, Any]:
         prompt = self._build_agent_prompt(state)
+        print(f"\n[provider] launching provider={self.provider.name} role=researcher")
         response = self.provider.run_role(
             role="researcher",
             prompt=prompt,
             repo_root=self.repo_root,
-            schema=None,
+            schema=_AGENT_RESPONSE_SCHEMA,
         )
         return self.policy.parse_agent_response(response.output)
 
     def _build_agent_prompt(self, state: dict[str, Any]) -> str:
         knob_family = self.policy.knob_family_for(self.milestone)
-        allowed = ", ".join(sorted(self.policy.tunable_knobs.get(knob_family, {})))
+        knobs = self.policy.tunable_knobs.get(knob_family, {})
+        knob_lines = "\n".join(
+            f"  {k}: [{lo}, {hi}]" for k, (lo, hi) in sorted(knobs.items())
+        )
         history_lines = []
         for run in state.get("runs", []):
             history_lines.append(
-                f"Run {run['run_number']}: result={run.get('result', {})} "
-                f"overrides={run.get('config_overrides', {})}"
+                f"Run {run['run_number']}: result={json.dumps(run.get('result', {}), indent=2)}\n"
+                f"  overrides={run.get('config_overrides', {})}"
             )
         history_text = "\n".join(history_lines) if history_lines else "No previous runs."
         return (
+            "You are a research assistant optimizing hyperparameters "
+            "for a Bayesian LLM experiment.\n"
+            "\n"
             f"Milestone: {self.milestone}\n"
             f"Success gate: {self.policy.gate_description_for(self.milestone)}\n"
-            f"Tunable knobs: {allowed}\n"
-            "Run history:\n"
-            f"{history_text}\n"
-            "Read AGENTS.md before proposing any adjustment.\n"
-            "Return JSON with diagnosis, reasoning, and adjustment.\n"
+            "\n"
+            "Context: This is a 76M-param transformer (16L/8H/512d) "
+            "training on The Pile.\n"
+            "Typical convergence requires 100K-200K steps. "
+            "If PPL >> 80, the most likely cause is insufficient "
+            "training steps or warmup too short relative to steps "
+            "(recommend ~4% of steps).\n"
+            "\n"
+            f"Tunable knobs (name: [min, max]):\n{knob_lines}\n"
+            "\n"
+            f"Run history:\n{history_text}\n"
+            "\n"
+            "Read AGENTS.md in this repository for additional context "
+            "about the project.\n"
+            "\n"
+            "IMPORTANT: You MUST return a non-empty adjustment dict "
+            "with at least one knob change.\n"
+            "Analyze the gap between current results and the success "
+            "gate to determine what to change.\n"
+            "\n"
+            "Return ONLY a raw JSON object (no markdown, no prose) "
+            "with exactly this shape:\n"
+            '{"diagnosis": "brief description of why the gate failed",'
+            ' "reasoning": "what adjustment will fix it and why",'
+            ' "adjustment": {"knob.name": new_value}}\n'
         )
 
     def _validate_adjustment(self, adjustment: dict[str, Any]) -> dict[str, Any]:
@@ -517,6 +645,22 @@ class PipelineRunnerBase:
             return {"train.lr": cfg["train"]["lr"] / 2.0}
 
         knob_family = self.policy.knob_family_for(self.milestone)
+
+        if knob_family == "c0":
+            current_steps = cfg["train"].get("steps", 100_000)
+            step_range = self.policy.tunable_knobs.get("c0", {}).get(
+                "train.steps", (50_000, 300_000),
+            )
+            new_steps = min(max(current_steps * 2, step_range[0]), step_range[1])
+            if new_steps != current_steps:
+                # Scale warmup proportionally (4% of steps, clamped to knob range)
+                warmup_range = self.policy.tunable_knobs.get("c0", {}).get(
+                    "train.warmup_steps", (500, 10_000),
+                )
+                new_warmup = int(min(max(new_steps * 0.04, warmup_range[0]), warmup_range[1]))
+                return {"train.steps": new_steps, "train.warmup_steps": new_warmup}
+            return {"train.lr": cfg["train"]["lr"] / 2.0}
+
         if knob_family == "c1" and result.get("sigma_std", 0.0) < 0.01:
             init_rho = cfg["model"]["bayes_ffn"].get("init_rho", -2.0)
             return {"model.bayes_ffn.init_rho": init_rho + 1.0}

@@ -1,15 +1,26 @@
 experiment:
   name: c0
   run_name: c0
-  mlflow_uri: "sqlite:///mlflow.db"
-
+  mlflow_uri: sqlite:///mlflow.db
 data:
   dataset: pile
-  pile_id_domains: [wikipedia_en, stackexchange]
-  pile_ood_domains: [arxiv, freelaw, pubmed_abstracts]
-  pile_id_tokens: 100_000_000
-  pile_ood_tokens: 10_000_000
-
+  val_fraction: 0.1
+  test_fraction: 0.1
+  id_categories:
+  - 1
+  - 2
+  ood_categories:
+  - 3
+  - 4
+  pile_id_domains:
+  - wikipedia_en
+  - stackexchange
+  pile_ood_domains:
+  - arxiv
+  - freelaw
+  - pubmed_abstracts
+  pile_id_tokens: 100000000
+  pile_ood_tokens: 10000000
 model:
   block_size: 256
   n_layer: 16
@@ -23,20 +34,19 @@ model:
     enabled: false
   bayes_attn_v:
     enabled: false
-
 train:
-  steps: 1_000  # 100_000
+  steps: 1000
   batch_size: 16
   block_size: 256
-  lr: 3.0e-4
+  lr: 0.003
   weight_decay: 0.1
-  warmup_steps: 200  # 2_000
-  min_lr: 1.0e-5
+  warmup_steps: 200
+  min_lr: 1.0e-05
   grad_clip: 1.0
   eval_interval: 100
   eval_iters: 20
-  checkpoint_interval: 200
-  checkpoint_dir: "data/checkpoints/c0"
+  checkpoint_interval: 100
+  checkpoint_dir: data/checkpoints/c0
   gradient_accumulation_steps: 2
   kl_weight: 0.0
   kl_annealing_steps: 0
@@ -44,7 +54,6 @@ train:
   adam_beta2: 0.95
   seed: 1337
   device: auto
-
 eval:
   sample_tokens: 200
   temperature: 0.8

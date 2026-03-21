@@ -103,6 +103,22 @@ def load_yaml(path: str | Path) -> dict:
         return yaml.safe_load(f) or {}
 
 
+def save_yaml(path: str | Path, cfg: dict) -> None:
+    """Write config dict as YAML."""
+    with open(path, "w") as f:
+        yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)
+
+
+def apply_dict_overrides(cfg: dict, overrides: dict) -> None:
+    """Apply dotted-key overrides (e.g. ``{"train.lr": 1e-4}``) to *cfg* in-place."""
+    for dotted_key, value in overrides.items():
+        cursor = cfg
+        parts = dotted_key.split(".")
+        for part in parts[:-1]:
+            cursor = cursor.setdefault(part, {})
+        cursor[parts[-1]] = value
+
+
 def deep_merge(base: dict, override: dict) -> dict:
     """Recursively merge *override* into a deep copy of *base*."""
     merged = copy.deepcopy(base)
@@ -212,6 +228,7 @@ def build_train_config(cfg: dict) -> TrainConfig:
         checkpoint_interval=t["checkpoint_interval"],
         checkpoint_dir=t.get("checkpoint_dir", "data/checkpoints"),
         gradient_accumulation_steps=t.get("gradient_accumulation_steps", 1),
+        patience_evals=t.get("patience_evals", 10),
         kl_annealing_steps=t.get("kl_annealing_steps", 0),
         adam_beta1=t.get("adam_beta1", 0.9),
         adam_beta2=t.get("adam_beta2", 0.95),

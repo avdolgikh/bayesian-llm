@@ -24,6 +24,7 @@ from experiments.c_milestones import (
     check_gate,
     comparison_payload,
     comparison_report,
+    config_path_for,
     dependency_for,
     gate_description_for,
     knob_family_for,
@@ -109,6 +110,8 @@ class ClaudeProvider:
             "json",
             "--permission-mode",
             "bypassPermissions",
+            "--max-turns",
+            "1",
         ]
         if schema is not None:
             command.extend(["--json-schema", json.dumps(schema)])
@@ -156,6 +159,8 @@ def _run_provider_command(
     model: str,
     repo_root: Path,
 ) -> SimpleNamespace:
+    # Strip Claude Code recursion-prevention env vars (VLA pipeline pattern)
+    env = {k: v for k, v in _os.environ.items() if "CLAUDECODE" not in k.upper()}
     try:
         completed = subprocess.run(
             command,
@@ -163,7 +168,11 @@ def _run_provider_command(
             text=True,
             capture_output=True,
             check=False,
+            env=env,
+            timeout=300,
         )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"{provider_name} CLI timed out after 300s")
     except FileNotFoundError as exc:
         raise RuntimeError(f"{provider_name} CLI not found") from exc
 
@@ -171,11 +180,26 @@ def _run_provider_command(
         stderr = completed.stderr.strip() or completed.stdout.strip()
         raise RuntimeError(f"{provider_name} provider failed: {stderr}")
 
+    output = completed.stdout.strip()
+    if not output:
+        stderr = completed.stderr.strip()
+        raise RuntimeError(
+            f"{provider_name} returned empty output (stderr: {stderr[:500]})"
+        )
+
+    # Extract agent text from CLI JSON envelope ({"type":"result","result":"..."})
+    try:
+        envelope = json.loads(output)
+        if isinstance(envelope, dict) and "result" in envelope:
+            output = str(envelope["result"])
+    except (json.JSONDecodeError, KeyError):
+        pass  # Not an envelope, use raw output
+
     return SimpleNamespace(
         provider=provider_name,
         role=role,
         model=model,
-        output=completed.stdout.strip(),
+        output=output,
     )
 
 
@@ -221,6 +245,7 @@ class PipelineRunner(PipelineRunnerBase):
         budget_hours: float,
         use_mlflow: bool,
         no_agent: bool = False,
+        config_path_fn=None,
     ) -> None:
         hooks = RuntimeHooks(
             os_replace=os.replace,
@@ -253,6 +278,7 @@ class PipelineRunner(PipelineRunnerBase):
             hooks=hooks,
             run_phase1=run_c3_phase1,
             ood_domains=OOD_DOMAINS,
+            config_path_fn=config_path_fn,
         )
 
 
@@ -295,9 +321,14 @@ def main() -> None:
 
     milestone_key = milestone_key_for(milestone)
     if args.dry_run:
-        import json
+        import yaml
 
-        print(json.dumps(build_milestone_config(milestone_key), indent=2))
+        yaml_path = config_path_for(milestone_key, REPO_ROOT)
+        if yaml_path.exists():
+            print(yaml_path.read_text())
+        else:
+            cfg = build_milestone_config(milestone_key)
+            print(yaml.dump(cfg, default_flow_style=False, sort_keys=False))
         return
 
     if args.resume:
@@ -320,6 +351,7 @@ def main() -> None:
         budget_hours=args.budget,
         use_mlflow=not args.no_mlflow,
         no_agent=args.no_agent,
+        config_path_fn=lambda mk: config_path_for(mk, REPO_ROOT),
     )
     raise SystemExit(runner.run())
 

@@ -950,9 +950,52 @@ AG News (~5M tokens) is structurally inadequate for 76M params. Using The Pile (
 - Pile cache is per-token-target: `data/pile/{domain}_{token_limit}.pt`. Smoke test cached 50K-token files; real C0 (100M tokens) will re-download.
 - 191/191 tests green, ruff clean.
 
-**Known limitations (deferred to production):** `train.steps` range for C1 is `(1, 300K)` — frozen test sends `train.steps=1`, so can't narrow to `(50K, 300K)` without test change. `run_c3_phase1` is a stub returning hardcoded path. `eval_perplexity_suite` expects single OOD tensor — pipeline/smoke scripts handle per-domain eval manually.
+**YAML-centric refactor (2026-03-16):** Pipeline now reads config from YAML files (`configs/{milestone_key}.yaml`) as single source of truth. Agent adjustments are written back to the YAML between runs. Git tracks the final config that produced the result.
+- `config_path_fn` parameter on `PipelineRunnerBase` — when set, pipeline loads/saves YAML; when `None` (tests), falls back to programmatic `build_milestone_config`.
+- `save_yaml()` and `apply_dict_overrides()` added to `minigpt/config.py`.
+- `config_path_for()` added to `c_milestones.py` — convention: `configs/{milestone_key}.yaml`.
+- `--dry-run` now prints YAML content (reads file if exists, else generates from template).
+- CLI `main()` passes `config_path_fn`; tests don't — so 57/57 frozen tests unaffected.
+- If YAML doesn't exist on first run, pipeline auto-generates it from the Python template.
 
-**Next: Run C0 on GPU** — `python experiments/c_pipeline.py --milestone c0 --no-agent` (deterministic baseline, 16L/8H/512d on Pile, 100K steps).
+**Production fixes (2026-03-16):**
+- `log_perplexity_mlflow` fixed: handles per-domain OOD dict (`{"arxiv": 2245.4, ...}`) not just single float.
+- `MAX_RUNS` bumped to 6 (user change) — agent/no-agent gets 6 attempts per milestone.
+
+**Known limitations (deferred to production):** `train.steps` range for C1 is `(1, 300K)` — frozen test sends `train.steps=1`, so can't narrow to `(50K, 300K)` without test change. `run_c3_phase1` is a stub returning hardcoded path. `eval_perplexity_suite` expects single OOD tensor — pipeline handles per-domain eval manually.
+
+**Pipeline improvements — agent UX & reliability (2026-03-17):**
+
+*Problem:* First agentic C0 run revealed 5 critical issues:
+1. **Agent returned empty adjustments** — Claude CLI returned JSON envelope `{"type":"result","result":"Done."}` but `parse_agent_response` tried `json.loads()` on the envelope, getting no `diagnosis`/`adjustment` keys → empty defaults.
+2. **Zero visibility** — no logging between runs (no banners, no gate results, no agent decisions).
+3. **Empty-adjustment → wasted run** — pipeline ran identical config twice (1K steps, same PPL ~1628).
+4. **C0 mechanical fallback empty** — only c1 (init_rho) and c3 (init_g) had fallback logic. C0 returned `{}`.
+5. **NaN training ran all 50K steps** — model diverged at step ~1700 (warmup_steps=200 too short for 3e-4 LR), but training continued for hours with NaN loss.
+
+*Fixes applied:*
+- **Logging** (`pipeline_runner.py`): Run banners (`RUN {n}/{max} -- {milestone}`), config summary (steps/lr/warmup/bs), gate result with key metrics, agent response (diagnosis/reasoning/adjustment), mechanical fallback display, OOM/divergence messages. Inspired by VLA pipeline's `PipelineLogger`.
+- **Envelope extraction** (`c_pipeline.py`): `_run_provider_command` now parses Claude CLI JSON envelope and extracts `result` field. Also strips `CLAUDECODE` env vars to prevent recursion (VLA pipeline pattern).
+- **Robust response parsing** (`c_milestones.py`): `parse_agent_response` tries 3 strategies: (1) direct JSON, (2) fenced JSON (```json...```), (3) balanced-brace extraction from prose. Falls back to empty dict.
+- **Empty-adjustment safeguard** (`pipeline_runner.py`): If agent returns empty `adjustment`, falls through to mechanical fallback with warning.
+- **C0 mechanical fallback** (`pipeline_runner.py`): Doubles `train.steps` (min 50K from tunable range, max 300K). Also scales `train.warmup_steps` proportionally (4% of steps, clamped to range [500, 10K]).
+- **NaN early-stop** (`minigpt/train.py`): Checks `math.isnan(train_loss) or math.isnan(val_loss)` at every eval interval. Breaks training loop immediately, saving GPU hours.
+- **Agent prompt improved** (`pipeline_runner.py`): Includes knob ranges with `[min, max]`, directive tone ("You MUST return non-empty adjustment"), explicit JSON example, "no markdown, no prose" instruction.
+- **Schema passed** to provider: `_AGENT_RESPONSE_SCHEMA` constant in `pipeline_runner.py`, passed to `run_role(schema=...)`.
+
+*Remaining issues (next session):*
+1. **Claude CLI subprocess timeout** — `claude -p` with `--permission-mode bypassPermissions` takes >120s (reads repo files). Need `--max-turns 1` or higher timeout, or prompt optimization.
+2. **Frozen test breakage** — `test_four_consecutive_failures_mark_milestone_failed` expects MAX_RUNS=4 but now MAX_RUNS=6. Test provides only 4 results → IndexError on run 5. User must decide: revert MAX_RUNS or update test.
+3. **warmup_steps=200 in YAML** — too short for 50K+ step runs. Agent should diagnose this. Mechanical fallback now handles it, but the agent should be the primary diagnoser.
+4. **Config path convention** — renamed from `configs/{milestone_key}_pile.yaml` to `configs/{milestone_key}.yaml` (no suffix). AGENTS.md line 953 still says `_pile.yaml`.
+
+**C0 GPU run history (2026-03-16 → 2026-03-17):**
+- Run 1 (1K steps, 4 min): PPL=1628, gate failed. Agent empty → fallback: steps=50K.
+- Run 2 (50K steps, 3.1 hrs): NaN at step ~1700 (warmup=200 too short). Best PPL=1614 (from pre-NaN checkpoint). Agent empty → fallback: steps=100K.
+- Run 3: not started (pipeline killed).
+- YAML reset to steps=1000/warmup=200 for fresh start.
+
+**Next: Fix Claude CLI timeout → Re-run C0 with working agent** — `python experiments/c_pipeline.py --milestone c0 --provider claude --provider-model sonnet`. The agent must diagnose warmup/NaN issues and suggest smart HP adjustments.
 
 ### Paper Structure
 Table 1: 4L results (existing). Table 2: 16L results (C milestone). Analysis: which methods scale? Which findings transfer? The 2×2 matrix at two scales gives a clean, publishable comparison.

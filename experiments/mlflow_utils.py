@@ -51,10 +51,13 @@ def log_perplexity_mlflow(ppl_results):
             "final_val_perplexity", f"{ppl_results['val_ppl']:.2f}",
         )
     mlflow.log_param("test_id_perplexity", f"{ppl_results['test_id_ppl']:.2f}")
-    if ppl_results.get("test_ood_ppl") is not None:
-        mlflow.log_param(
-            "test_ood_perplexity", f"{ppl_results['test_ood_ppl']:.2f}",
-        )
+    test_ood_ppl = ppl_results.get("test_ood_ppl")
+    if test_ood_ppl is not None:
+        if isinstance(test_ood_ppl, dict):
+            for domain, val in test_ood_ppl.items():
+                mlflow.log_param(f"test_ood_ppl_{domain}", f"{val:.2f}")
+        else:
+            mlflow.log_param("test_ood_perplexity", f"{test_ood_ppl:.2f}")
 
 
 def log_mi_mlflow(mi_id, mi_ood=None, mi_ratio=None):

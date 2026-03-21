@@ -7,10 +7,10 @@ import json
 from pathlib import Path
 from typing import Any
 
-from minigpt.config import DEFAULT_CONFIG, deep_merge, validate_config
+from minigpt.config import DEFAULT_CONFIG, apply_dict_overrides, deep_merge, validate_config
 
 OOD_DOMAINS = ("arxiv", "freelaw", "pubmed_abstracts")
-MAX_RUNS = 4
+MAX_RUNS = 3
 DEFAULT_RUN_ESTIMATE_HOURS = 6.0
 
 C0_TEMPLATE = {
@@ -163,12 +163,7 @@ FOUR_L_RESULTS = {
 
 def _apply_overrides(cfg: dict[str, Any], overrides: dict[str, Any] | None) -> dict[str, Any]:
     updated = copy.deepcopy(cfg)
-    for dotted_key, value in (overrides or {}).items():
-        cursor: dict[str, Any] = updated
-        parts = dotted_key.split(".")
-        for part in parts[:-1]:
-            cursor = cursor.setdefault(part, {})
-        cursor[parts[-1]] = value
+    apply_dict_overrides(updated, overrides or {})
     return updated
 
 
@@ -198,12 +193,51 @@ def check_gate(milestone: str, result: dict) -> bool:
 
 
 def parse_agent_response(raw: str) -> dict:
-    payload = json.loads(raw)
-    return {
-        "diagnosis": payload.get("diagnosis", ""),
-        "reasoning": payload.get("reasoning", ""),
-        "adjustment": payload.get("adjustment", {}),
-    }
+    import re
+
+    def _extract(d: dict) -> dict:
+        return {
+            "diagnosis": d.get("diagnosis", ""),
+            "reasoning": d.get("reasoning", ""),
+            "adjustment": d.get("adjustment", {}),
+        }
+
+    # Strategy 1: raw is direct JSON with expected keys
+    try:
+        payload = json.loads(raw)
+        if isinstance(payload, dict) and "diagnosis" in payload:
+            return _extract(payload)
+    except json.JSONDecodeError:
+        pass
+
+    # Strategy 2: extract fenced JSON from text (```json ... ```)
+    fenced = re.findall(r"```(?:json)?\s*(\{.*?\})\s*```", raw, re.DOTALL)
+    for candidate in fenced:
+        try:
+            d = json.loads(candidate)
+            if isinstance(d, dict) and "diagnosis" in d:
+                return _extract(d)
+        except json.JSONDecodeError:
+            continue
+
+    # Strategy 3: find balanced { } regions in raw text
+    for m in re.finditer(r"\{", raw):
+        depth, i = 0, m.start()
+        for j in range(i, len(raw)):
+            if raw[j] == "{":
+                depth += 1
+            elif raw[j] == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        d = json.loads(raw[i : j + 1])
+                        if isinstance(d, dict) and "diagnosis" in d:
+                            return _extract(d)
+                    except json.JSONDecodeError:
+                        pass
+                    break
+
+    return {"diagnosis": "", "reasoning": "", "adjustment": {}}
 
 
 def gate_description_for(milestone: str) -> str:
@@ -226,6 +260,11 @@ def dependency_for(milestone: str) -> str | None:
 
 def milestone_key_for(milestone: str) -> str:
     return "c3_phase2" if milestone == "c3" else milestone
+
+
+def config_path_for(milestone_key: str, repo_root: Path) -> Path:
+    """Return the conventional YAML config path for a milestone."""
+    return repo_root / "configs" / f"{milestone_key}.yaml"
 
 
 def knob_family_for(milestone: str) -> str:

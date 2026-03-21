@@ -412,14 +412,13 @@ class TestRunnerStateAndLoop:
                     "reasoning": "raise kl",
                     "adjustment": {"train.kl_weight": 0.3},
                 },
-                {"diagnosis": "low_mi", "reasoning": "lower lr", "adjustment": {"train.lr": 2e-4}},
             ]
         )
         install_runner_stubs(
             pipeline_module,
             monkeypatch,
-            [result_dict(mi_ratio_mean=1.01)] * 4,
-            [False, False, False, False],
+            [result_dict(mi_ratio_mean=1.01)] * 3,
+            [False] * 3,
         )
         exit_code = make_runner(pipeline_module, state_dir, provider=provider).run()
         assert exit_code != 0
