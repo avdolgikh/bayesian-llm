@@ -620,9 +620,17 @@ class PipelineRunnerBase:
 
     def _load_agent_briefing(self) -> str:
         briefing_path = Path(__file__).parent / "agent_briefing.md"
+        agents_md_path = self.repo_root / "AGENTS.md"
+        parts = []
         if briefing_path.exists():
-            return briefing_path.read_text(encoding="utf-8")
-        return ""
+            parts.append(briefing_path.read_text(encoding="utf-8"))
+        if agents_md_path.exists():
+            parts.append(
+                "=== FULL PROJECT HISTORY (AGENTS.md) ===\n"
+                + agents_md_path.read_text(encoding="utf-8")
+                + "\n=== END AGENTS.md ==="
+            )
+        return "\n\n".join(parts)
 
     def _request_initial_params(
         self, cfg: dict[str, Any],
@@ -704,9 +712,8 @@ class PipelineRunnerBase:
             "\n"
             f"Tunable knobs (name: [min, max]):\n{knob_lines}\n"
             "\n"
-            "=== REFERENCE: Research context and HP tuning "
-            "playbook (from AGENTS.md and prior experiments) "
-            "===\n"
+            "=== REFERENCE: HP tuning playbook + full "
+            "project history ===\n"
             f"{briefing}\n"
             "=== END REFERENCE ===\n"
             "\n"
@@ -721,11 +728,6 @@ class PipelineRunnerBase:
             "3. Is dropout appropriate for this depth?\n"
             "4. Are 100K steps sufficient given the "
             "tokens/step and data volume?\n"
-            "\n"
-            "Read AGENTS.md in this repo for full experiment "
-            "history, 4-layer reference results, and prior "
-            "bugs. Use that context to make informed "
-            "decisions.\n"
             "\n"
             "If the defaults look good, set adjustment to {}. "
             "Otherwise, specify the knobs to change.\n"
@@ -946,15 +948,10 @@ class PipelineRunnerBase:
             "\n"
             f"Diagnostic summary:\n{diagnostic}\n"
             "\n"
-            "=== REFERENCE: Research context and HP tuning "
-            "playbook (from AGENTS.md and prior experiments) "
-            "===\n"
+            "=== REFERENCE: HP tuning playbook + full "
+            "project history ===\n"
             f"{briefing}\n"
             "=== END REFERENCE ===\n"
-            "\n"
-            "Read AGENTS.md in this repo for full experiment "
-            "history, 4-layer reference results, and known "
-            "failure patterns. Use that context.\n"
             "\n"
             "Think step by step as a deep learning researcher:\n"
             "1. Diagnose the root cause. Look at the loss "

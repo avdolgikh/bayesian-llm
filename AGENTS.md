@@ -1049,21 +1049,56 @@ Additional pipeline hardening applied alongside the bug fixes:
 - `warmup_steps: 4000` (was 2000). 4% of total steps — proportional to LR increase. Prevents NaN from aggressive early gradient steps.
 - `dropout: 0.1` (was 0.2). GPT-2 standard for this depth.
 
-**Agent provider fix (2026-03-21):**
-- `--max-turns 5` (was 1). With `--max-turns 1`, Claude Code spent its single turn on a tool call (reading files), got cut off before producing text → always returned empty. Now gets 5 turns to explore repo, read AGENTS.md/briefing, reason, and respond with structured JSON.
-- Subprocess timeout increased to 600s (was 300s) to accommodate multi-turn agent.
-- **`structured_output` envelope fix** (2026-03-21): When `--json-schema` is passed, Claude CLI returns the result in `structured_output` (not `result`). `_run_provider_command` only checked `result` → fell through → `parse_agent_response` got the raw envelope string → no `diagnosis` key at top level → always empty. Fix: check `structured_output` first, then `result`.
+**Agent provider fixes (2026-03-21):**
+
+*Bug 4 — `--max-turns 1` too restrictive:*
+Claude Code CLI's `--max-turns` controls how many reasoning/tool cycles the agent subprocess gets per invocation (NOT to be confused with `--max-runs` which is our pipeline flag for GPU training runs). With `--max-turns 1`, Claude spent its single turn on a tool call (reading files), got cut off (`"subtype":"error_max_turns"`, `"stop_reason":"tool_use"`), never produced text → always returned empty. Fixed: `--max-turns 5`.
+
+*Bug 5 — `structured_output` envelope extraction:*
+When `--json-schema` is passed, Claude CLI returns the result in `structured_output` field (not `result`). `_run_provider_command` only checked `envelope.get("result")` → fell through → `parse_agent_response` got the raw envelope string (with session_id etc.) → no `diagnosis` key at top level → always empty. Fixed: check `structured_output` first, then `result`.
+
+*Subprocess timeout:* Increased to 600s (was 300s) to accommodate multi-turn agent.
+
+**Agent context injection (2026-03-21):**
+Key insight: `claude -p` is the same Claude model as interactive Claude Code — same reasoning, same capabilities. The gap was purely informational: the subprocess started fresh with only the prompt content, while interactive Claude has full conversation history.
+
+Solution: inject the full AGENTS.md content (complete project history, all 4L results, bug history, decisions, expectations — ~1100 lines) directly into the agent prompt alongside `agent_briefing.md` (HP tuning playbook — 95 lines). This eliminates the need for the agent to spend turns reading files and gives it the same context depth as interactive Claude.
+
+Architecture of a single agent invocation:
+```
+Prompt = task description
+       + current config / run history / diagnostics
+       + agent_briefing.md (HP playbook)
+       + AGENTS.md (full project history)
+       + response format instructions
+```
+
+The agent now has 5 turns purely for reasoning and (if needed) inspecting runtime artifacts like MLflow results or checkpoint files — no turns wasted discovering project context.
+
+**`--max-turns` vs `--max-runs` (important distinction):**
+- `--max-turns N` — Claude CLI flag. How many reasoning/tool cycles the agent *subprocess* gets per invocation. Internal to Claude. Default: 5.
+- `--max-runs N` — Our pipeline flag. How many full *GPU training runs* (each ~2-3 hours) the pipeline attempts before giving up. Default: 3 (MAX_RUNS in c_milestones.py).
+- One pipeline execution with `--max-runs 5` may invoke the agent 4-5 times (once initial + once per failed run), and each invocation gets `--max-turns 5` internally.
+
+**Checkpoint reuse between runs — deliberately NOT done:**
+When the agent adjusts HPs after a failed run, the next run trains from scratch (random init), not from the previous run's best checkpoint. Reasons:
+1. LR schedule (warmup + cosine decay) designed from step 0 — resuming mid-schedule is invalid.
+2. Adam optimizer state calibrated to old LR — new LR + old state = instability.
+3. KL annealing (C1/C3) ramps from 0 — restarting on partially-trained posteriors is wrong.
+4. Confounded results — can't attribute success to new HPs vs head start.
+Exception: C2/C4 deliberately reuse C0/C3 checkpoints (post-hoc methods don't retrain).
 
 **C0 GPU run history (2026-03-16 → 2026-03-21):**
 - Session 1 (2026-03-17): 3 runs, all agent-empty → mechanical fallback only. LR corrupted to 3e-3 via YAML persistence bug. NaN at 50K steps. No progress.
 - Session 2 (2026-03-20): YAML immutability fixed, patience early-stop added, agent briefing system added. 5 runs: agent still returned empty (max-turns=1 too restrictive). Mechanical fallback escalated LR 3e-4→6e-4→1e-3→NaN→doubled steps. ALL runs plateaued at PPL ~1600. Root cause: data bug (token-level shuffle).
-- Session 3 (2026-03-21): Data bug, init scaling, dropout, Flash Attention fixed. Template HPs set (lr=6e-4, warmup=4000, dropout=0.1). Agent max-turns=5. Running.
+- Session 3 (2026-03-21): All bugs fixed. Template HPs (lr=6e-4, warmup=4000, dropout=0.1). **Results: PPL 75 by step 2000, PPL 17 by step 26K.** C0 gate (PPL<80) passed at step 2000. Model still converging. Agent initial call still returned empty (structured_output bug — fixed mid-run, will take effect on next invocation). Training speed: ~167s per 1K steps.
 
-**Current expectations (2026-03-21):**
-- With contiguous text data, the 76M model should learn beyond unigrams. The 4L model on AG News (simpler text, smaller model) achieved PPL=49. A 16L model on Pile should reach PPL < 80 with adequate training.
-- With residual projection scaling, gradient flow through 16 layers should be stable. The init variance is now controlled.
-- With Flash Attention, each training step should be ~2x faster on CUDA (attention is a major bottleneck at seq_len=256 with 8 heads).
-- The agent (with max-turns=5) should now be able to read files and reason. If it still returns empty, further debugging of the Claude CLI interaction is needed.
+**Confirmed results (2026-03-21):**
+- Data fix confirmed: loss dropped below 7.0 by step 1000 (was stuck at 7.37 forever). Sequential text patterns being learned.
+- Residual scaling confirmed: no gradient instability through 16 layers. Smooth convergence.
+- Flash Attention confirmed: training speed ~167s per 1K steps on CUDA.
+- C0 convergence trajectory: PPL 54129 → 329 → 75 → 52 → 37 → 29 → 24 → 21 → 18 → 17 (steps 1 → 1K → 2K → 3K → 4K → 5K → 7K → 12K → 19K → 26K). Flattening around PPL 17, patience may fire in 40-60K range.
+- For reference: 4L model on AG News reached PPL=49. 16L on Pile reaching PPL ~17 is expected — bigger model, more data, longer training.
 
 **Ideas considered but deferred:**
 
@@ -1080,16 +1115,13 @@ Additional pipeline hardening applied alongside the bug fixes:
 
 **Next steps — ordered plan:**
 
-1. **Monitor C0 Session 3 run** (in progress). Key checkpoints:
-   - Does loss drop below 7.0 by step 1000? (confirms data fix working — sequential patterns being learned)
-   - Does agent return non-empty responses? (confirms max-turns=5 fix)
-   - Does PPL reach <80 by step 100K? (C0 gate)
-2. **If C0 passes:** Delete stale YAML, run C1 (variational FFN) — `python experiments/c_pipeline.py --milestone c1 --provider claude --provider-model sonnet --initial-agent --max-runs 5`.
-3. **If agent still returns empty:** Debug Claude CLI interaction further. Check raw stdout for `result` field content with max-turns=5. Consider `--allowedTools` to restrict tool set, or switch to Anthropic API provider.
-4. **If C0 fails but loss is improving** (e.g., PPL 200 at patience): Good sign — model is learning. Agent should diagnose and adjust. Monitor agent quality.
-5. **If C0 loss still stuck at ~7.37:** Investigate further — check cached `.pt` files aren't stale (delete `data/pile/*.pt` and re-download), verify tokenizer output manually, test 16L model on AG News as control.
-6. **After C0+C1 pass:** Run C2 (Laplace on C0 checkpoint), C3 (BLoB LoRA), C4 (TFB/Laplace-LoRA). These are the 2x2 matrix at 16L scale.
-7. **After all C milestones:** Generate comparison report (`--compare`). Write up Table 2 for the paper. Analyze which methods scale.
+1. **C0 Session 3 completing** (in progress, PPL ~17 and improving). C0 gate (PPL<80) already passed. Wait for run to finish or patience-stop.
+2. **Verify agent works:** On next pipeline invocation (C1), the `structured_output` fix + AGENTS.md injection will be active. First real test of intelligent agent reasoning. Monitor diagnosis/reasoning quality.
+3. **Run C1** (variational FFN): `python experiments/c_pipeline.py --milestone c1 --provider claude --provider-model sonnet --initial-agent --max-runs 5`. Gate: mi_ratio_mean > 1.2. At 4L this achieved 1.43x — expect similar or better at 16L.
+4. **Run C2** (Laplace on C0 checkpoint): Record-only, single run. Expected negative result (diagonal curvature too flat — same as B1 at 4L).
+5. **Run C3** (BLoB LoRA): Gate: mi_ratio_mean > 1.05. At 4L this achieved 1.13x.
+6. **Run C4-TFB and C4-LAP** (post-hoc on C3 checkpoint): Record-only. TFB expected positive (1.10x at 4L), LAP expected negative.
+7. **Generate comparison report:** `python experiments/c_pipeline.py --compare`. Write up Table 2 for the paper.
 
 ### Paper Structure
 Table 1: 4L results (existing). Table 2: 16L results (C milestone). Analysis: which methods scale? Which findings transfer? The 2×2 matrix at two scales gives a clean, publishable comparison.
