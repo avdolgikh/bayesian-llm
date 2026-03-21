@@ -200,9 +200,10 @@ def load_pile_data(cfg: dict, tokenizer) -> dict[str, torch.Tensor]:
         for domain in id_domains
     ]
     all_id = torch.cat(id_tensors)
-    gen = torch.Generator()
-    gen.manual_seed(seed)
-    all_id = all_id[torch.randperm(len(all_id), generator=gen)]
+    # NOTE: Do NOT shuffle tokens — randperm on a flat token tensor
+    # destroys all sequential structure and reduces the model to
+    # learning only unigram frequencies.  Documents are already
+    # shuffled in _load_domain_cached() via stream.shuffle().
     train_end = int(len(all_id) * (1 - val_fraction - test_fraction))
     val_end = int(len(all_id) * (1 - test_fraction))
     result: dict[str, torch.Tensor] = {

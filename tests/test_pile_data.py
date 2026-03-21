@@ -94,9 +94,7 @@ def expected_id_splits(
     display_names = [PILE_DOMAIN_NAMES[d] for d in id_domains]
     tensors = [expected_domain_tokens(name, seed, id_tokens) for name in display_names]
     all_tokens = torch.cat(tensors)
-    gen = torch.Generator()
-    gen.manual_seed(seed)
-    all_tokens = all_tokens[torch.randperm(len(all_tokens), generator=gen)]
+    # No token-level shuffle — documents are already shuffled during loading
     train_end = int(len(all_tokens) * (1 - val_fraction - test_fraction))
     val_end = int(len(all_tokens) * (1 - test_fraction))
     return all_tokens[:train_end], all_tokens[train_end:val_end], all_tokens[val_end:]
@@ -553,19 +551,26 @@ class TestPileReproducibility:
         assert torch.equal(result_a["test_id"], result_b["test_id"])
         assert torch.equal(result_a["test_ood_arxiv"], result_b["test_ood_arxiv"])
 
-    def test_pile_different_seed_changes_id_split_order(
+    def test_pile_splits_are_contiguous_not_shuffled(
         self,
         tokenizer,
         pile_data_dir,
         mock_pile_dataset,
     ):
-        cfg_a = make_pile_config(id_tokens=36, ood_tokens=14, seed=11)
-        cfg_b = make_pile_config(id_tokens=36, ood_tokens=14, seed=12)
-
-        result_a = data_module.load_pile_data(cfg_a, tokenizer)
-        result_b = data_module.load_pile_data(cfg_b, tokenizer)
-
-        assert not torch.equal(result_a["train"], result_b["train"])
+        """Verify that train/val/test_id are contiguous slices
+        (no token-level shuffle that would destroy sequential structure)."""
+        cfg = make_pile_config(id_tokens=36, ood_tokens=14, seed=11)
+        result = data_module.load_pile_data(cfg, tokenizer)
+        # Reconstruct full ID tensor from splits
+        reconstructed = torch.cat([
+            result["train"], result["val"], result["test_id"],
+        ])
+        # Should be identical to raw concatenation (no permutation)
+        expected_train, expected_val, expected_test = expected_id_splits(
+            ["wikipedia_en"], 11, 36, 0.1, 0.1,
+        )
+        expected_all = torch.cat([expected_train, expected_val, expected_test])
+        assert torch.equal(reconstructed, expected_all)
 
 
 class TestPileProgressReporting:

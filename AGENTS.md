@@ -14,7 +14,7 @@ The core idea: replace point-estimate weights with learned posterior distributio
 minigpt/          # Python package — all model code
   model.py        # MiniGPT architecture (deterministic + selective Bayesian)
   layers.py       # Bayesian layers (BayesianLinear, context managers, sigma stats)
-  data.py         # Dataset loading + BPE tokenization — TinyShakespeare, AG News
+  data.py         # Dataset loading + BPE tokenization — TinyShakespeare, AG News, Pile
   train.py        # Training loop (cross-entropy + ELBO)
   evaluate.py     # Perplexity, text generation
   config.py       # YAML config ↔ dataclass bridge
@@ -1010,11 +1010,86 @@ AG News (~5M tokens) is structurally inadequate for 76M params. Using The Pile (
 - **`--max-runs` CLI param** (`c_pipeline.py`): Configurable max runs per milestone (default from `MAX_RUNS` constant, currently 3). Record-only milestones (c2/c4) always stay at 1.
 - **C-scale eval intervals** (`c_milestones.py`): `eval_interval=1000`, `checkpoint_interval=5000` in C0_TEMPLATE (was 200/500 from DEFAULT_CONFIG — too frequent for 100K+ step runs).
 
-**C0 GPU run history (2026-03-16 → 2026-03-20):**
-- Session 1 (2026-03-17): 3 runs, all agent-empty → mechanical fallback only. LR corrupted to 3e-3 via YAML persistence bug. NaN at 50K steps. No progress.
-- Session 2 (2026-03-20): All bugs fixed. Clean rerun pending with `--initial-agent --max-runs 5`.
+**Critical bugs found and fixed (2026-03-21):**
 
-**Next: Run C0 with working agent** — `python experiments/c_pipeline.py --milestone c0 --provider claude --provider-model sonnet --initial-agent --max-runs 5`.
+Three bugs prevented C0 from learning beyond unigram token frequencies (PPL stuck at ~1600 across all 5 runs, regardless of LR/steps/warmup).
+
+*Bug 1 — Token-level shuffle destroyed training data (CRITICAL):*
+`minigpt/data.py:205` had `all_id = all_id[torch.randperm(len(all_id))]`. This shuffled 200M **individual tokens** into random positions. Every 256-token training window became random gibberish — the model could only learn which tokens are frequent (unigram distribution), never what comes next. The observed loss=7.37 / PPL=1600 is exactly the unigram entropy of a GPT-2 BPE vocabulary on English text. **Intent:** mix Wikipedia + StackExchange domains so train/val/test splits are representative. **Reality:** documents were already shuffled during HuggingFace streaming (`stream.shuffle(buffer_size=10_000)` in `_load_domain_cached`). The `randperm` was redundant and destructive. Contrast with AG News (`prepare_agnews_data`): shuffles **articles** (line 101), not tokens — sequential structure preserved within documents. **Fix:** removed the `randperm` line entirely. Updated corresponding test helper `expected_id_splits()` in `tests/test_pile_data.py`.
+
+*Bug 2 — Missing residual projection scaling (SIGNIFICANT):*
+`minigpt/model.py:_init_weights` used flat `std=0.02` for ALL `nn.Linear` layers. GPT-2 and nanoGPT scale residual output projections (`CausalSelfAttention.proj`, `MLP.proj`) by `1/sqrt(2*n_layer)` to prevent signal variance from growing with depth. At 16 layers (32 residual additions), projection init should be `std ≈ 0.02/sqrt(32) ≈ 0.0035` — a 5.7x difference. Without this, deep models suffer from activation variance blowup, leading to saturated softmax, degraded gradient flow, and collapse toward unigram predictions. At 4 layers (8 additions), the effect is mild and tolerable; at 16 layers, it's damaging. **Fix:** added `_scale_proj()` helper that handles `DeterministicLinear` (`.linear.weight`), `BayesianLinear` (`.weight_mu`), and raw `nn.Linear` (`.weight`). Applied to both `attn.proj` and `mlp.proj` in every block after `self.apply(self._init_weights)`.
+
+*Bug 3 — Dropout 0.2 too aggressive for 16 layers (MODERATE):*
+C0 inherited `dropout=0.2` from `DEFAULT_CONFIG` (designed for 4L AG News). With 16 layers and dropout at 5 points per layer (3 in attention + 1 in MLP + 1 at embedding), gradient signal through the MLP residual path retains only `(0.8)^16 ≈ 2.8%` — extreme regularization. GPT-2 small (12L/117M) uses `dropout=0.1`. On a 100M-token Pile corpus, overfitting is not a concern for a 76M model. **Fix:** C0 template now explicitly sets `dropout=0.1`.
+
+**Architecture improvement — Flash Attention (2026-03-21):**
+Replaced manual attention computation in `CausalSelfAttention.forward()` with `F.scaled_dot_product_attention(q, k, v, is_causal=True)`. This is PyTorch 2.0+'s built-in SDPA which dispatches to Flash Attention kernels on CUDA. Benefits: (1) 2-4x faster attention, (2) O(N) memory instead of O(N²), (3) no manual causal mask buffer needed. The `mask` buffer and `attn_dropout` layer are removed — SDPA handles both internally via `is_causal=True` and `dropout_p` parameter. Not an architectural change — same computation, optimized implementation. Tests passed and got slightly faster (3.92s vs 4.15s).
+
+**Pipeline improvements — automated diagnosis (2026-03-21):**
+
+Additional pipeline hardening applied alongside the bug fixes:
+
+- **Patience min_delta** (`train.py`): 0.1% relative improvement threshold. Noise-level improvements (val loss improving by 0.007 over 4000 steps) no longer reset the patience counter. Saves ~30 min of wasted GPU time per plateau.
+- **Eval history in metadata** (`train.py`): Training loop now collects `{step, val_loss, train_loss, lr}` at every eval point and returns it in metadata. Pipeline builds a sampled loss curve summary for the agent prompt, including "90% of improvement happened by step X (Y% of training)" convergence analysis.
+- **Fast NaN detection** (`train.py`): `torch.isnan(loss)` checked every step, not just at eval_interval. Saves up to 3.5 min of wasted GPU time per NaN event. Also guards `load_checkpoint(best_path)` against FileNotFoundError if NaN occurs before any checkpoint is saved.
+- **`steps_completed` in metadata** (`train.py`): Exact step count when training stopped. Pipeline includes it in the result dict for convergence analysis.
+- **Effective params in result** (`pipeline_runner.py`): Agent sees the actual lr/warmup/bs/dropout/grad_accum used, not just the override diff.
+- **Training scale in initial prompt** (`pipeline_runner.py`): Computed effective batch size, tokens/step, total tokens, data passes — helps agent reason about whether training scale is adequate.
+- **Gap severity classification** (`pipeline_runner.py`): PPL gap labels — EXTREME (>10x), LARGE (>3x), MODERATE (>1.5x), CLOSE (<1.5x) — with actionable guidance.
+- **Wasted training detection** (`pipeline_runner.py`): If >50% of completed steps were post-best with no meaningful improvement, diagnostic explicitly warns "model is stuck."
+- **Smarter C0 mechanical fallback** (`pipeline_runner.py`): When patience fires → increase LR (model is stuck in local minimum). When all steps complete → increase steps. Old behavior (always double steps regardless of stop reason) was wrong for plateaus.
+- **Resilient knob validation** (`pipeline_runner.py`): Unknown knobs from agent are warned and skipped (not raised). Out-of-range values are clamped to bounds. One bad key from agent no longer kills the entire adjustment.
+- **Empty adjustment fallback** (`pipeline_runner.py`): If `_validate_adjustment` strips all agent knobs (all unknown), falls back to mechanical instead of applying empty config.
+- **Repeat detection** (`pipeline_runner.py`): If agent suggests identical params to previous run, augments with mechanical fallback to avoid wasting a run.
+- **Agent briefing enhanced** (`agent_briefing.md`): Expanded plateau guidance (most common failure mode), convergence-aware decision rules ("patience + best_step < 20% → increase LR").
+
+**C0 template HP changes (2026-03-21):**
+- `lr: 6e-4` (was 3e-4 from DEFAULT_CONFIG). GPT-2 small used 2.5e-4 with 64x larger effective batch. Our small batch (32 sequences) benefits from higher peak LR.
+- `warmup_steps: 4000` (was 2000). 4% of total steps — proportional to LR increase. Prevents NaN from aggressive early gradient steps.
+- `dropout: 0.1` (was 0.2). GPT-2 standard for this depth.
+
+**Agent provider fix (2026-03-21):**
+- `--max-turns 5` (was 1). With `--max-turns 1`, Claude Code spent its single turn on a tool call (reading files), got cut off before producing text → always returned empty. Now gets 5 turns to explore repo, read AGENTS.md/briefing, reason, and respond with structured JSON.
+- Subprocess timeout increased to 600s (was 300s) to accommodate multi-turn agent.
+- **`structured_output` envelope fix** (2026-03-21): When `--json-schema` is passed, Claude CLI returns the result in `structured_output` (not `result`). `_run_provider_command` only checked `result` → fell through → `parse_agent_response` got the raw envelope string → no `diagnosis` key at top level → always empty. Fix: check `structured_output` first, then `result`.
+
+**C0 GPU run history (2026-03-16 → 2026-03-21):**
+- Session 1 (2026-03-17): 3 runs, all agent-empty → mechanical fallback only. LR corrupted to 3e-3 via YAML persistence bug. NaN at 50K steps. No progress.
+- Session 2 (2026-03-20): YAML immutability fixed, patience early-stop added, agent briefing system added. 5 runs: agent still returned empty (max-turns=1 too restrictive). Mechanical fallback escalated LR 3e-4→6e-4→1e-3→NaN→doubled steps. ALL runs plateaued at PPL ~1600. Root cause: data bug (token-level shuffle).
+- Session 3 (2026-03-21): Data bug, init scaling, dropout, Flash Attention fixed. Template HPs set (lr=6e-4, warmup=4000, dropout=0.1). Agent max-turns=5. Running.
+
+**Current expectations (2026-03-21):**
+- With contiguous text data, the 76M model should learn beyond unigrams. The 4L model on AG News (simpler text, smaller model) achieved PPL=49. A 16L model on Pile should reach PPL < 80 with adequate training.
+- With residual projection scaling, gradient flow through 16 layers should be stable. The init variance is now controlled.
+- With Flash Attention, each training step should be ~2x faster on CUDA (attention is a major bottleneck at seq_len=256 with 8 heads).
+- The agent (with max-turns=5) should now be able to read files and reason. If it still returns empty, further debugging of the Claude CLI interaction is needed.
+
+**Ideas considered but deferred:**
+
+| Idea | Why not now | When |
+|------|-----------|------|
+| RoPE position encoding | User decision: "keep miniGPT basic." Learned absolute positions are adequate for block_size=256. | Future work |
+| RMSNorm | ~10-15% speedup in norm ops, but pre-norm LayerNorm is correct and stable. Not a bottleneck. | Future work |
+| SwiGLU activation | Better than GELU but adds complexity (3 weight matrices vs 2 in MLP). Not critical for research conclusions. | Future work |
+| GQA (grouped-query attention) | Only matters at scale (>1B params) or very long sequences. 8 heads at 512d is fine. | Future work |
+| KV-cache for generation | Only helps qualitative eval (token-by-token generation). Qualitative suite is <1% of total runtime. | Future work |
+| Gradient checkpointing | GPU profiling showed 46% VRAM usage for deterministic 16L. Plenty of headroom. Not needed. | If OOM |
+| Anthropic API provider | Direct SDK call (no tools, no CLI overhead). Considered as fix for agent-empty issue. User prefers Claude Code CLI as smart multi-turn agent. | If agent still fails |
+| Document-level interleaving for Pile splits | Currently train/val/test are contiguous slices of concatenated domains. Wikipedia tokens come first, then StackExchange. A document-level interleave would give each split a mix of both domains. Low priority — the model will learn from whatever text it sees, and domain mixing mainly affects eval representativeness. | After C0 passes |
+
+**Next steps — ordered plan:**
+
+1. **Monitor C0 Session 3 run** (in progress). Key checkpoints:
+   - Does loss drop below 7.0 by step 1000? (confirms data fix working — sequential patterns being learned)
+   - Does agent return non-empty responses? (confirms max-turns=5 fix)
+   - Does PPL reach <80 by step 100K? (C0 gate)
+2. **If C0 passes:** Delete stale YAML, run C1 (variational FFN) — `python experiments/c_pipeline.py --milestone c1 --provider claude --provider-model sonnet --initial-agent --max-runs 5`.
+3. **If agent still returns empty:** Debug Claude CLI interaction further. Check raw stdout for `result` field content with max-turns=5. Consider `--allowedTools` to restrict tool set, or switch to Anthropic API provider.
+4. **If C0 fails but loss is improving** (e.g., PPL 200 at patience): Good sign — model is learning. Agent should diagnose and adjust. Monitor agent quality.
+5. **If C0 loss still stuck at ~7.37:** Investigate further — check cached `.pt` files aren't stale (delete `data/pile/*.pt` and re-download), verify tokenizer output manually, test 16L model on AG News as control.
+6. **After C0+C1 pass:** Run C2 (Laplace on C0 checkpoint), C3 (BLoB LoRA), C4 (TFB/Laplace-LoRA). These are the 2x2 matrix at 16L scale.
+7. **After all C milestones:** Generate comparison report (`--compare`). Write up Table 2 for the paper. Analyze which methods scale.
 
 ### Paper Structure
 Table 1: 4L results (existing). Table 2: 16L results (C milestone). Analysis: which methods scale? Which findings transfer? The 2×2 matrix at two scales gives a clean, publishable comparison.
@@ -1023,8 +1098,9 @@ Table 1: 4L results (existing). Table 2: 16L results (C milestone). Analysis: wh
 
 ## Future Work (Parked)
 Non-Bayesian improvements:
-- RoPE, SwiGLU, KV-cache
+- RoPE, SwiGLU, KV-cache, RMSNorm, GQA
 - Mixed precision: **DONE** (AMP auto-enabled)
+- Flash Attention: **DONE** (`F.scaled_dot_product_attention`, 2026-03-21)
 
 ## References
 - **BLoB** (NeurIPS 2024) — Bayesian LoRA by backprop. [arXiv:2406.11675](https://arxiv.org/abs/2406.11675)

@@ -13,6 +13,18 @@ from minigpt.layers import (
 )
 
 
+def _scale_proj(module: nn.Module, std: float) -> None:
+    """Re-init a residual output projection with scaled std."""
+    if hasattr(module, "linear"):
+        # DeterministicLinear wrapper
+        nn.init.normal_(module.linear.weight, mean=0.0, std=std)
+    elif hasattr(module, "weight_mu"):
+        # BayesianLinear — scale the mean initialisation
+        nn.init.normal_(module.weight_mu, mean=0.0, std=std)
+    elif hasattr(module, "weight"):
+        nn.init.normal_(module.weight, mean=0.0, std=std)
+
+
 @dataclass
 class GPTConfig:
     vocab_size: int
@@ -38,11 +50,8 @@ class CausalSelfAttention(nn.Module):
         self.k_proj = make_linear(config.n_embd, config.n_embd, no_bayes, bias=config.bias)
         self.v_proj = make_linear(config.n_embd, config.n_embd, bayes_v, bias=config.bias)
         self.proj = make_linear(config.n_embd, config.n_embd, no_bayes, bias=config.bias)
-        self.attn_dropout = nn.Dropout(config.dropout)
         self.resid_dropout = nn.Dropout(config.dropout)
-
-        mask = torch.tril(torch.ones(config.block_size, config.block_size))
-        self.register_buffer("mask", mask.view(1, 1, config.block_size, config.block_size))
+        self.dropout_p = config.dropout
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         bsz, seq_len, embd = x.size()
@@ -53,12 +62,12 @@ class CausalSelfAttention(nn.Module):
         k = k.view(bsz, seq_len, self.config.n_head, self.head_size).transpose(1, 2)
         v = v.view(bsz, seq_len, self.config.n_head, self.head_size).transpose(1, 2)
 
-        att = (q @ k.transpose(-2, -1)) / (self.head_size**0.5)
-        att = att.masked_fill(self.mask[:, :, :seq_len, :seq_len] == 0, float("-inf"))
-        att = F.softmax(att, dim=-1)
-        att = self.attn_dropout(att)
-
-        y = att @ v
+        # Flash Attention via PyTorch SDPA — 2-4x faster, O(N) memory
+        y = F.scaled_dot_product_attention(
+            q, k, v,
+            is_causal=True,
+            dropout_p=self.dropout_p if self.training else 0.0,
+        )
         y = y.transpose(1, 2).contiguous().view(bsz, seq_len, embd)
         y = self.resid_dropout(self.proj(y))
         return y
@@ -122,6 +131,12 @@ class MiniGPT(nn.Module):
             self.lm_head.linear.weight = self.token_emb.weight
 
         self.apply(self._init_weights)
+        # GPT-2 residual projection scaling: 1/sqrt(2*n_layer)
+        # Prevents variance growth through deep residual streams
+        proj_std = 0.02 / (2 * config.n_layer) ** 0.5
+        for block in self.blocks:
+            _scale_proj(block.attn.proj, proj_std)
+            _scale_proj(block.mlp.proj, proj_std)
 
     def _init_weights(self, module: nn.Module) -> None:
         if isinstance(module, nn.Linear):

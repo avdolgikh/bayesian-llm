@@ -265,10 +265,20 @@ def train(
                 else:
                     loss = ce_loss / accum_steps
 
+            # Fast NaN check — avoid wasting steps on corrupted
+            # gradients (full eval NaN check only at eval_interval)
+            if torch.isnan(loss):
+                print(f"  -> NaN loss at step {step}, stopping early")
+                early_stop_reason = "nan"
+                break
+
             if scaler is not None:
                 scaler.scale(loss).backward()
             else:
                 loss.backward()
+
+        if early_stop_reason == "nan":
+            break
 
         if scaler is not None:
             scaler.unscale_(optimizer)
@@ -378,8 +388,11 @@ def train(
             print(f"  -> checkpoint saved: {ckpt_path}")
 
     # Reload best checkpoint for downstream use
-    print(f"  -> reloading best checkpoint (val loss {best_val_loss:.4f}): {best_path}")
-    load_checkpoint(best_path, model)
+    if best_path.exists():
+        print(f"  -> reloading best checkpoint (val loss {best_val_loss:.4f}): {best_path}")
+        load_checkpoint(best_path, model)
+    else:
+        print("  -> no best checkpoint saved (training stopped too early)")
 
     steps_completed = step if early_stop_reason else cfg.steps
     train_time = time.time() - start

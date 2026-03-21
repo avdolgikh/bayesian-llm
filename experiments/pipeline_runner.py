@@ -221,10 +221,28 @@ class PipelineRunnerBase:
             adjustment = agent_response.get("adjustment", {})
             if adjustment:
                 adjustment = self._validate_adjustment(adjustment)
-            else:
-                print("WARNING: Agent returned empty adjustment, using mechanical fallback")
+            if not adjustment:
+                print(
+                    "WARNING: Agent returned empty/invalid "
+                    "adjustment, using mechanical fallback"
+                )
                 adjustment = self._mechanical_fallback(cfg, result)
                 self._log_fallback(adjustment)
+            # Detect if agent is repeating the same overrides
+            candidate = {**overrides, **adjustment}
+            prev_overrides = (
+                state["runs"][-1].get("config_overrides", {})
+                if state["runs"] else {}
+            )
+            if candidate == prev_overrides and adjustment:
+                print(
+                    "WARNING: Agent suggested identical params "
+                    "to previous run. Augmenting with mechanical "
+                    "fallback."
+                )
+                fallback = self._mechanical_fallback(cfg, result)
+                adjustment.update(fallback)
+                self._log_fallback(fallback)
             run_record["decision"] = "retry"
             overrides.update(adjustment)
             self._persist(state, pipeline_state)
@@ -642,6 +660,18 @@ class PipelineRunnerBase:
         data = cfg.get("data", {})
         model = cfg.get("model", {})
         briefing = self._load_agent_briefing()
+
+        # Compute training scale for agent reasoning
+        bs = train.get("batch_size", 16)
+        accum = train.get("gradient_accumulation_steps", 1)
+        block = train.get("block_size", 256)
+        steps = train.get("steps", 100_000)
+        eff_batch = bs * accum
+        tokens_per_step = eff_batch * block
+        total_tokens = tokens_per_step * steps
+        id_tokens = data.get("pile_id_tokens", 100_000_000)
+        data_passes = total_tokens / id_tokens if id_tokens else 0
+
         return (
             "You are a research assistant planning the FIRST "
             "run of a Bayesian LLM experiment.\n"
@@ -651,19 +681,26 @@ class PipelineRunnerBase:
             f"{self.policy.gate_description_for(self.milestone)}\n"
             "\n"
             "Current template defaults:\n"
-            f"  train.steps: {train.get('steps')}\n"
+            f"  train.steps: {steps}\n"
             f"  train.lr: {train.get('lr')}\n"
             f"  train.warmup_steps: {train.get('warmup_steps')}\n"
-            f"  train.batch_size: {train.get('batch_size')}\n"
-            f"  train.gradient_accumulation_steps: "
-            f"{train.get('gradient_accumulation_steps')}\n"
+            f"  train.batch_size: {bs}\n"
+            f"  train.gradient_accumulation_steps: {accum}\n"
             f"  model.dropout: {model.get('dropout')}\n"
             f"  model.n_layer: {model.get('n_layer')}\n"
             f"  model.n_head: {model.get('n_head')}\n"
             f"  model.n_embd: {model.get('n_embd')}\n"
             f"  data.dataset: {data.get('dataset')}\n"
             f"  data.pile_id_domains: {data.get('pile_id_domains')}\n"
-            f"  data.pile_id_tokens: {data.get('pile_id_tokens')}\n"
+            f"  data.pile_id_tokens: {id_tokens}\n"
+            "\n"
+            "Derived training scale:\n"
+            f"  effective_batch_size: {eff_batch} "
+            f"({bs} × {accum})\n"
+            f"  tokens_per_step: {tokens_per_step:,}\n"
+            f"  total_training_tokens: {total_tokens:,}\n"
+            f"  data_passes: {data_passes:.1f}x over "
+            f"{id_tokens:,} ID tokens\n"
             "\n"
             f"Tunable knobs (name: [min, max]):\n{knob_lines}\n"
             "\n"
@@ -673,23 +710,31 @@ class PipelineRunnerBase:
             f"{briefing}\n"
             "=== END REFERENCE ===\n"
             "\n"
-            "This is the FIRST run. No history yet. "
-            "Reason about the optimal starting parameters:\n"
-            "- How many steps does a 76M-param model need "
-            "to reach PPL < 80 on this corpus?\n"
-            "- What LR and warmup ratio will converge "
-            "reliably without NaN?\n"
-            "- Should any defaults be changed?\n"
+            "This is the FIRST run. No history yet.\n"
             "\n"
-            "If the defaults look good, return an empty "
-            "adjustment {}. Otherwise, return the knobs "
-            "you want to change.\n"
+            "Think step by step as a deep learning researcher:\n"
+            "1. For a 76M-param GPT on this corpus, what LR "
+            "and schedule will converge to PPL < 80?\n"
+            "2. Compare the defaults to GPT-2-small "
+            "(117M, lr=2.5e-4, warmup=2000, batch=512). "
+            "Our batch is much smaller — should LR be higher?\n"
+            "3. Is dropout appropriate for this depth?\n"
+            "4. Are 100K steps sufficient given the "
+            "tokens/step and data volume?\n"
             "\n"
-            "Return ONLY a raw JSON object (no markdown, "
-            "no prose) with exactly this shape:\n"
-            '{"diagnosis": "analysis of template defaults",'
-            ' "reasoning": "why these starting params are '
-            'optimal",'
+            "Read AGENTS.md in this repo for full experiment "
+            "history, 4-layer reference results, and prior "
+            "bugs. Use that context to make informed "
+            "decisions.\n"
+            "\n"
+            "If the defaults look good, set adjustment to {}. "
+            "Otherwise, specify the knobs to change.\n"
+            "\n"
+            "Respond with a JSON object with this shape:\n"
+            '{"diagnosis": "your analysis of template '
+            'defaults (be specific)",'
+            ' "reasoning": "why you chose these params '
+            '(cite evidence from AGENTS.md or ML literature)",'
             ' "adjustment": {"knob.name": new_value}}\n'
         )
 
@@ -907,19 +952,27 @@ class PipelineRunnerBase:
             f"{briefing}\n"
             "=== END REFERENCE ===\n"
             "\n"
-            "IMPORTANT: You MUST return a non-empty adjustment "
-            "dict with at least one knob change.\n"
-            "Use the diagnostic summary, run history, and "
-            "the HP tuning playbook above to reason about "
-            "WHY the gate failed and WHAT specific parameter "
-            "change will fix it. "
-            "If a previous adjustment didn't help, try a "
-            "different knob or a larger change.\n"
+            "Read AGENTS.md in this repo for full experiment "
+            "history, 4-layer reference results, and known "
+            "failure patterns. Use that context.\n"
             "\n"
-            "Return ONLY a raw JSON object (no markdown, "
-            "no prose) with exactly this shape:\n"
-            '{"diagnosis": "root cause of gate failure",'
-            ' "reasoning": "what to change and expected effect",'
+            "Think step by step as a deep learning researcher:\n"
+            "1. Diagnose the root cause. Look at the loss "
+            "curve, early_stop_reason, steps_completed vs "
+            "steps_planned, and gap severity.\n"
+            "2. Check what was already tried. Do NOT repeat "
+            "an adjustment that failed before.\n"
+            "3. Propose a SPECIFIC fix. Cite evidence from "
+            "the run history or playbook.\n"
+            "\n"
+            "IMPORTANT: You MUST return a non-empty "
+            "adjustment dict with at least one knob change.\n"
+            "\n"
+            "Respond with a JSON object with this shape:\n"
+            '{"diagnosis": "root cause of gate failure '
+            '(be specific, cite metrics)",'
+            ' "reasoning": "what to change and why '
+            '(cite prior results or ML principles)",'
             ' "adjustment": {"knob.name": new_value}}\n'
         )
 

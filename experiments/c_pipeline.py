@@ -111,7 +111,7 @@ class ClaudeProvider:
             "--permission-mode",
             "bypassPermissions",
             "--max-turns",
-            "1",
+            "5",
         ]
         if schema is not None:
             command.extend(["--json-schema", json.dumps(schema)])
@@ -169,10 +169,10 @@ def _run_provider_command(
             capture_output=True,
             check=False,
             env=env,
-            timeout=300,
+            timeout=600,
         )
     except subprocess.TimeoutExpired:
-        raise RuntimeError(f"{provider_name} CLI timed out after 300s")
+        raise RuntimeError(f"{provider_name} CLI timed out after 600s")
     except FileNotFoundError as exc:
         raise RuntimeError(f"{provider_name} CLI not found") from exc
 
@@ -187,18 +187,21 @@ def _run_provider_command(
             f"{provider_name} returned empty output (stderr: {stderr[:500]})"
         )
 
-    # Extract agent text from CLI JSON envelope ({"type":"result","result":"..."})
+    # Extract agent text from CLI JSON envelope.
+    # With --json-schema: {"structured_output": {...}, ...}
+    # Without schema:     {"result": "...", ...}
     print(f"\n[provider] raw stdout ({len(output)} chars): {output[:500]}")
     try:
         envelope = json.loads(output)
-        if isinstance(envelope, dict) and "result" in envelope:
-            result = envelope["result"]
-            # result may be a dict (--json-schema) or a string
-            if isinstance(result, dict):
-                output = json.dumps(result)
-            else:
-                output = str(result)
-            print(f"[provider] extracted result: {output[:500]}")
+        if isinstance(envelope, dict):
+            # Prefer structured_output (--json-schema mode)
+            result = envelope.get("structured_output") or envelope.get("result")
+            if result is not None:
+                if isinstance(result, dict):
+                    output = json.dumps(result)
+                else:
+                    output = str(result)
+                print(f"[provider] extracted result: {output[:500]}")
     except (json.JSONDecodeError, KeyError):
         pass  # Not an envelope, use raw output
 
