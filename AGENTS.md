@@ -31,6 +31,7 @@ experiments/      # Runnable scripts (a0_baseline, a1–a3 Bayesian, b1_laplace_
   pipeline_runner.py   # Generic pipeline engine: PipelineRunnerBase, MilestonePolicy, RuntimeHooks
   c_milestones.py      # C-specific: templates, gates, knobs, comparison report
   c_pipeline.py        # C pipeline CLI: wires hooks+policy, providers, entry point
+  agent_briefing.md    # HP tuning playbook injected into agent prompts (no file reading needed)
 scripts/          # Utilities (dump_mlflow_run, compare_runs, profile_gpu, eval_checkpoint, fit_laplace)
 tests/            # pytest (191 tests: 134 core + 57 pipeline)
 data/             # Local datasets (gitignored)
@@ -950,7 +951,7 @@ AG News (~5M tokens) is structurally inadequate for 76M params. Using The Pile (
 - Pile cache is per-token-target: `data/pile/{domain}_{token_limit}.pt`. Smoke test cached 50K-token files; real C0 (100M tokens) will re-download.
 - 191/191 tests green, ruff clean.
 
-**YAML-centric refactor (2026-03-16):** Pipeline now reads config from YAML files (`configs/{milestone_key}.yaml`) as single source of truth. Agent adjustments are written back to the YAML between runs. Git tracks the final config that produced the result.
+**YAML-centric refactor (2026-03-16):** Pipeline now reads config from YAML files (`configs/{milestone_key}.yaml`) as template baseline. YAML is generated once from Python template; overrides are applied in-memory only (never saved back to YAML).
 - `config_path_fn` parameter on `PipelineRunnerBase` — when set, pipeline loads/saves YAML; when `None` (tests), falls back to programmatic `build_milestone_config`.
 - `save_yaml()` and `apply_dict_overrides()` added to `minigpt/config.py`.
 - `config_path_for()` added to `c_milestones.py` — convention: `configs/{milestone_key}.yaml`.
@@ -960,7 +961,7 @@ AG News (~5M tokens) is structurally inadequate for 76M params. Using The Pile (
 
 **Production fixes (2026-03-16):**
 - `log_perplexity_mlflow` fixed: handles per-domain OOD dict (`{"arxiv": 2245.4, ...}`) not just single float.
-- `MAX_RUNS` bumped to 6 (user change) — agent/no-agent gets 6 attempts per milestone.
+- `MAX_RUNS` set to 3 (default). Overridable via `--max-runs` CLI param. Record-only milestones always 1.
 
 **Known limitations (deferred to production):** `train.steps` range for C1 is `(1, 300K)` — frozen test sends `train.steps=1`, so can't narrow to `(50K, 300K)` without test change. `run_c3_phase1` is a stub returning hardcoded path. `eval_perplexity_suite` expects single OOD tensor — pipeline handles per-domain eval manually.
 
@@ -983,19 +984,37 @@ AG News (~5M tokens) is structurally inadequate for 76M params. Using The Pile (
 - **Agent prompt improved** (`pipeline_runner.py`): Includes knob ranges with `[min, max]`, directive tone ("You MUST return non-empty adjustment"), explicit JSON example, "no markdown, no prose" instruction.
 - **Schema passed** to provider: `_AGENT_RESPONSE_SCHEMA` constant in `pipeline_runner.py`, passed to `run_role(schema=...)`.
 
-*Remaining issues (next session):*
-1. **Claude CLI subprocess timeout** — `claude -p` with `--permission-mode bypassPermissions` takes >120s (reads repo files). Need `--max-turns 1` or higher timeout, or prompt optimization.
-2. **Frozen test breakage** — `test_four_consecutive_failures_mark_milestone_failed` expects MAX_RUNS=4 but now MAX_RUNS=6. Test provides only 4 results → IndexError on run 5. User must decide: revert MAX_RUNS or update test.
-3. **warmup_steps=200 in YAML** — too short for 50K+ step runs. Agent should diagnose this. Mechanical fallback now handles it, but the agent should be the primary diagnoser.
-4. **Config path convention** — renamed from `configs/{milestone_key}_pile.yaml` to `configs/{milestone_key}.yaml` (no suffix). AGENTS.md line 953 still says `_pile.yaml`.
+*Issues from 2026-03-17 — all resolved 2026-03-20:*
+1. ~~Claude CLI subprocess timeout~~ → FIXED: `--max-turns 1` + `timeout=300` + `TimeoutExpired` handling.
+2. ~~Frozen test breakage~~ → FIXED: `test_four_consecutive_failures` updated to match MAX_RUNS (now 3).
+3. ~~warmup_steps=200 in YAML~~ → FIXED: patience early-stop + agent briefing playbook diagnoses this.
+4. ~~Config path convention~~ → Confirmed: `configs/{milestone_key}.yaml` (no `_pile` suffix).
 
-**C0 GPU run history (2026-03-16 → 2026-03-17):**
-- Run 1 (1K steps, 4 min): PPL=1628, gate failed. Agent empty → fallback: steps=50K.
-- Run 2 (50K steps, 3.1 hrs): NaN at step ~1700 (warmup=200 too short). Best PPL=1614 (from pre-NaN checkpoint). Agent empty → fallback: steps=100K.
-- Run 3: not started (pipeline killed).
-- YAML reset to steps=1000/warmup=200 for fresh start.
+**Pipeline improvements — agent intelligence & reliability (2026-03-20):**
 
-**Next: Fix Claude CLI timeout → Re-run C0 with working agent** — `python experiments/c_pipeline.py --milestone c0 --provider claude --provider-model sonnet`. The agent must diagnose warmup/NaN issues and suggest smart HP adjustments.
+*Problem:* Agent always returned empty responses. Pipeline was a glorified mechanical fallback. Three root causes found:
+
+1. **JSON envelope type mismatch** — Claude CLI with `--json-schema` returns `result` as a parsed dict, not a string. Code did `str(envelope["result"])` → Python repr with single quotes → invalid JSON → `parse_agent_response` returned empty. Fix: check `isinstance(result, dict)` → use `json.dumps()`.
+2. **YAML config corruption** — `_build_config_from_yaml` saved overrides back to the YAML file (`save_yaml(yaml_path, cfg)` after applying overrides). Mechanical fallback overrides persisted across runs, corrupting the template (e.g., LR mutated from 3e-4 to 3e-3). Fix: removed `save_yaml` after overrides — overrides are now in-memory only, YAML stays as template baseline.
+3. **Thin agent prompt** — agent only saw raw result JSON and knob ranges. No context about model size, corpus, convergence expectations, or diagnostic reasoning.
+
+*Fixes applied:*
+- **Claude CLI** (`c_pipeline.py`): Added `--max-turns 1` (prevents multi-turn repo exploration), `timeout=300` with `TimeoutExpired` handling. Raw output logging for debugging (`[provider] raw stdout`).
+- **JSON envelope fix** (`c_pipeline.py`): `_run_provider_command` now handles `result` as dict (→ `json.dumps`) or string (→ `str`).
+- **YAML immutability** (`pipeline_runner.py`): Removed `save_yaml` after override application. YAML is generated once from template, never mutated by overrides.
+- **Patience early-stop** (`minigpt/train.py`): New `patience_evals` param (default 10). After warmup, if val loss doesn't improve for N consecutive evals → breaks early with `early_stop_reason="patience"`. Returns `early_stop_reason` in metadata.
+- **Enriched result dict** (`pipeline_runner.py`): `_execute_run` now includes `best_val_step`, `steps_planned`, `early_stop_reason` in result — agent sees step efficiency and why training stopped.
+- **Agent briefing system** (`experiments/agent_briefing.md`): Comprehensive HP tuning playbook loaded into every agent prompt. Contains: project goal, model specs, 4L reference results, symptom→diagnosis→prescription lookup table, known pitfalls, decision rules. Agent doesn't need to read files — entire research brain is in the prompt.
+- **Diagnostic summary** (`pipeline_runner.py`): `_build_diagnostic_summary()` computes and injects: gap analysis (current PPL vs target), step efficiency (best step / planned), early-stop reason with hints, run-over-run deltas showing effect of each adjustment.
+- **Pre-run agent reasoning** (`pipeline_runner.py`): `--initial-agent` flag triggers agent call BEFORE first run. Agent sees template defaults, corpus/model specs, and briefing → reasons about optimal starting params instead of blindly using template defaults.
+- **`--max-runs` CLI param** (`c_pipeline.py`): Configurable max runs per milestone (default from `MAX_RUNS` constant, currently 3). Record-only milestones (c2/c4) always stay at 1.
+- **C-scale eval intervals** (`c_milestones.py`): `eval_interval=1000`, `checkpoint_interval=5000` in C0_TEMPLATE (was 200/500 from DEFAULT_CONFIG — too frequent for 100K+ step runs).
+
+**C0 GPU run history (2026-03-16 → 2026-03-20):**
+- Session 1 (2026-03-17): 3 runs, all agent-empty → mechanical fallback only. LR corrupted to 3e-3 via YAML persistence bug. NaN at 50K steps. No progress.
+- Session 2 (2026-03-20): All bugs fixed. Clean rerun pending with `--initial-agent --max-runs 5`.
+
+**Next: Run C0 with working agent** — `python experiments/c_pipeline.py --milestone c0 --provider claude --provider-model sonnet --initial-agent --max-runs 5`.
 
 ### Paper Structure
 Table 1: 4L results (existing). Table 2: 16L results (C milestone). Analysis: which methods scale? Which findings transfer? The 2×2 matrix at two scales gives a clean, publishable comparison.

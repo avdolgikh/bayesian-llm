@@ -79,6 +79,7 @@ class PipelineRunnerBase:
         run_phase1: Callable[..., str],
         ood_domains: tuple[str, ...],
         config_path_fn: Callable[[str], Path] | None = None,
+        initial_agent: bool = False,
     ) -> None:
         self.repo_root = Path(repo_root)
         self.milestone = milestone
@@ -90,6 +91,7 @@ class PipelineRunnerBase:
         self.policy = policy
         self.hooks = hooks
         self.run_phase1 = run_phase1
+        self.initial_agent = initial_agent
         self.ood_domains = ood_domains
         self.config_path_fn = config_path_fn
 
@@ -109,6 +111,15 @@ class PipelineRunnerBase:
         overrides = self._initial_overrides_from_state(state)
         oom_retries = 0
         max_runs = self.policy.max_runs_for(self.milestone)
+
+        # Pre-run: let agent reason about initial params
+        if not state["runs"] and self.initial_agent and not self.no_agent:
+            initial_cfg = self._build_current_config(
+                overrides, dependency_checkpoint, phase1_checkpoint,
+            )
+            initial_overrides = self._request_initial_params(initial_cfg)
+            if initial_overrides:
+                overrides.update(initial_overrides)
 
         while len(state["runs"]) < max_runs:
             if self._budget_exceeded(pipeline_state, state):
@@ -308,7 +319,6 @@ class PipelineRunnerBase:
         cfg = load_yaml(yaml_path)
         if overrides:
             apply_dict_overrides(cfg, overrides)
-            save_yaml(yaml_path, cfg)
 
         validate_config(cfg)
         return cfg
@@ -354,6 +364,9 @@ class PipelineRunnerBase:
                 "test_id_ppl": ppl_result["test_id_ppl"],
                 "test_ood_ppl": ppl_result.get("test_ood_ppl") or self._empty_ood_result(),
                 "best_val_loss": train_meta["best_val_loss"],
+                "best_val_step": train_meta.get("best_val_step", 0),
+                "steps_planned": cfg["train"].get("steps", 0),
+                "early_stop_reason": train_meta.get("early_stop_reason"),
                 "training_time_seconds": train_meta["train_time_sec"],
             }
 
@@ -577,6 +590,174 @@ class PipelineRunnerBase:
         )
         return self.policy.parse_agent_response(response.output)
 
+    def _load_agent_briefing(self) -> str:
+        briefing_path = Path(__file__).parent / "agent_briefing.md"
+        if briefing_path.exists():
+            return briefing_path.read_text(encoding="utf-8")
+        return ""
+
+    def _request_initial_params(
+        self, cfg: dict[str, Any],
+    ) -> dict[str, Any]:
+        prompt = self._build_initial_prompt(cfg)
+        print(
+            f"\n[provider] pre-run reasoning: "
+            f"provider={self.provider.name}"
+        )
+        try:
+            response = self.provider.run_role(
+                role="researcher",
+                prompt=prompt,
+                repo_root=self.repo_root,
+                schema=_AGENT_RESPONSE_SCHEMA,
+            )
+            parsed = self.policy.parse_agent_response(response.output)
+            self._log_agent_response(parsed)
+            adjustment = parsed.get("adjustment", {})
+            if adjustment:
+                return self._validate_adjustment(adjustment)
+        except Exception as exc:
+            print(f"\nInitial agent call failed: {exc}")
+            print("Using template defaults.")
+        return {}
+
+    def _build_initial_prompt(self, cfg: dict[str, Any]) -> str:
+        knob_family = self.policy.knob_family_for(self.milestone)
+        knobs = self.policy.tunable_knobs.get(knob_family, {})
+        knob_lines = "\n".join(
+            f"  {k}: [{lo}, {hi}]"
+            for k, (lo, hi) in sorted(knobs.items())
+        )
+        train = cfg.get("train", {})
+        data = cfg.get("data", {})
+        model = cfg.get("model", {})
+        briefing = self._load_agent_briefing()
+        return (
+            "You are a research assistant planning the FIRST "
+            "run of a Bayesian LLM experiment.\n"
+            "\n"
+            f"Milestone: {self.milestone}\n"
+            f"Success gate: "
+            f"{self.policy.gate_description_for(self.milestone)}\n"
+            "\n"
+            "Current template defaults:\n"
+            f"  train.steps: {train.get('steps')}\n"
+            f"  train.lr: {train.get('lr')}\n"
+            f"  train.warmup_steps: {train.get('warmup_steps')}\n"
+            f"  train.batch_size: {train.get('batch_size')}\n"
+            f"  train.gradient_accumulation_steps: "
+            f"{train.get('gradient_accumulation_steps')}\n"
+            f"  model.dropout: {model.get('dropout')}\n"
+            f"  model.n_layer: {model.get('n_layer')}\n"
+            f"  model.n_head: {model.get('n_head')}\n"
+            f"  model.n_embd: {model.get('n_embd')}\n"
+            f"  data.dataset: {data.get('dataset')}\n"
+            f"  data.pile_id_domains: {data.get('pile_id_domains')}\n"
+            f"  data.pile_id_tokens: {data.get('pile_id_tokens')}\n"
+            "\n"
+            f"Tunable knobs (name: [min, max]):\n{knob_lines}\n"
+            "\n"
+            "=== REFERENCE: Research context and HP tuning "
+            "playbook (from AGENTS.md and prior experiments) "
+            "===\n"
+            f"{briefing}\n"
+            "=== END REFERENCE ===\n"
+            "\n"
+            "This is the FIRST run. No history yet. "
+            "Reason about the optimal starting parameters:\n"
+            "- How many steps does a 76M-param model need "
+            "to reach PPL < 80 on this corpus?\n"
+            "- What LR and warmup ratio will converge "
+            "reliably without NaN?\n"
+            "- Should any defaults be changed?\n"
+            "\n"
+            "If the defaults look good, return an empty "
+            "adjustment {}. Otherwise, return the knobs "
+            "you want to change.\n"
+            "\n"
+            "Return ONLY a raw JSON object (no markdown, "
+            "no prose) with exactly this shape:\n"
+            '{"diagnosis": "analysis of template defaults",'
+            ' "reasoning": "why these starting params are '
+            'optimal",'
+            ' "adjustment": {"knob.name": new_value}}\n'
+        )
+
+    def _build_diagnostic_summary(self, state: dict[str, Any]) -> str:
+        runs = state.get("runs", [])
+        if not runs:
+            return "No runs yet."
+
+        lines = []
+        gate_desc = self.policy.gate_description_for(self.milestone)
+        latest = runs[-1].get("result", {})
+
+        # Gap analysis
+        ppl = latest.get("test_id_ppl")
+        if ppl is not None:
+            lines.append(f"Current test_id_ppl={ppl:.1f}, target <80, "
+                         f"gap={ppl / 80:.1f}x away.")
+
+        mi = latest.get("mi_ratio_mean")
+        if mi is not None:
+            target = 1.2 if "1.2" in gate_desc else 1.05
+            lines.append(f"Current mi_ratio_mean={mi:.3f}, "
+                         f"target >{target}.")
+
+        # Step efficiency
+        best_step = latest.get("best_val_step", 0)
+        planned = latest.get("steps_planned", 0)
+        if planned > 0 and best_step > 0:
+            util = best_step / planned * 100
+            lines.append(
+                f"Best val loss at step {best_step} of "
+                f"{planned} planned ({util:.0f}% utilization)."
+            )
+
+        # Early stop
+        reason = latest.get("early_stop_reason")
+        if reason == "patience":
+            lines.append(
+                "Training stopped early: loss plateaued "
+                "(patience exhausted). Consider higher LR, "
+                "shorter warmup ratio, or different dropout."
+            )
+        elif reason == "nan":
+            lines.append(
+                "Training stopped early: NaN loss detected. "
+                "LR is likely too high or warmup too short."
+            )
+
+        # Run-over-run deltas
+        if len(runs) >= 2:
+            lines.append("")
+            lines.append("Run-over-run changes:")
+            for i in range(1, len(runs)):
+                prev_r = runs[i - 1].get("result", {})
+                curr_r = runs[i].get("result", {})
+                overrides = runs[i].get("config_overrides", {})
+                prev_ppl = prev_r.get("test_id_ppl")
+                curr_ppl = curr_r.get("test_id_ppl")
+                delta = ""
+                if prev_ppl and curr_ppl:
+                    if curr_ppl < prev_ppl:
+                        delta = (f"PPL {prev_ppl:.0f}->"
+                                 f"{curr_ppl:.0f} (improved)")
+                    elif curr_ppl > prev_ppl:
+                        delta = (f"PPL {prev_ppl:.0f}->"
+                                 f"{curr_ppl:.0f} (regressed)")
+                    else:
+                        delta = f"PPL unchanged at {curr_ppl:.0f}"
+                override_str = ", ".join(
+                    f"{k}={v}" for k, v in overrides.items()
+                )
+                lines.append(
+                    f"  Run {i}->{i + 1}: "
+                    f"changed [{override_str}] -> {delta}"
+                )
+
+        return "\n".join(lines)
+
     def _build_agent_prompt(self, state: dict[str, Any]) -> str:
         knob_family = self.policy.knob_family_for(self.milestone)
         knobs = self.policy.tunable_knobs.get(knob_family, {})
@@ -586,40 +767,49 @@ class PipelineRunnerBase:
         history_lines = []
         for run in state.get("runs", []):
             history_lines.append(
-                f"Run {run['run_number']}: result={json.dumps(run.get('result', {}), indent=2)}\n"
+                f"Run {run['run_number']}: "
+                f"result={json.dumps(run.get('result', {}), indent=2)}\n"
                 f"  overrides={run.get('config_overrides', {})}"
             )
-        history_text = "\n".join(history_lines) if history_lines else "No previous runs."
+        history_text = (
+            "\n".join(history_lines) if history_lines
+            else "No previous runs."
+        )
+        diagnostic = self._build_diagnostic_summary(state)
+        briefing = self._load_agent_briefing()
         return (
-            "You are a research assistant optimizing hyperparameters "
-            "for a Bayesian LLM experiment.\n"
+            "You are a research assistant optimizing "
+            "hyperparameters for a Bayesian LLM experiment.\n"
             "\n"
             f"Milestone: {self.milestone}\n"
-            f"Success gate: {self.policy.gate_description_for(self.milestone)}\n"
-            "\n"
-            "Context: This is a 76M-param transformer (16L/8H/512d) "
-            "training on The Pile.\n"
-            "Typical convergence requires 100K-200K steps. "
-            "If PPL >> 80, the most likely cause is insufficient "
-            "training steps or warmup too short relative to steps "
-            "(recommend ~4% of steps).\n"
+            f"Success gate: "
+            f"{self.policy.gate_description_for(self.milestone)}\n"
             "\n"
             f"Tunable knobs (name: [min, max]):\n{knob_lines}\n"
             "\n"
             f"Run history:\n{history_text}\n"
             "\n"
-            "Read AGENTS.md in this repository for additional context "
-            "about the project.\n"
+            f"Diagnostic summary:\n{diagnostic}\n"
             "\n"
-            "IMPORTANT: You MUST return a non-empty adjustment dict "
-            "with at least one knob change.\n"
-            "Analyze the gap between current results and the success "
-            "gate to determine what to change.\n"
+            "=== REFERENCE: Research context and HP tuning "
+            "playbook (from AGENTS.md and prior experiments) "
+            "===\n"
+            f"{briefing}\n"
+            "=== END REFERENCE ===\n"
             "\n"
-            "Return ONLY a raw JSON object (no markdown, no prose) "
-            "with exactly this shape:\n"
-            '{"diagnosis": "brief description of why the gate failed",'
-            ' "reasoning": "what adjustment will fix it and why",'
+            "IMPORTANT: You MUST return a non-empty adjustment "
+            "dict with at least one knob change.\n"
+            "Use the diagnostic summary, run history, and "
+            "the HP tuning playbook above to reason about "
+            "WHY the gate failed and WHAT specific parameter "
+            "change will fix it. "
+            "If a previous adjustment didn't help, try a "
+            "different knob or a larger change.\n"
+            "\n"
+            "Return ONLY a raw JSON object (no markdown, "
+            "no prose) with exactly this shape:\n"
+            '{"diagnosis": "root cause of gate failure",'
+            ' "reasoning": "what to change and expected effect",'
             ' "adjustment": {"knob.name": new_value}}\n'
         )
 

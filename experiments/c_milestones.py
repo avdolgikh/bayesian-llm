@@ -32,6 +32,8 @@ C0_TEMPLATE = {
         "batch_size": 16,
         "gradient_accumulation_steps": 2,
         "warmup_steps": 2_000,
+        "eval_interval": 1_000,
+        "checkpoint_interval": 5_000,
         "checkpoint_dir": "data/checkpoints/c0",
         "kl_weight": 0.0,
         "kl_annealing_steps": 0,

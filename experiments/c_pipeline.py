@@ -188,10 +188,17 @@ def _run_provider_command(
         )
 
     # Extract agent text from CLI JSON envelope ({"type":"result","result":"..."})
+    print(f"\n[provider] raw stdout ({len(output)} chars): {output[:500]}")
     try:
         envelope = json.loads(output)
         if isinstance(envelope, dict) and "result" in envelope:
-            output = str(envelope["result"])
+            result = envelope["result"]
+            # result may be a dict (--json-schema) or a string
+            if isinstance(result, dict):
+                output = json.dumps(result)
+            else:
+                output = str(result)
+            print(f"[provider] extracted result: {output[:500]}")
     except (json.JSONDecodeError, KeyError):
         pass  # Not an envelope, use raw output
 
@@ -250,6 +257,7 @@ class PipelineRunner(PipelineRunnerBase):
         use_mlflow: bool,
         no_agent: bool = False,
         max_runs: int | None = None,
+        initial_agent: bool = False,
         config_path_fn=None,
     ) -> None:
         hooks = RuntimeHooks(
@@ -284,6 +292,7 @@ class PipelineRunner(PipelineRunnerBase):
             run_phase1=run_c3_phase1,
             ood_domains=OOD_DOMAINS,
             config_path_fn=config_path_fn,
+            initial_agent=initial_agent,
         )
 
 
@@ -312,6 +321,7 @@ def main() -> None:
     parser.add_argument("--state-dir", type=str, default=".pipeline-state")
     parser.add_argument("--no-mlflow", action="store_true")
     parser.add_argument("--no-agent", action="store_true")
+    parser.add_argument("--initial-agent", action="store_true")
     parser.add_argument("--max-runs", type=int, default=None)
     parser.add_argument("--provider-model", type=str, default="sonnet")
     args = parser.parse_args()
@@ -358,6 +368,7 @@ def main() -> None:
         use_mlflow=not args.no_mlflow,
         no_agent=args.no_agent,
         max_runs=args.max_runs,
+        initial_agent=args.initial_agent,
         config_path_fn=lambda mk: config_path_for(mk, REPO_ROOT),
     )
     raise SystemExit(runner.run())

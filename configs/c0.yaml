@@ -30,22 +30,28 @@ model:
   bias: true
   bayes_head:
     enabled: false
+    prior_std: 1.0
+    init_rho: -1.0
   bayes_ffn:
     enabled: false
+    prior_std: 1.0
+    init_rho: -1.0
   bayes_attn_v:
     enabled: false
+    prior_std: 1.0
+    init_rho: -1.0
 train:
-  steps: 10000
+  steps: 100000
   batch_size: 16
   block_size: 256
-  lr: 0.003
+  lr: 0.0003
   weight_decay: 0.1
   warmup_steps: 2000
   min_lr: 1.0e-05
   grad_clip: 1.0
   eval_interval: 1000
   eval_iters: 20
-  checkpoint_interval: 2000
+  checkpoint_interval: 5000
   checkpoint_dir: data/checkpoints/c0
   gradient_accumulation_steps: 2
   kl_weight: 0.0
@@ -62,3 +68,15 @@ eval:
   qualitative_prompts_per_category: 5
   qualitative_max_new_tokens: 100
   qualitative_seed: 42
+tfb:
+  epsilon: 0.1
+  n_search_samples: 10
+  n_anchor_batches: 20
+  search_min: 0.0001
+  search_max: 10.0
+  search_precision: 0.0001
+laplace:
+  damping: 1.0
+  sample_scale: 1.0
+  n_curvature_batches: 20
+  selection_mode: lora
