@@ -172,8 +172,13 @@ def sigma_summary(model: nn.Module) -> dict[str, float]:
     if not all_sigmas:
         return {}
     combined = torch.cat(all_sigmas)
+    # torch.quantile() fails on tensors > 2^24 elements; subsample if needed
     pcts = torch.tensor([0.05, 0.25, 0.75, 0.95], device=combined.device)
-    quantiles = torch.quantile(combined.float(), pcts)
+    if combined.numel() > 2**24:
+        idx = torch.randperm(combined.numel(), device=combined.device)[:2**24]
+        quantiles = torch.quantile(combined[idx].float(), pcts)
+    else:
+        quantiles = torch.quantile(combined.float(), pcts)
     return {
         "sigma_mean": combined.mean().item(),
         "sigma_std": combined.std().item(),

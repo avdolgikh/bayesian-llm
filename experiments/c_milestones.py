@@ -89,7 +89,14 @@ C3_PHASE2_TEMPLATE = deep_merge(
             "batch_size": 32,
             "gradient_accumulation_steps": 1,
             "checkpoint_dir": "data/checkpoints/c3",
-            "kl_weight": 0.2,
+            # LoRA fine-tuning HPs — NOT inherited from C0 pretraining:
+            "lr": 3.0e-4,       # C0 had 6e-4 (pretraining); 3e-4 is standard for LoRA
+            "warmup_steps": 500,  # C0 had 4000 (40% of 10K = too long); 5% is standard
+            "weight_decay": 0.0,  # KL already regularizes; B2 used 0.0
+            "eval_interval": 500,  # Shorter runs need more frequent eval
+            # KL scaling: 1.31M Bayesian params / 80M train tokens = 0.016
+            # vs B2's 163K / 2M = 0.082. kl_weight=1.0 matches B2's effective pressure.
+            "kl_weight": 1.0,
             "kl_annealing_steps": 1_000,
         },
     },

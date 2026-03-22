@@ -910,11 +910,12 @@ AG News (~5M tokens) is structurally inadequate for 76M params. Using The Pile (
 - Token/param ratio: 200M / 76M = 2.6 (vs 0.15 at 4L — much healthier)
 
 ### Sub-Milestones
-- **C0:** Deterministic baseline on Pile ID
-- **C1:** Variational full-weight (A2-equiv), batch=16, accum=2
-- **C2:** Post-hoc Laplace on C0 checkpoint (expected negative)
-- **C3:** BLoB LoRA, batch=32, no accum
-- **C4:** Post-hoc LoRA: TFB + Laplace-LoRA
+- **C0:** Deterministic baseline on Pile ID — **DONE** (PPL 14.3)
+- **C1:** Variational full-weight Bayesian FFN (A2-equiv), batch=16, accum=2 — **DONE** (MI ratio 1.32x)
+- **C2:** Post-hoc Laplace on C0 checkpoint (B1-equiv). Depends on C0. Expected negative.
+- **C3:** BLoB LoRA (B2-equiv), batch=32, no accum. Phase 1 pretrain + Phase 2 BLoB fine-tune. Independent.
+- **C4-TFB:** Post-hoc TFB on C3 checkpoint (B3-TFB-equiv). Depends on C3. Expected positive (~1.10x).
+- **C4-LAP:** Post-hoc Laplace-LoRA on C3 checkpoint (B3-LAP-equiv). Depends on C3. Expected negative.
 
 ### Pipeline — Agentic Experiment Optimization (Auto-Research)
 `experiments/c_pipeline.py` — **autonomous HP optimization pipeline** (the "auto-research" layer). Run AFTER each sub-milestone's method code is implemented and tested via the usual BDD→TDD→Code process. The pipeline is a state machine (CONFIGURE → RUN → ANALYZE → DECIDE) that runs the implemented code, checks success gates, and on failure invokes an **agent via the Provider pattern** (Claude Code / Codex as subprocess — NOT API calls). The agent reads the repo, AGENTS.md, MLflow results, and proposes structured HP adjustments. Uses the same Provider adapter pattern as `vla-game-agent/pipeline`: `ClaudeProvider` → `claude -p`, `CodexProvider` → `codex exec`. **Each milestone is a separate invocation** — no batch mode. Workflow per sub-milestone: `BDD → TDD → Code (all green) → c_pipeline.py --milestone cN (auto-research)`. CLI: `--milestone {c0|c1|c2|c3|c4}`, `--resume <milestone>`, `--compare`, `--provider {claude|codex}`, `--no-agent`, `--dry-run`, `--budget`, `--state-dir`, `--no-mlflow`, `--provider-model`. State in `.pipeline-state/`. Max 4 runs/milestone, 12h GPU budget per milestone. Full spec: `specs/c-pipeline-spec.md`. TDD handoff: `specs/c-pipeline-tdd-handoff.md`.
@@ -1193,19 +1194,134 @@ This validates the pipeline architecture: Claude Code CLI as subprocess with ful
 Total bugs fixed to get agent working: 8 (max-turns, structured_output envelope, YAML persistence, mechanical fallback logic, prompt quality, Windows cmd-line length, charmap encoding, PATH resolution).
 
 **C1 GPU run (2026-03-21):**
-- Session 1: Running. Agent approved template defaults (no adjustments). 109.9M params (76M deterministic + 33.6M Bayesian μ/ρ). ELBO criterion. Initial KL=52.8M (expected: 33.6M elements × ~1.58 nats each). KL contribution to loss at init: kl_scale × KL = (0.1/160M) × 52.8M ≈ 0.033 (tiny vs CE ~10.9). KL will grow as posteriors diverge from prior during training.
+- 109.9M params (76M deterministic + 33.6M Bayesian μ/ρ). ELBO criterion.
+- Agent approved template defaults (no adjustments) — first successful agent reasoning.
+- Training speed: ~205s per 1K steps (1.23x slower than C0's 167s — BayesianLinear overhead modest).
+- KL evolution: 52.82M (step 1) → 52.89M (step 5K, annealing completing) → 54.53M (step 58K). Steady growth indicates posteriors diverging from prior.
+
+*Bug 9 — `torch.quantile()` input tensor too large:*
+`sigma_summary()` concatenates all Bayesian sigma values (33.6M elements) and calls `torch.quantile()`, which fails on tensors > 2^24 (~16.7M) elements. Crashed after MI evaluation completed but before results were saved. Fixed: random subsample to 2^24 elements for quantile computation. Full mean/std/min/max still computed on all elements.
+
+Recovery: loaded best checkpoint, computed sigma stats with fixed code, manually constructed `.pipeline-state/c1.json` from training output. MLflow run `a1071de8e6984a2a8fd612549f7644a0` was left in FAILED status with MI metrics missing (crash happened after MI computation but before MLflow logging). Patched via `mlflow.tracking.MlflowClient`: logged mi_id, mi_ratio per domain, mi_ratio_mean, sigma_std, sigma_mean as metrics; changed status FAILED→FINISHED. All C1 data now consistent across pipeline state, MLflow, and checkpoint.
+
+**C1 FINAL RESULTS (2026-03-21) — PASSED:**
+
+| Metric | Value |
+|--------|-------|
+| Status | completed, Run 1/1 |
+| Best val loss (ELBO) | 3.057 at step 48K |
+| Test ID PPL | **21.9** |
+| Test OOD PPL | arxiv=53.4, freelaw=121.5, pubmed=275.6 |
+| MI ratio | arxiv=1.34x, freelaw=1.28x, pubmed=1.34x |
+| **MI ratio mean** | **1.32x** (gate >1.2 ✓) |
+| Sigma stats | mean=0.123, std=0.016, range=[0.047, 0.243] |
+| Early stop | patience at step 58K (best at 48K) |
+| Training time | 3.3 hours (11,820s) |
+| Checkpoint | `data/checkpoints/c1/ckpt_best.pt` |
+| Pipeline state | `.pipeline-state/c1.json` |
+| MLflow run | `a1071de8e6984a2a8fd612549f7644a0` (patched post-crash) |
+
+Key observations:
+- **MI ratio 1.32x at 16L vs 1.43x at 4L.** The signal is weaker at scale, but still clearly above gate. Possible reasons: (1) kl_weight=0.1 may be slightly conservative — posteriors aren't as differentiated as at 4L with kl_weight=0.2. (2) Pile is more diverse than AG News — OOD distinction is harder. (3) 16L model has more capacity to memorize, reducing the ID/OOD gap.
+- **Posteriors NOT collapsed:** sigma_std=0.016 >> 0.01 threshold. Sigma range [0.047, 0.243] shows meaningful differentiation across layers — some layers learned tighter posteriors (more certain), others wider (less certain).
+- **Test ID PPL 21.9** vs C0's 14.3 — higher as expected. The KL regularization trades CE accuracy for uncertainty estimation. The gap (21.9 vs 14.3) is moderate, suggesting kl_weight=0.1 is well-balanced.
+- **Patience stopped at 58K** (vs C0's 98K) — Bayesian training converges faster in ELBO terms because both CE and KL can improve. 42% of compute saved.
+- **OOD PPL gradient:** arxiv(53.4) < freelaw(121.5) < pubmed(275.6). Same ordering as C0 but with different magnitudes. The model discriminates domains even with Bayesian layers.
+
+Comparison with 4L reference:
+| Metric | 4L A2 | 16L C1 | Notes |
+|--------|-------|--------|-------|
+| MI ratio | 1.43x | 1.32x | Weaker at scale, but above gate |
+| Sigma std | 0.147 | 0.016 | Posteriors less differentiated at 16L |
+| Sigma mean | ~0.13 | 0.123 | Similar starting point |
+| ID PPL | 49 | 21.9 | Better model, more data |
+| kl_weight | 0.2 | 0.1 | Scaled for 2x KL ratio |
 
 **Next steps — ordered plan:**
 
-1. **Monitor C1 Run 1** (in progress). Key checkpoints:
-   - Does CE converge similarly to C0? (confirms Bayesian overhead doesn't break optimization)
-   - Does sigma_std > 0.01? (confirms posteriors are differentiating, not collapsed)
-   - Does mi_ratio_mean > 1.2? (C1 gate)
-   - If gate fails: agent should diagnose (posterior collapse? KL too strong? not enough steps?)
-2. **Run C2** (Laplace on C0 checkpoint): Record-only, single run. Expected negative result (diagonal curvature too flat — same as B1 at 4L).
-3. **Run C3** (BLoB LoRA): Gate: mi_ratio_mean > 1.05. At 4L this achieved 1.13x.
-4. **Run C4-TFB and C4-LAP** (post-hoc on C3 checkpoint): Record-only. TFB expected positive (1.10x at 4L), LAP expected negative.
+Ordering rationale: C4 depends on C3 (needs C3's deterministic LoRA checkpoint from Phase 1). C2 is independent (uses C0 checkpoint, already available). Running C3 first unblocks C4 immediately. C2 can slot in anywhere — it's a quick single run with expected negative result.
+
+1. **Run C3** (BLoB LoRA — variational LoRA, 16L scaled B2):
+   - **What:** Two-phase training. Phase 1: pretrain deterministic model on HackerNews domain (ID for LoRA). Phase 2: inject BLoB LoRA adapters into FFN layers, fine-tune with ELBO loss. `run_c3_phase1` is currently a stub — needs implementation before running.
+   - **Template:** rank=16, alpha=32, init_g=0.1, prior_std=0.2, kl_weight=0.2, steps=10K, bs=32
+   - **Gate:** mi_ratio_mean > 1.05. At 4L B2 achieved 1.13x (weak positive).
+   - **Dependency:** None (standalone). But its checkpoint is needed by C4.
+   - **Command:** `python experiments/c_pipeline.py --milestone c3 --provider claude --provider-model sonnet --initial-agent --max-runs 5`
+2. **Run C2** (Post-hoc Laplace on C0 deterministic checkpoint — 16L scaled B1):
+   - **What:** Take the trained C0 model (76M params, deterministic), fit diagonal Laplace approximation to FFN weights post-hoc (no retraining). Compute Fisher curvature from training data, then sample perturbed weights for MI evaluation.
+   - **Template:** laplace selection_mode=ffn, damping=1.0, sample_scale=1.0, n_curvature_batches=30
+   - **Gate:** Record-only (no gate). Has `should_early_abort`: if curvature_mean < 1e-4 AND mi_ratio_mean < 1.02, abort early.
+   - **Dependency:** C0 checkpoint (`data/checkpoints/c0/ckpt_best.pt`) — already available.
+   - **Expected result:** MI ratio ~1.00x (negative). At 4L B1, diagonal Fisher curvature was too flat at convergence — no OOD signal. Same physics applies at 16L.
+   - **Command:** `python experiments/c_pipeline.py --milestone c2 --provider claude --provider-model sonnet --no-agent`
+3. **Run C4-TFB** (Post-hoc TFB on C3's deterministic LoRA checkpoint — 16L scaled B3-TFB):
+   - **What:** Take C3's Phase 1 checkpoint (deterministic LoRA), apply Training-Free Bayesianization: SVD of LoRA B matrix → variance search → weight sampling.
+   - **Template:** epsilon=0.1, n_search_samples=10, n_anchor_batches=20
+   - **Gate:** Record-only. Always passes (gate returns True).
+   - **Dependency:** C3 Phase 1 checkpoint.
+   - **Expected result:** MI ratio ~1.10x (positive, same as B3-TFB at 4L). TFB succeeds post-hoc because it uses structural SVD information, not curvature.
+4. **Run C4-LAP** (Post-hoc Laplace-LoRA on C3's deterministic LoRA checkpoint — 16L scaled B3-LAP):
+   - **What:** Take C3's Phase 1 checkpoint, fit diagonal Laplace to LoRA parameters.
+   - **Template:** laplace selection_mode=lora, damping=1.0, sample_scale=1.0, n_curvature_batches=30
+   - **Gate:** Record-only. Has `should_early_abort` (same as C2).
+   - **Dependency:** C3 Phase 1 checkpoint.
+   - **Expected result:** MI ratio ~1.00x (negative, same as B3-LAP at 4L). Diagonal curvature fails on LoRA params too.
 5. **Generate comparison report:** `python experiments/c_pipeline.py --compare`. Write up Table 2 for the paper.
+
+**C3 readiness analysis (2026-03-21):**
+
+C3 = BLoB LoRA (variational LoRA fine-tuning). Same 16L/8H/512d architecture, but FFN layers wrapped with BLoBLoRALinear adapters. Base model frozen, only LoRA params trainable. Two-phase: Phase 1 pretrain (reuses C0 checkpoint), Phase 2 BLoB LoRA fine-tune on HackerNews. Gate: mi_ratio_mean > 1.05.
+
+Code changes for C3 support:
+- **`run_c3_phase1` implemented** (`c_pipeline.py`): No longer a stub. Reuses C0 checkpoint (same 16L/8H/512d architecture) — copies `data/checkpoints/c0/ckpt_best.pt` to `data/checkpoints/c3/base/ckpt_best.pt`. Saves ~4.5 hours of redundant pretraining.
+- **`prepare_model` hook** (`pipeline_runner.py`): New optional hook in `RuntimeHooks` (default=None). Called between `setup_model()` and `train()` in `_execute_run()`. For C3: loads base checkpoint, then injects BLoB LoRA adapters. Gracefully skips for test mocks (checks `isinstance(model, nn.Module)`).
+- **`_prepare_model` function** (`c_pipeline.py`): Wired as `prepare_model` hook. If `cfg["train"]["resume_checkpoint"]` exists, loads checkpoint. If `cfg["lora"]` section exists, calls `inject_lora()`.
+
+Parameter counts (rank=16, alpha=32, target=ffn):
+- Total LoRA params: **1,966,080** (1.97M trainable)
+- Bayesian params (lora_A_mu + lora_A_g): **1,310,720** (1.31M)
+- lora_B (deterministic): 655,360
+- Base model: 76.3M (frozen)
+- Compare B2 (4L): 163K Bayesian params (8x fewer)
+
+KL scaling analysis (critical):
+- C3: 1.31M Bayesian elements / 80M train tokens = 0.016 KL/data ratio
+- B2: 163K / 2M = 0.082 KL/data ratio
+- With same kl_weight=0.2: C3 has **5x WEAKER** KL pressure than B2
+- B2 achieved σ_mean=0.0083 (constrained) with its KL pressure. Even weaker KL at C3 would collapse posteriors further.
+- **Fix: kl_weight raised from 0.2 to 1.0** — matches B2's effective KL pressure (verified mathematically)
+
+Template HP fixes (C3_PHASE2_TEMPLATE):
+- `lr: 3e-4` (was 6e-4 inherited from C0 pretraining — too high for fine-tuning)
+- `warmup_steps: 500` (was 4000 = 40% of 10K steps — way too long. B2 used 500 = 5%)
+- `weight_decay: 0.0` (was 0.1 — KL already regularizes. B2 used 0.0)
+- `eval_interval: 500` (was 1000 — shorter runs need more frequent eval)
+- `kl_weight: 1.0` (was 0.2 — increased to match B2's effective KL/data pressure)
+
+C3 template HPs (final):
+- Base: 16L/8H/512d, deterministic base from C0 (frozen)
+- LoRA: rank=16, alpha=32.0, target=ffn, prior_std=0.2, init_g=0.1
+- Training: lr=3e-4, warmup=500, steps=10K, bs=32, accum=1, weight_decay=0.0
+- KL: kl_weight=1.0, kl_annealing_steps=1000
+- Data: HackerNews (ID), arxiv/freelaw/pubmed (OOD), pile_id_tokens=100M
+- dropout=0.1
+
+Smoke test results (2026-03-21):
+- Config generation: all HPs correct ✓
+- Policy functions: gates, dependencies, phase1 — all correct ✓
+- Phase 1 checkpoint reuse: C0 copied to C3/base ✓
+- Full flow (tiny model): checkpoint load → LoRA inject → forward → KL → ELBO → sigma_summary → freeze/unfreeze — all correct ✓
+- No variation at init: expected (lora_B=0 at init, variation emerges during training) ✓
+- CLI --dry-run: correct YAML output ✓
+- 191/191 tests pass, ruff clean ✓
+
+**C3 GPU run (2026-03-21):**
+- Phase 1: C0 checkpoint reused (no additional GPU time).
+- Phase 2: BLoB LoRA fine-tune on HackerNews, 10K steps, bs=32.
+- 78.3M total params (76.3M frozen + 1.97M LoRA trainable, 1.31M Bayesian).
+- Expected training time: ~30-60 min (10K steps at bs=32, LoRA is lighter than full Bayesian).
+- Agent initial reasoning invoked (`--initial-agent`).
+- Watching for: sigma (G²) collapse (σ_mean < 0.001 = bad), MI ratio > 1.05 (gate), patience behavior.
 
 ### Paper Structure
 Table 1: 4L results (existing). Table 2: 16L results (C milestone). Analysis: which methods scale? Which findings transfer? The 2×2 matrix at two scales gives a clean, publishable comparison.

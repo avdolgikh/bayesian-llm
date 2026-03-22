@@ -48,9 +48,10 @@ from experiments.mlflow_utils import (
     mlflow_context,
 )
 from experiments.pipeline_runner import MilestonePolicy, PipelineRunnerBase, RuntimeHooks
-from minigpt.config import build_train_config
+from minigpt.config import build_lora_config, build_train_config
 from minigpt.layers import sigma_summary
-from minigpt.train import train
+from minigpt.lora import inject_lora
+from minigpt.train import load_checkpoint, train
 from minigpt.uncertainty import compute_uncertainty_metrics
 
 
@@ -63,9 +64,73 @@ class _OSProxy:
 os = _OSProxy()
 
 
-def run_c3_phase1(*args, **kwargs) -> str:
-    """Run C3 Phase 1 (pretrain). Returns checkpoint path."""
-    return "data/checkpoints/c3/base/ckpt_best.pt"
+def run_c3_phase1(*, repo_root: Path, state_dir: Path) -> str:
+    """Run C3 Phase 1 (pretrain). Returns checkpoint path.
+
+    C3 Phase 1 = deterministic 16L model on Pile ID domains.
+    This is the same architecture and data as C0, so we reuse the C0
+    checkpoint if available (saves ~4.5 hours of GPU time).
+    """
+    c3_phase1_dir = Path("data/checkpoints/c3/base")
+    c3_phase1_ckpt = c3_phase1_dir / "ckpt_best.pt"
+
+    if c3_phase1_ckpt.exists():
+        print(f"[phase1] C3 Phase 1 checkpoint already exists: {c3_phase1_ckpt}")
+        return str(c3_phase1_ckpt)
+
+    # Reuse C0 checkpoint — same 16L/8H/512d architecture, same Pile ID data
+    c0_ckpt = Path("data/checkpoints/c0/ckpt_best.pt")
+    c0_state = state_dir / "c0.json"
+    if c0_ckpt.exists() and c0_state.exists():
+        import json as _json
+        import shutil
+
+        c0_data = _json.loads(c0_state.read_text())
+        if c0_data.get("status") == "completed":
+            c3_phase1_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(str(c0_ckpt), str(c3_phase1_ckpt))
+            print(f"[phase1] Reused C0 checkpoint for C3 Phase 1: {c0_ckpt} -> {c3_phase1_ckpt}")
+            return str(c3_phase1_ckpt)
+
+    raise FileNotFoundError(
+        "C3 Phase 1 requires a pretrained deterministic 16L model. "
+        "Run C0 first: python experiments/c_pipeline.py --milestone c0"
+    )
+
+
+def _prepare_model(model, cfg):
+    """Load base checkpoint and inject LoRA if config requires it.
+
+    Called between setup_model() and train() for milestones that need
+    a pretrained base (C3 Phase 2, C2, C4).
+    """
+    from torch import nn
+
+    if not isinstance(model, nn.Module):
+        return model  # test mock — skip preparation
+
+    resume_path = cfg["train"].get("resume_checkpoint")
+    if resume_path:
+        ckpt_path = Path(resume_path)
+        if not ckpt_path.exists():
+            raise FileNotFoundError(f"Base checkpoint not found: {ckpt_path}")
+        print(f"[prepare] Loading base checkpoint: {ckpt_path}")
+        load_checkpoint(ckpt_path, model)
+
+    lora_section = cfg.get("lora")
+    if lora_section and lora_section.get("rank"):
+        lora_cfg = build_lora_config(cfg)
+        model = inject_lora(model, lora_cfg)
+        n_lora = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        n_bayes = sum(
+            p.numel() for name, p in model.named_parameters()
+            if p.requires_grad and ("lora_A_mu" in name or "lora_A_g" in name)
+        )
+        print(f"[prepare] LoRA injected: rank={lora_cfg.rank}, alpha={lora_cfg.alpha}, "
+              f"target={lora_cfg.target}")
+        print(f"[prepare] LoRA params: {n_lora:,} trainable, {n_bayes:,} Bayesian")
+
+    return model
 
 
 def _sigma_std_extractor(model) -> float:
@@ -290,6 +355,7 @@ class PipelineRunner(PipelineRunnerBase):
             log_qualitative_mlflow=log_qualitative_mlflow,
             uncertainty_eval_fn=compute_uncertainty_metrics,
             sigma_std_extractor=_sigma_std_extractor,
+            prepare_model=_prepare_model,
         )
         super().__init__(
             repo_root=repo_root,

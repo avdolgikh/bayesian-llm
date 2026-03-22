@@ -1,0 +1,87 @@
+experiment:
+  name: c3_phase2
+  run_name: c3_phase2
+  mlflow_uri: sqlite:///mlflow.db
+data:
+  dataset: pile
+  val_fraction: 0.1
+  test_fraction: 0.1
+  id_categories:
+  - 1
+  - 2
+  ood_categories:
+  - 3
+  - 4
+  pile_id_domains:
+  - hackernews
+  pile_ood_domains:
+  - arxiv
+  - freelaw
+  - pubmed_abstracts
+  pile_id_tokens: 100000000
+  pile_ood_tokens: 10000000
+model:
+  block_size: 256
+  n_layer: 16
+  n_head: 8
+  n_embd: 512
+  dropout: 0.1
+  bias: true
+  bayes_head:
+    enabled: false
+    prior_std: 1.0
+    init_rho: -1.0
+  bayes_ffn:
+    enabled: false
+    prior_std: 1.0
+    init_rho: -1.0
+  bayes_attn_v:
+    enabled: false
+    prior_std: 1.0
+    init_rho: -1.0
+train:
+  steps: 10000
+  batch_size: 32
+  block_size: 256
+  lr: 0.0003
+  weight_decay: 0.0
+  warmup_steps: 500
+  min_lr: 1.0e-05
+  grad_clip: 1.0
+  eval_interval: 500
+  eval_iters: 20
+  checkpoint_interval: 5000
+  checkpoint_dir: data/checkpoints/c3
+  gradient_accumulation_steps: 1
+  kl_weight: 1.0
+  kl_annealing_steps: 1000
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  seed: 1337
+  device: auto
+eval:
+  sample_tokens: 200
+  temperature: 0.8
+  num_samples: 30
+  n_perplexity_batches: 20
+  qualitative_prompts_per_category: 5
+  qualitative_max_new_tokens: 100
+  qualitative_seed: 42
+tfb:
+  epsilon: 0.1
+  n_search_samples: 10
+  n_anchor_batches: 20
+  search_min: 0.0001
+  search_max: 10.0
+  search_precision: 0.0001
+laplace:
+  damping: 1.0
+  sample_scale: 1.0
+  n_curvature_batches: 20
+  selection_mode: lora
+lora:
+  rank: 16
+  alpha: 32.0
+  target: ffn
+  prior_std: 0.2
+  init_g: 0.1

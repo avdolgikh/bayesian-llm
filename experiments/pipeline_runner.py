@@ -39,6 +39,7 @@ class RuntimeHooks:
     log_qualitative_mlflow: Callable[..., None]
     uncertainty_eval_fn: Callable[..., dict[str, float]]
     sigma_std_extractor: Callable[[Any], float]
+    prepare_model: Callable[..., Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -349,6 +350,8 @@ class PipelineRunnerBase:
     ) -> dict[str, Any]:
         tokenizer, data = self.hooks.setup_data(cfg)
         model, _model_cfg, n_params = self.hooks.setup_model(cfg, tokenizer)
+        if self.hooks.prepare_model is not None:
+            model = self.hooks.prepare_model(model, cfg)
         device = self.hooks.resolve_device(cfg)
         train_cfg = self.hooks.build_train_config(cfg)
         train_data = data.get("train") if isinstance(data, dict) else None
