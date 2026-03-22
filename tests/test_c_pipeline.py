@@ -1028,6 +1028,201 @@ class TestPosthocPipelineIntegration:
         assert all(fn is compute_uncertainty_metrics for fn in captured_mi_fns)
 
 
+class TestPrepareModelPosthocLoRA:
+    """_prepare_model: BLoB checkpoint → DeterministicLoRA conversion for C4."""
+
+    def _make_blob_checkpoint(self, tmp_path):
+        """Create a tiny model, inject BLoB LoRA, save checkpoint."""
+        import torch
+
+        from minigpt.config import build_lora_config
+        from minigpt.layers import BayesConfig
+        from minigpt.lora import inject_lora
+        from minigpt.model import GPTConfig, MiniGPT
+        from minigpt.train import save_checkpoint
+
+        torch.manual_seed(42)
+        config = GPTConfig(
+            vocab_size=256, block_size=32, n_layer=2, n_head=2,
+            n_embd=64, dropout=0.0, bias=True,
+            bayes_head=BayesConfig(enabled=False),
+        )
+        model = MiniGPT(config)
+        lora_cfg_dict = {
+            "lora": {"rank": 4, "alpha": 8.0, "target": "ffn",
+                     "prior_std": 0.2, "init_g": 0.1},
+        }
+        lora_cfg = build_lora_config(lora_cfg_dict)
+        model = inject_lora(model, lora_cfg, bayesian=True)
+
+        # Capture BLoB MAP weights for later comparison
+        blob_a_mu = {}
+        blob_b = {}
+        for name, module in model.named_modules():
+            from minigpt.lora import BLoBLoRALinear
+            if isinstance(module, BLoBLoRALinear):
+                blob_a_mu[name] = module.lora_A_mu.data.clone()
+                blob_b[name] = module.lora_B.data.clone()
+
+        ckpt_dir = tmp_path / "ckpt_blob"
+        ckpt_dir.mkdir()
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
+        save_checkpoint(model, optimizer, step=100, best_val_loss=3.0,
+                        config_dict={}, path=ckpt_dir / "ckpt_best.pt")
+        return ckpt_dir / "ckpt_best.pt", blob_a_mu, blob_b, config
+
+    def test_posthoc_lora_injects_deterministic_not_blob(self, pipeline_module, tmp_path):
+        import torch
+
+        from minigpt.lora import BLoBLoRALinear, DeterministicLoRALinear
+        from minigpt.model import MiniGPT
+
+        ckpt_path, _, _, gpt_config = self._make_blob_checkpoint(tmp_path)
+
+        # Fresh vanilla model (no LoRA yet)
+        torch.manual_seed(99)
+        model = MiniGPT(gpt_config)
+
+        cfg = {
+            "posthoc_method": "tfb",
+            "train": {"resume_checkpoint": str(ckpt_path), "checkpoint_dir": str(tmp_path)},
+            "lora": {"rank": 4, "alpha": 8.0, "target": "ffn",
+                     "prior_std": 0.2, "init_g": 0.1},
+        }
+        model = pipeline_module._prepare_model(model, cfg)
+
+        # Should have DeterministicLoRALinear, NOT BLoBLoRALinear
+        has_det = any(isinstance(m, DeterministicLoRALinear) for m in model.modules())
+        has_blob = any(isinstance(m, BLoBLoRALinear) for m in model.modules())
+        assert has_det, "Expected DeterministicLoRALinear modules"
+        assert not has_blob, "Should NOT have BLoBLoRALinear modules"
+
+    def test_posthoc_lora_maps_blob_a_mu_to_lora_a(self, pipeline_module, tmp_path):
+        import torch
+
+        from minigpt.lora import DeterministicLoRALinear
+        from minigpt.model import MiniGPT
+
+        ckpt_path, blob_a_mu, blob_b, gpt_config = self._make_blob_checkpoint(tmp_path)
+
+        torch.manual_seed(99)
+        model = MiniGPT(gpt_config)
+        cfg = {
+            "posthoc_method": "laplace",
+            "train": {"resume_checkpoint": str(ckpt_path), "checkpoint_dir": str(tmp_path)},
+            "lora": {"rank": 4, "alpha": 8.0, "target": "ffn",
+                     "prior_std": 0.2, "init_g": 0.1},
+        }
+        model = pipeline_module._prepare_model(model, cfg)
+
+        # Verify lora_A values match BLoB's lora_A_mu
+        for name, module in model.named_modules():
+            if isinstance(module, DeterministicLoRALinear):
+                assert name in blob_a_mu, f"Unexpected LoRA module: {name}"
+                torch.testing.assert_close(
+                    module.lora_A.data, blob_a_mu[name],
+                    msg=f"lora_A mismatch at {name}",
+                )
+                torch.testing.assert_close(
+                    module.lora_B.data, blob_b[name],
+                    msg=f"lora_B mismatch at {name}",
+                )
+
+    def test_posthoc_lora_tfb_fit_succeeds(self, pipeline_module, tmp_path):
+        """End-to-end: BLoB ckpt → DeterministicLoRA → TFB fit finds sigma_q."""
+        import torch
+
+        from minigpt.model import MiniGPT
+
+        ckpt_path, _, _, gpt_config = self._make_blob_checkpoint(tmp_path)
+
+        torch.manual_seed(99)
+        model = MiniGPT(gpt_config)
+        cfg = {
+            "posthoc_method": "tfb",
+            "train": {"resume_checkpoint": str(ckpt_path),
+                      "checkpoint_dir": str(tmp_path / "c4_tfb"),
+                      "block_size": 32, "batch_size": 4, "steps": 0},
+            "lora": {"rank": 4, "alpha": 8.0, "target": "ffn",
+                     "prior_std": 0.2, "init_g": 0.1},
+            "tfb": {"epsilon": 0.1, "n_search_samples": 2, "n_anchor_batches": 2},
+        }
+        model = pipeline_module._prepare_model(model, cfg)
+
+        # TFB fit should succeed (finds DeterministicLoRALinear modules)
+        data = {"train": torch.randint(0, 256, (512,))}
+        result = pipeline_module._posthoc_fit(model, cfg, data, torch.device("cpu"))
+        assert result is not None
+        mi_fn, extras = result
+        assert callable(mi_fn)
+        assert "sigma_q" in extras
+        assert extras["sigma_q"] > 0
+
+    def test_posthoc_lora_laplace_fit_succeeds(self, pipeline_module, tmp_path):
+        """End-to-end: BLoB ckpt → DeterministicLoRA → Laplace fit on LoRA params."""
+        import torch
+
+        from minigpt.model import MiniGPT
+
+        ckpt_path, _, _, gpt_config = self._make_blob_checkpoint(tmp_path)
+
+        torch.manual_seed(99)
+        model = MiniGPT(gpt_config)
+        cfg = {
+            "posthoc_method": "laplace",
+            "train": {"resume_checkpoint": str(ckpt_path),
+                      "checkpoint_dir": str(tmp_path / "c4_lap"),
+                      "block_size": 32, "batch_size": 4, "steps": 0},
+            "lora": {"rank": 4, "alpha": 8.0, "target": "ffn",
+                     "prior_std": 0.2, "init_g": 0.1},
+            "laplace": {"selection_mode": "lora", "damping": 1.0,
+                        "sample_scale": 1.0, "n_curvature_batches": 2},
+        }
+        model = pipeline_module._prepare_model(model, cfg)
+
+        data = {"train": torch.randint(0, 256, (512,))}
+        result = pipeline_module._posthoc_fit(model, cfg, data, torch.device("cpu"))
+        assert result is not None
+        mi_fn, extras = result
+        assert callable(mi_fn)
+        assert "curvature_mean" in extras
+
+    def test_non_posthoc_lora_still_injects_blob(self, pipeline_module, tmp_path):
+        """C3 (non-posthoc) should still get BLoBLoRALinear."""
+        import torch
+
+        from minigpt.layers import BayesConfig
+        from minigpt.lora import BLoBLoRALinear
+        from minigpt.model import GPTConfig, MiniGPT
+        from minigpt.train import save_checkpoint
+
+        torch.manual_seed(42)
+        config = GPTConfig(
+            vocab_size=256, block_size=32, n_layer=2, n_head=2,
+            n_embd=64, dropout=0.0, bias=True,
+            bayes_head=BayesConfig(enabled=False),
+        )
+        model = MiniGPT(config)
+        # Save a base checkpoint (no LoRA)
+        ckpt_dir = tmp_path / "base_ckpt"
+        ckpt_dir.mkdir()
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
+        save_checkpoint(model, optimizer, step=100, best_val_loss=3.0,
+                        config_dict={}, path=ckpt_dir / "ckpt_best.pt")
+
+        # Fresh model, no posthoc_method → should inject BLoB
+        model2 = MiniGPT(config)
+        cfg = {
+            "train": {"resume_checkpoint": str(ckpt_dir / "ckpt_best.pt"),
+                      "checkpoint_dir": str(tmp_path)},
+            "lora": {"rank": 4, "alpha": 8.0, "target": "ffn",
+                     "prior_std": 0.2, "init_g": 0.1},
+        }
+        model2 = pipeline_module._prepare_model(model2, cfg)
+        has_blob = any(isinstance(m, BLoBLoRALinear) for m in model2.modules())
+        assert has_blob, "Non-posthoc LoRA should use BLoBLoRALinear"
+
+
 class TestTrainStepsZero:
     """train() with steps=0 must not crash and return valid metadata."""
 

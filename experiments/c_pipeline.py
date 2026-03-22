@@ -103,13 +103,66 @@ def _prepare_model(model, cfg):
 
     Called between setup_model() and train() for milestones that need
     a pretrained base (C3 Phase 2, C2, C4).
+
+    For post-hoc LoRA milestones (C4_TFB, C4_LAP): the dependency checkpoint
+    is C3's BLoB LoRA checkpoint (lora_A_mu/lora_A_g), but TFB/Laplace need
+    DeterministicLoRALinear (lora_A). This function injects deterministic LoRA
+    first, then loads the BLoB checkpoint with key mapping: lora_A_mu → lora_A.
     """
+    import torch
     from torch import nn
 
     if not isinstance(model, nn.Module):
         return model  # test mock — skip preparation
 
     resume_path = cfg["train"].get("resume_checkpoint")
+    is_posthoc = bool(cfg.get("posthoc_method"))
+    lora_section = cfg.get("lora")
+    needs_lora = lora_section and lora_section.get("rank")
+
+    if is_posthoc and needs_lora and resume_path:
+        # C4 case: BLoB checkpoint → DeterministicLoRA conversion.
+        # TFB looks for DeterministicLoRALinear; Laplace mode="lora" does too.
+        # BLoB checkpoint keys: lora_A_mu, lora_A_g, lora_B, base_linear.*
+        # DeterministicLoRA keys: lora_A, lora_B, base_linear.*
+        ckpt_path = Path(resume_path)
+        if not ckpt_path.exists():
+            raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
+
+        print(f"[prepare] Converting BLoB checkpoint → DeterministicLoRA: {ckpt_path}")
+        ckpt = torch.load(ckpt_path, weights_only=False)
+        blob_sd = ckpt["model_state_dict"]
+
+        # Inject deterministic LoRA to establish target state dict structure
+        lora_cfg = build_lora_config(cfg)
+        model = inject_lora(model, lora_cfg, bayesian=False)
+
+        # Map BLoB state dict → DeterministicLoRA state dict
+        target_sd = model.state_dict()
+        mapped_sd = {}
+        for key in target_sd:
+            if key in blob_sd:
+                # Direct match (base_linear.weight, lora_B, embeddings, etc.)
+                mapped_sd[key] = blob_sd[key]
+            elif "lora_A" in key:
+                # DeterministicLoRA "xxx.lora_A" ← BLoB "xxx.lora_A_mu"
+                blob_key = key.replace(".lora_A", ".lora_A_mu")
+                if blob_key in blob_sd:
+                    mapped_sd[key] = blob_sd[blob_key]
+                else:
+                    print(f"[prepare] Warning: no BLoB mapping for {key}, keeping init")
+                    mapped_sd[key] = target_sd[key]
+            else:
+                print(f"[prepare] Warning: key {key} not in checkpoint, keeping init")
+                mapped_sd[key] = target_sd[key]
+
+        model.load_state_dict(mapped_sd)
+
+        n_lora = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print(f"[prepare] Post-hoc LoRA: rank={lora_cfg.rank}, alpha={lora_cfg.alpha}")
+        print(f"[prepare] BLoB → DeterministicLoRA: {n_lora:,} params (MAP weights)")
+        return model
+
     if resume_path:
         ckpt_path = Path(resume_path)
         if not ckpt_path.exists():
@@ -117,8 +170,7 @@ def _prepare_model(model, cfg):
         print(f"[prepare] Loading base checkpoint: {ckpt_path}")
         load_checkpoint(ckpt_path, model)
 
-    lora_section = cfg.get("lora")
-    if lora_section and lora_section.get("rank"):
+    if needs_lora:
         lora_cfg = build_lora_config(cfg)
         model = inject_lora(model, lora_cfg)
         n_lora = sum(p.numel() for p in model.parameters() if p.requires_grad)

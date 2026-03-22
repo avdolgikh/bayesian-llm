@@ -33,7 +33,7 @@ experiments/      # Runnable scripts (a0_baseline, a1–a3 Bayesian, b1_laplace_
   c_pipeline.py        # C pipeline CLI: wires hooks+policy, providers, entry point
   agent_briefing.md    # HP tuning playbook injected into agent prompts (no file reading needed)
 scripts/          # Utilities (dump_mlflow_run, compare_runs, profile_gpu, eval_checkpoint, fit_laplace)
-tests/            # pytest (191 tests: 134 core + 57 pipeline)
+tests/            # pytest (217 tests: 134 core + 83 pipeline)
 data/             # Local datasets (gitignored)
 ```
 
@@ -1390,11 +1390,76 @@ Table 1: 4L results (existing). Table 2: 16L results (C milestone). Analysis: wh
 - `TestPosthocPipelineIntegration` (3): extras in result, mi_fn override passed to eval, default fn used without posthoc
 - `TestTrainStepsZero` (1): train() with steps=0 metadata
 
-**C2 ready to run:**
+### C2 FINAL RESULTS — Post-hoc Laplace on Full Weights, 16L (2026-03-22)
+
+**Status: DONE (NEGATIVE) — confirms B1 at scale.**
+
+| Metric | Value | Notes |
+|--------|-------|-------|
+| MI ratio | **1.00x** | Gate >1.05 FAILED. Zero OOD/ID separation. |
+| test_id_ppl | 12.68 | Same as C0 checkpoint (no retraining) |
+| test_ood_ppl | arxiv=26.7, freelaw=75.9, pubmed=143.9 | Matches C0 OOD pattern |
+| Curvature mean | 0.000000 | Flat. std=0.000002, max=0.002 |
+| Curvature elements | 33,554,432 | 32 FFN param groups |
+| Flip rate (ID) | 0.912 | Near-random |
+| Flip rate (OOD) | 0.912 | Identical to ID |
+| Laplace fit time | 8.1s | 30 batches × 16 samples = 480 per-sample gradients |
+| MLflow run | `c2` experiment | Record-only (RUN 1/1) |
+
+**Why diagonal Laplace fails (implementation audit):**
+
+The implementation is correct per standard methodology (Ritter 2018, Daxberger 2021 "Laplace Redux"):
+1. **Empirical Fisher** (`fit_laplace`): Per-sample `loss.backward()` → `grad² accumulated → averaged. `F_ii = E[(∂L/∂θ_i)²]`. ✓
+2. **Posterior sampling** (`sample_laplace_params`): `σ_i = sample_scale / √(F_ii + λ)`. Standard formula. ✓
+3. **MC uncertainty** (`compute_laplace_uncertainty`): N forward passes with different weight samples → MI via `mc_metrics_single`. ✓
+
+The failure mechanism:
+- At convergence, per-sample gradients are near-zero → Fisher diagonal is flat
+- With curvature ≈ 0 and damping = 1.0: `variance = 1/(0 + 1) = 1.0`, `std = 1.0`
+- Model weights are O(0.01–0.1), so std=1.0 completely randomizes weights
+- Flip rate 0.912 confirms near-random outputs under perturbation
+- BUT perturbations are **isotropic** (same variance everywhere) → equally random for ID and OOD → MI ratio = 1.00x
+- No damping value helps: lower → more random; higher → less perturbation → MI → 0 for both
+- Alternative: KFAC (Kronecker-factored) could capture cross-parameter correlations, but that's outside study scope
+
+**Cross-scale confirmation:** Diagonal Laplace fails at both scales with identical mechanism.
+| Scale | Experiment | MI ratio | Curvature mean |
+|-------|-----------|----------|----------------|
+| 4L | B1 (FFN) | 1.00x | ~0 |
+| 4L | B3-LAP (LoRA) | 1.00x | ~0 |
+| 16L | C2 (FFN) | 1.00x | 0.000000 |
+
+### C4 Preparation — BLoB → DeterministicLoRA Conversion (2026-03-22)
+
+**Problem discovered:** C4_TFB and C4_LAP depend on C3's checkpoint (`data/checkpoints/c3/ckpt_best.pt`), which contains BLoB LoRA parameters (`lora_A_mu`, `lora_A_g`, `lora_B`). But post-hoc methods need `DeterministicLoRALinear` modules:
+- `fit_tfb()` iterates `isinstance(module, DeterministicLoRALinear)` — would find zero modules with BLoB
+- `select_params(model, "lora")` also checks `isinstance(module, DeterministicLoRALinear)` — same
+- Additionally, `load_checkpoint()` uses strict loading — BLoB state dict keys don't match vanilla model
+
+**Root cause:** `_prepare_model` called `inject_lora(model, lora_cfg)` with default `bayesian=True` for ALL milestones. Post-hoc LoRA milestones need `bayesian=False`.
+
+**Solution — `_prepare_model` enhanced with BLoB → DeterministicLoRA conversion:**
+
+When `posthoc_method` is set AND LoRA config exists:
+1. Inject `DeterministicLoRALinear` first (`inject_lora(..., bayesian=False)`) — establishes target state dict structure
+2. Load C3's BLoB checkpoint state dict
+3. Map keys: `lora_A_mu` → `lora_A` (take MAP point estimate), `lora_B` → `lora_B` (same), `base_linear.*` → `base_linear.*` (same). Drop `lora_A_g` (BLoB variance — not needed for deterministic inference).
+4. `model.load_state_dict(mapped_sd)` — loads the converted weights
+
+The non-posthoc path (C3) is unchanged — still injects `BLoBLoRALinear`.
+
+**5 new tests** (217/217 total):
+- `test_posthoc_lora_injects_deterministic_not_blob` — verifies module types
+- `test_posthoc_lora_maps_blob_a_mu_to_lora_a` — verifies weight values match BLoB's MAP
+- `test_posthoc_lora_tfb_fit_succeeds` — end-to-end: BLoB ckpt → DeterministicLoRA → TFB finds sigma_q
+- `test_posthoc_lora_laplace_fit_succeeds` — end-to-end: BLoB ckpt → DeterministicLoRA → Laplace fits curvature
+- `test_non_posthoc_lora_still_injects_blob` — regression: C3 still gets BLoBLoRALinear
+
+**C4 ready to run:**
 ```
-python experiments/c_pipeline.py --milestone c2 --no-agent --state-dir .pipeline-state
+python experiments/c_pipeline.py --milestone c4_tfb --provider claude --provider-model sonnet --max-runs 3
+python experiments/c_pipeline.py --milestone c4_lap --provider claude --provider-model sonnet --max-runs 3
 ```
-Expected: load C0 ckpt → fit Laplace FFN (30 batches, ~5-10 min) → MI eval → curvature_mean ~0 → MI ratio ~1.00x → record-only complete.
 
 ---
 
