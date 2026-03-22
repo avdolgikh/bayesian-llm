@@ -340,6 +340,7 @@ def comparison_payload(state_dir: Path) -> dict[str, Any]:
         "four_layer_reference": FOUR_L_RESULTS,
         "sixteen_layer_results": {
             "C1": _load_result(state_dir / "c1.json"),
+            "C2": _load_result(state_dir / "c2.json"),
             "C3": _load_result(state_dir / "c3.json"),
             "C4-TFB": _load_result(state_dir / "c4_tfb.json"),
             "C4-LAP": _load_result(state_dir / "c4_lap.json"),
@@ -350,16 +351,22 @@ def comparison_payload(state_dir: Path) -> dict[str, Any]:
 def comparison_report(state_dir: Path) -> str:
     payload = comparison_payload(state_dir)
     sixteen_layer = payload["sixteen_layer_results"]
+
+    def _fmt(val: float | str) -> str:
+        if isinstance(val, (int, float)):
+            return f"{val:.2f}x"
+        return str(val)
+
     lines = [
         "=== Cross-Scale Comparison ===",
         "",
         "Method               | 4L MI ratio | 16L MI ratio",
         "---------------------|-------------|-------------",
-        f"Variational full     | 1.43x       | {sixteen_layer['C1']}",
-        f"BLoB LoRA            | 1.13x       | {sixteen_layer['C3']}",
-        f"TFB (post-hoc LoRA)  | 1.10x       | {sixteen_layer['C4-TFB']}",
-        f"Laplace full         | 1.00x       | {sixteen_layer['C4-LAP']}",
-        f"Laplace LoRA         | 1.00x       | {sixteen_layer['C4-LAP']}",
+        f"Variational full     | 1.43x       | {_fmt(sixteen_layer['C1'])}",
+        f"BLoB LoRA            | 1.13x       | {_fmt(sixteen_layer['C3'])}",
+        f"TFB (post-hoc LoRA)  | 1.10x       | {_fmt(sixteen_layer['C4-TFB'])}",
+        f"Laplace full         | 1.00x       | {_fmt(sixteen_layer['C2'])}",
+        f"Laplace LoRA         | 1.00x       | {_fmt(sixteen_layer['C4-LAP'])}",
         "",
     ]
     return "\n".join(lines)

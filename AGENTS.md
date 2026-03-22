@@ -80,6 +80,7 @@ PyTorch + `torch.distributions`. No JAX, no TensorFlow.
 - **B1: DONE (NEGATIVE)** — Post-hoc Laplace on deterministic checkpoint. Approach A (identity-curvature sweep): MI ratio 1.00x at all scales. Approach B (per-sample Fisher): curvature non-zero but still MI ratio 1.00x. **Conclusion: diagonal Laplace on FFN params does not produce OOD-discriminative uncertainty in language models.** See [B1 Implementation Notes](#b1-implementation-notes).
 - **B2: DONE (WEAK POSITIVE)** — BLoB-style Bayesian LoRA (variational, train-time). R1 inconclusive (TinyShakespeare pretrain too small). R2: category-split pretrain (cat 1 World, val ppl=46.5), LoRA fine-tune (cat 2 Sports), OOD eval (cats 3+4). MI ratio **1.13x batch / 1.02x qual**. Weak but positive — BLoB LoRA detects OOD at batch level with 163K Bayesian params (25x fewer than A2's 4.2M). Signal weaker than A2 (1.43x/1.70x). See [B2 Implementation Notes](#b2-implementation-notes).
 - **B3: DONE (MIXED)** — Post-hoc Bayesianization of deterministic LoRA. **B3-TFB: MI ratio 1.10x** (σ_q=0.013, SVD-structured variance works). **B3-LAP: MI ratio 1.00x** (diagonal curvature too flat, same failure as B1). TFB succeeds post-hoc because it uses structural information (SVD of B), not curvature. See [B3 Implementation Notes](#b3-implementation-notes). Spec: `specs/b3-post-hoc-lora-spec.md`.
+- **C: DONE** — Scaled replication at 16L/8H/512d (~76M params) on The Pile (domain-split). Five sub-milestones: C0 deterministic baseline (ppl=14.3), C1 variational full (MI **1.32x**), C2 Laplace full (MI 1.00x, negative), C3 BLoB LoRA (MI **1.53x**), C4-TFB post-hoc LoRA (MI **1.35x**), C4-LAP Laplace LoRA (MI 1.00x, negative). **Key finding: LoRA scales better than full weights — scaling inversion from 4L.** Agentic HP pipeline operational (Claude Sonnet, $0.10/call). See [C Milestone](#c-milestone-scaled-replication). Spec: `specs/c-milestone-spec.md`.
 
 ## Bayesian Layer Strategy (order)
 1. Output head (A1) — simplest, proves pipeline
@@ -1455,11 +1456,125 @@ The non-posthoc path (C3) is unchanged — still injects `BLoBLoRALinear`.
 - `test_posthoc_lora_laplace_fit_succeeds` — end-to-end: BLoB ckpt → DeterministicLoRA → Laplace fits curvature
 - `test_non_posthoc_lora_still_injects_blob` — regression: C3 still gets BLoBLoRALinear
 
-**C4 ready to run:**
+### C4-TFB FINAL RESULTS — Post-hoc TFB on LoRA, 16L (2026-03-22)
+
+**Status: DONE (POSITIVE) — TFB scales strongly at 16L.**
+
+| Metric | Value | Notes |
+|--------|-------|-------|
+| MI ratio | **1.35x** | Per-domain: arxiv=1.40x, freelaw=1.31x, pubmed=1.36x |
+| sigma_q | 0.030007 | 2.3x higher than 4L B3-TFB's 0.013 — more noise tolerated at scale |
+| test_id_ppl | 66.28 | Matches C3's 64.9 (same MAP weights) |
+| test_ood_ppl | arxiv=34.6, freelaw=86.3, pubmed=162.3 | Matches C3's OOD pattern |
+| Flip rate (ID) | 0.179 | Reasonable (not near-random like Laplace's 0.91) |
+| Flip rate (OOD) | 0.185–0.210 | Slightly higher than ID — meaningful signal |
+| TFB fit time | 433.7s (7.2 min) | 17 binary search iterations, 0 training |
+| LoRA params | 1,310,720 | BLoB→DeterministicLoRA conversion confirmed working |
+| MLflow run | `c4_tfb` experiment | Record-only (RUN 1/1, GATE PASSED) |
+
+**TFB binary search convergence:**
+- Range [0.0001, 10.0], anchor_loss=4.1732, epsilon=0.1
+- Final: sigma_q=0.0300, noisy_loss=4.2737, delta=0.1005 (just at epsilon boundary)
+- Search correctly pushed sigma_q to maximum noise tolerable within epsilon
+
+**Key findings:**
+
+1. **TFB (post-hoc, zero training) matches variational full-weight at 16L.** C4-TFB 1.35x ≈ C1 1.32x. TFB needs only 7 min of binary search vs C1's 3.3 hours of Bayesian training. Remarkable cost-efficiency for OOD detection.
+
+2. **TFB scaling parallels BLoB:** 4L→16L improvement ratio is similar:
+   - BLoB: 1.13x → 1.53x (1.35× scaling factor)
+   - TFB: 1.10x → 1.35x (1.23× scaling factor)
+   Both benefit from the LoRA subspace constraining perturbations to meaningful directions.
+
+3. **LoRA > full weights for BOTH post-hoc methods:**
+   - Post-hoc × LoRA (TFB): 1.35x ✓
+   - Post-hoc × Full (Laplace): 1.00x ✗
+   LoRA's low-rank structure provides sufficient inductive bias for post-hoc Bayesianization. Full-weight post-hoc methods lack this structure.
+
+4. **SVD-structured variance is the key differentiator.** TFB uses SVD of the B matrix to structure perturbation variance (`Omega_ij = sigma_q / S_i`). Laplace uses diagonal curvature (flat at convergence). The structural information from SVD is what makes TFB work where Laplace fails.
+
+**Updated 16L comparison (C0-C4):**
+
+| Method | Type | MI ratio | Training | Fit time | Bayesian params |
+|--------|------|----------|----------|----------|-----------------|
+| C3 BLoB LoRA | Variational × LoRA | **1.53x** | 27 min | — | 1.31M |
+| C4-TFB | Post-hoc × LoRA | **1.35x** | **0** | 7 min | 1.31M (MAP) |
+| C1 Var. full | Variational × Full | 1.32x | 3.3 hrs | — | 33.6M |
+| C2 Laplace | Post-hoc × Full | 1.00x | 0 | 8s | 33.6M |
+| C4-LAP | Post-hoc × LoRA | pending | 0 | — | — |
+
+**Cross-scale comparison (4L → 16L):**
+
+| Method | 4L MI ratio | 16L MI ratio | Scales? |
+|--------|-------------|--------------|---------|
+| Variational full (A2/C1) | 1.43x | 1.32x | Slight decrease |
+| BLoB LoRA (B2/C3) | 1.13x | **1.53x** | Strong increase |
+| TFB post-hoc (B3/C4) | 1.10x | **1.35x** | Strong increase |
+| Laplace full (B1/C2) | 1.00x | 1.00x | Dead |
+| Laplace LoRA (B3/C4) | 1.00x | pending | — |
+
+### C4-LAP FINAL RESULTS — Post-hoc Laplace on LoRA, 16L (2026-03-22)
+
+**Status: DONE (NEGATIVE) — confirms B3-LAP at scale. Diagonal Laplace fails on LoRA too.**
+
+| Metric | Value | Notes |
+|--------|-------|-------|
+| MI ratio | **1.00x** | Gate >1.05 FAILED. Zero OOD/ID separation. |
+| test_id_ppl | 65.43 | Matches C3/C4-TFB (same MAP weights) |
+| test_ood_ppl | arxiv=35.0, freelaw=95.3, pubmed=159.4 | Same OOD pattern |
+| Curvature mean | 0.000001 | Flat (slightly higher than C2's 0.000000 — fewer params) |
+| Curvature elements | 655,360 | 32 LoRA A matrices (rank=16) |
+| Flip rate (ID) | 0.851 | High but not as extreme as C2's 0.912 |
+| Flip rate (OOD) | 0.851 | Identical to ID |
+| Laplace fit time | 17.1s | 30 batches × 32 samples = 960 per-sample gradients |
+| MLflow run | `c4_lap` experiment | Record-only (RUN 1/1) |
+
+**Diagonal Laplace fails regardless of subspace — complete cross-scale confirmation:**
+
+| Scale | Subspace | Experiment | MI ratio | Curvature mean |
+|-------|----------|-----------|----------|----------------|
+| 4L | Full FFN | B1 | 1.00x | ~0 |
+| 4L | LoRA | B3-LAP | 1.00x | ~0 |
+| 16L | Full FFN | C2 | 1.00x | 0.000000 |
+| 16L | LoRA | C4-LAP | 1.00x | 0.000001 |
+
+**Root cause is identical in all four:** diagonal Fisher curvature is flat at convergence → isotropic perturbations → no OOD/ID discrimination.
+
+### COMPLETE 16L COMPARISON — All C Sub-Milestones Done (2026-03-22)
+
 ```
-python experiments/c_pipeline.py --milestone c4_tfb --provider claude --provider-model sonnet --max-runs 3
-python experiments/c_pipeline.py --milestone c4_lap --provider claude --provider-model sonnet --max-runs 3
+=== Cross-Scale Comparison ===
+
+Method               | 4L MI ratio | 16L MI ratio
+---------------------|-------------|-------------
+Variational full     | 1.43x       | 1.32x
+BLoB LoRA            | 1.13x       | 1.53x
+TFB (post-hoc LoRA)  | 1.10x       | 1.35x
+Laplace full         | 1.00x       | 1.00x
+Laplace LoRA         | 1.00x       | 1.00x
 ```
+
+**Paper-ready findings:**
+
+1. **LoRA scales better than full weights at 16L — for BOTH variational and post-hoc methods.** BLoB 1.13x→1.53x, TFB 1.10x→1.35x, while variational full actually decreased 1.43x→1.32x. LoRA's rank-16 subspace constrains posteriors to meaningful directions rather than spreading uncertainty across all parameters.
+
+2. **TFB (zero training) matches variational full-weight.** C4-TFB 1.35x ≈ C1 1.32x, but with zero additional training (7 min binary search vs 3.3 hours Bayesian training). For practitioners who need OOD detection without retraining, TFB on existing LoRA adapters is sufficient.
+
+3. **Diagonal Laplace is dead at every scale and subspace.** Four independent experiments (B1, B3-LAP, C2, C4-LAP) all produce MI ratio 1.00x. The failure mechanism is fundamental: diagonal Fisher curvature is flat at convergence for well-trained language models. Neither increasing parameters (655K→33.5M) nor scaling models (4L→16L) helps.
+
+4. **SVD-structured variance (TFB) ≠ curvature-based variance (Laplace).** Both are post-hoc, both operate on LoRA. TFB succeeds (1.35x) because SVD of B captures the geometric structure of the LoRA subspace. Laplace fails (1.00x) because diagonal curvature at convergence carries no directional information.
+
+5. **Scaling inversion is the headline result.** At 4L: full-weight variational (A2 1.43x) > LoRA variational (B2 1.13x). At 16L: reversed — C3 1.53x > C1 1.32x. The crossover suggests LoRA-based Bayesian methods become more effective as model scale increases.
+
+**Comparison report ready:** `python experiments/c_pipeline.py --compare`
+
+**Comparison report bug fix (2026-03-22):** `comparison_report()` was using C4-LAP for "Laplace full" row — should be C2. Fixed: C2 for Laplace full, C4-LAP for Laplace LoRA. Added `_fmt()` helper to format float MI ratios as "1.32x".
+
+---
+
+### Pipeline Refactoring Spec (2026-03-22)
+
+Spec written: `specs/pipeline-refactoring-spec.md`. Split `c_pipeline.py` into `providers.py` (generic) + `c_hooks.py` (C-specific) + thin CLI shell. Priority: after C milestone completion.
 
 ---
 
