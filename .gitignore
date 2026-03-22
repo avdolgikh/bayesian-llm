@@ -9,8 +9,10 @@ __pycache__/
 *.ckpt
 *.log
 *.egg-info/
+specs/human-report.md
 mlflow.db
 mlflow.db-journal
+specs/post-c.md
 /mlruns/
 .env
 .pipeline-state/
