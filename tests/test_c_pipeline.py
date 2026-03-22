@@ -813,3 +813,249 @@ class TestPolicies:
         result = load_json(state_dir / "c1.json")["runs"][0]["result"]
         assert set(result["test_ood_ppl"]) == {"arxiv", "freelaw", "pubmed_abstracts"}
         assert set(result["mi_ratio"]) == {"arxiv", "freelaw", "pubmed_abstracts"}
+
+
+# ============================================================
+# Post-hoc pipeline tests (Laplace / TFB integration)
+# ============================================================
+
+
+class TestPosthocTemplates:
+    """Config templates for post-hoc milestones (C2, C4_TFB, C4_LAP)."""
+
+    @pytest.mark.parametrize("milestone", ["c2", "c4_tfb", "c4_lap"])
+    def test_posthoc_templates_have_steps_zero(self, pipeline_module, milestone):
+        cfg = pipeline_module.build_milestone_config(milestone)
+        assert cfg["train"]["steps"] == 0
+
+    @pytest.mark.parametrize(
+        "milestone,expected_method",
+        [("c2", "laplace"), ("c4_tfb", "tfb"), ("c4_lap", "laplace")],
+    )
+    def test_posthoc_templates_have_correct_method(
+        self, pipeline_module, milestone, expected_method,
+    ):
+        cfg = pipeline_module.build_milestone_config(milestone)
+        assert cfg["posthoc_method"] == expected_method
+
+    @pytest.mark.parametrize("milestone", ["c0", "c1", "c3_phase2"])
+    def test_training_templates_have_no_posthoc_method(self, pipeline_module, milestone):
+        cfg = pipeline_module.build_milestone_config(milestone)
+        assert cfg.get("posthoc_method") is None
+
+    def test_validation_accepts_steps_zero(self):
+        cfg = copy.deepcopy(DEFAULT_CONFIG)
+        cfg["train"]["steps"] = 0
+        validate_config(cfg)  # should not raise
+
+    @pytest.mark.parametrize("milestone", ["c2", "c4_tfb", "c4_lap"])
+    def test_posthoc_templates_pass_validation(self, pipeline_module, milestone):
+        validate_config(pipeline_module.build_milestone_config(milestone))
+
+
+class TestPosthocFit:
+    """Unit tests for _posthoc_fit dispatch function."""
+
+    def test_returns_none_for_mock_model(self, pipeline_module):
+        cfg = {"posthoc_method": "laplace", "train": {"steps": 0}}
+        result = pipeline_module._posthoc_fit(object(), cfg, {}, "cpu")
+        assert result is None
+
+    def test_returns_none_without_posthoc_method(self, pipeline_module):
+        cfg = copy.deepcopy(DEFAULT_CONFIG)
+        result = pipeline_module._posthoc_fit(object(), cfg, {}, "cpu")
+        assert result is None
+
+    def test_laplace_fit_returns_callable_and_curvature(self, pipeline_module, tmp_path):
+        import torch
+
+        from minigpt.layers import BayesConfig
+        from minigpt.model import GPTConfig, MiniGPT
+
+        torch.manual_seed(42)
+        config = GPTConfig(
+            vocab_size=256, block_size=32, n_layer=2, n_head=2,
+            n_embd=64, dropout=0.0, bias=True,
+            bayes_head=BayesConfig(enabled=False),
+        )
+        model = MiniGPT(config)
+        data = {"train": torch.randint(0, 256, (512,))}
+        cfg = {
+            "posthoc_method": "laplace",
+            "train": {
+                "block_size": 32, "batch_size": 4,
+                "checkpoint_dir": str(tmp_path / "ckpt"), "steps": 0,
+            },
+            "laplace": {
+                "selection_mode": "ffn", "damping": 1.0,
+                "sample_scale": 1.0, "n_curvature_batches": 2,
+            },
+        }
+        result = pipeline_module._posthoc_fit(
+            model, cfg, data, torch.device("cpu"),
+        )
+        assert result is not None
+        mi_fn, extras = result
+        assert callable(mi_fn)
+        assert "curvature_mean" in extras
+        assert isinstance(extras["curvature_mean"], float)
+        # Laplace state should be saved
+        assert (tmp_path / "ckpt" / "laplace_state.pt").exists()
+
+    def test_laplace_mi_fn_produces_valid_metrics(self, pipeline_module, tmp_path):
+        import torch
+
+        from minigpt.layers import BayesConfig
+        from minigpt.model import GPTConfig, MiniGPT
+
+        torch.manual_seed(42)
+        config = GPTConfig(
+            vocab_size=256, block_size=32, n_layer=2, n_head=2,
+            n_embd=64, dropout=0.0, bias=True,
+            bayes_head=BayesConfig(enabled=False),
+        )
+        model = MiniGPT(config)
+        data_tensor = torch.randint(0, 256, (512,))
+        cfg = {
+            "posthoc_method": "laplace",
+            "train": {
+                "block_size": 32, "batch_size": 4,
+                "checkpoint_dir": str(tmp_path / "ckpt"), "steps": 0,
+            },
+            "laplace": {
+                "selection_mode": "ffn", "damping": 1.0,
+                "sample_scale": 1.0, "n_curvature_batches": 2,
+            },
+        }
+        mi_fn, _ = pipeline_module._posthoc_fit(
+            model, cfg, {"train": data_tensor}, torch.device("cpu"),
+        )
+        # Call the returned mi_fn — same signature as compute_uncertainty_metrics
+        result = mi_fn(
+            model, data_tensor, 32, 4, torch.device("cpu"),
+            n_samples=3, n_batches=1,
+        )
+        assert "mi_mean" in result
+        assert "flip_rate" in result
+        assert result["mi_mean"] >= 0.0
+
+
+class TestPosthocPipelineIntegration:
+    """Integration: posthoc_fit results flow through the pipeline."""
+
+    def _setup_c0_state(self, state_dir):
+        state_dir.mkdir(parents=True, exist_ok=True)
+        (state_dir / "c0.json").write_text(json.dumps({
+            "status": "completed",
+            "runs": [{"run_number": 1}],
+            "accepted_run": 1,
+            "checkpoint_path": "data/checkpoints/c0/ckpt_best.pt",
+        }))
+
+    def test_posthoc_extras_appear_in_pipeline_result(
+        self, pipeline_module, monkeypatch, state_dir,
+    ):
+        self._setup_c0_state(state_dir)
+        install_runner_stubs(
+            pipeline_module, monkeypatch,
+            [result_dict(mi_ratio_mean=1.01)], [False],
+        )
+
+        def fake_posthoc(*args, **kwargs):
+            def fake_mi_fn(*a, **kw):
+                return {"mi_mean": 0.001, "flip_rate": 0.01,
+                        "predictive_entropy_mean": 3.0}
+            return fake_mi_fn, {"curvature_mean": 1.23e-5}
+
+        monkeypatch.setattr(pipeline_module, "_posthoc_fit", fake_posthoc)
+        make_runner(pipeline_module, state_dir, milestone="c2").run()
+        state = load_json(state_dir / "c2.json")
+        assert state["runs"][0]["result"]["curvature_mean"] == pytest.approx(1.23e-5)
+
+    def test_posthoc_mi_fn_is_passed_to_eval_mi_suite(
+        self, pipeline_module, monkeypatch, state_dir,
+    ):
+        self._setup_c0_state(state_dir)
+        captured_mi_fns = []
+
+        def capturing_eval_mi_suite(mi_fn, *args, **kwargs):
+            captured_mi_fns.append(mi_fn)
+            mi_id = {"mi_mean": 0.05, "flip_rate": 0.1,
+                      "predictive_entropy_mean": 3.0}
+            mi_ood = {"mi_mean": 0.06, "flip_rate": 0.2,
+                       "predictive_entropy_mean": 4.0}
+            return mi_id, mi_ood, 1.01
+
+        sentinel_fn = lambda *a, **kw: None  # noqa: E731
+
+        def fake_posthoc(*args, **kwargs):
+            return sentinel_fn, {"curvature_mean": 1e-5}
+
+        install_runner_stubs(
+            pipeline_module, monkeypatch,
+            [result_dict(mi_ratio_mean=1.01)], [False],
+        )
+        monkeypatch.setattr(pipeline_module, "eval_mi_suite",
+                            capturing_eval_mi_suite)
+        monkeypatch.setattr(pipeline_module, "_posthoc_fit", fake_posthoc)
+        make_runner(pipeline_module, state_dir, milestone="c2").run()
+        # The sentinel should have been passed as the mi_fn argument
+        assert sentinel_fn in captured_mi_fns
+
+    def test_without_posthoc_default_mi_fn_is_used(
+        self, pipeline_module, monkeypatch, state_dir,
+    ):
+        """When posthoc_fit returns None, eval_mi_suite receives the default fn."""
+        captured_mi_fns = []
+
+        def capturing_eval_mi_suite(mi_fn, *args, **kwargs):
+            captured_mi_fns.append(mi_fn)
+            mi_id = {"mi_mean": 0.05, "flip_rate": 0.1,
+                      "predictive_entropy_mean": 3.0}
+            mi_ood = {"mi_mean": 0.06, "flip_rate": 0.2,
+                       "predictive_entropy_mean": 4.0}
+            return mi_id, mi_ood, 1.25
+
+        install_runner_stubs(
+            pipeline_module, monkeypatch,
+            [result_dict()], [True],
+        )
+        monkeypatch.setattr(pipeline_module, "eval_mi_suite",
+                            capturing_eval_mi_suite)
+        make_runner(pipeline_module, state_dir, milestone="c1").run()
+        # The default uncertainty_eval_fn should be used (compute_uncertainty_metrics)
+        from minigpt.uncertainty import compute_uncertainty_metrics
+        assert all(fn is compute_uncertainty_metrics for fn in captured_mi_fns)
+
+
+class TestTrainStepsZero:
+    """train() with steps=0 must not crash and return valid metadata."""
+
+    def test_train_steps_zero_returns_valid_metadata(self, tmp_path):
+        import torch
+
+        from minigpt.config import build_train_config
+        from minigpt.layers import BayesConfig
+        from minigpt.model import GPTConfig, MiniGPT
+        from minigpt.train import train
+
+        torch.manual_seed(42)
+        config = GPTConfig(
+            vocab_size=256, block_size=32, n_layer=2, n_head=2,
+            n_embd=64, dropout=0.0, bias=True,
+            bayes_head=BayesConfig(enabled=False),
+        )
+        model = MiniGPT(config)
+        data = torch.randint(0, 256, (512,))
+        cfg = copy.deepcopy(DEFAULT_CONFIG)
+        cfg["train"]["steps"] = 0
+        cfg["train"]["block_size"] = 32
+        cfg["train"]["batch_size"] = 4
+        cfg["train"]["checkpoint_dir"] = str(tmp_path / "ckpt")
+        cfg["train"]["device"] = "cpu"
+        train_cfg = build_train_config(cfg)
+        model, meta = train(model, data, data, train_cfg, config_dict=cfg)
+        assert meta["steps_completed"] == 0
+        assert meta["train_time_sec"] >= 0
+        assert meta["best_val_loss"] == float("inf")
+        assert meta["eval_history"] == []

@@ -40,6 +40,7 @@ class RuntimeHooks:
     uncertainty_eval_fn: Callable[..., dict[str, float]]
     sigma_std_extractor: Callable[[Any], float]
     prepare_model: Callable[..., Any] | None = None
+    posthoc_fit_fn: Callable[..., Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -376,6 +377,14 @@ class PipelineRunnerBase:
             if self.use_mlflow:
                 self.hooks.log_train_meta_mlflow(train_meta)
 
+            # Post-hoc Bayesian fit (Laplace / TFB) — runs after train, before eval
+            mi_fn_override = None
+            posthoc_extras = {}
+            if self.hooks.posthoc_fit_fn is not None:
+                fit_result = self.hooks.posthoc_fit_fn(model, cfg, data, device)
+                if fit_result is not None:
+                    mi_fn_override, posthoc_extras = fit_result
+
             ppl_result = self._evaluate_perplexity(model, cfg, data, device)
             if self.use_mlflow:
                 self.hooks.log_perplexity_mlflow(ppl_result)
@@ -400,9 +409,13 @@ class PipelineRunnerBase:
                 },
                 "eval_history": train_meta.get("eval_history", []),
             }
+            result.update(posthoc_extras)
 
             if self.policy.needs_mi_eval(self.milestone):
-                mi_result = self._evaluate_mi(model, cfg, data, device, result["test_ood_ppl"])
+                mi_result = self._evaluate_mi(
+                    model, cfg, data, device, result["test_ood_ppl"],
+                    mi_fn_override=mi_fn_override,
+                )
                 result.update(mi_result)
                 if self.use_mlflow:
                     self.hooks.log_mi_mlflow(
@@ -496,7 +509,10 @@ class PipelineRunnerBase:
         data: dict[str, Any],
         device: Any,
         test_ood_ppl: dict[str, Any],
+        *,
+        mi_fn_override: Any = None,
     ) -> dict[str, Any]:
+        mi_fn = mi_fn_override or self.hooks.uncertainty_eval_fn
         n_batches = cfg["eval"].get("n_perplexity_batches", 20)
         n_samples = cfg["eval"].get("num_samples", 20)
         ood_data = self._extract_ood_data(data)
@@ -505,7 +521,7 @@ class PipelineRunnerBase:
             mi_id = None
             for domain, domain_data in ood_data.items():
                 domain_mi_id, _domain_mi_ood, domain_ratio = self.hooks.eval_mi_suite(
-                    self.hooks.uncertainty_eval_fn,
+                    mi_fn,
                     model,
                     cfg,
                     data.get("test_id"),
@@ -521,7 +537,7 @@ class PipelineRunnerBase:
             mi_ratio_mean = sum(ratio_by_domain.values()) / max(len(ratio_by_domain), 1)
         else:
             mi_id, _mi_ood, mi_ratio_mean = self.hooks.eval_mi_suite(
-                self.hooks.uncertainty_eval_fn,
+                mi_fn,
                 model,
                 cfg,
                 data.get("test_id"),

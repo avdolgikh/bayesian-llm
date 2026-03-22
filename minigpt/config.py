@@ -246,7 +246,7 @@ def validate_config(cfg: dict) -> None:
         raise ValueError(
             f"train.block_size ({train_bs}) must be <= model.block_size ({model_bs})"
         )
-    if cfg["train"]["warmup_steps"] >= cfg["train"]["steps"]:
+    if cfg["train"]["steps"] > 0 and cfg["train"]["warmup_steps"] >= cfg["train"]["steps"]:
         raise ValueError("train.warmup_steps must be < train.steps")
     kl_weight = cfg["train"]["kl_weight"]
     if kl_weight < 0:

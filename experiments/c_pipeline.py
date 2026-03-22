@@ -139,6 +139,111 @@ def _sigma_std_extractor(model) -> float:
     return sigma_summary(model).get("sigma_std", 0.0)
 
 
+def _posthoc_fit(model, cfg, data, device):
+    """Fit post-hoc Bayesian method (Laplace or TFB) if config requires it.
+
+    Dispatches on cfg["posthoc_method"]: "laplace" or "tfb".
+    Only post-hoc milestone templates set this field.
+
+    Returns (mi_eval_fn, extra_result_fields) or None if not applicable.
+    """
+    import time
+    from functools import partial
+
+    import torch
+    from torch import nn
+
+    if not isinstance(model, nn.Module):
+        return None  # test mock — skip
+
+    method = cfg.get("posthoc_method")
+    if not method:
+        return None
+
+    train_data = data.get("train")
+    if train_data is None:
+        raise ValueError("No training data for post-hoc curvature fitting")
+
+    block_size = cfg["train"]["block_size"]
+    batch_size = cfg["train"]["batch_size"]
+
+    lap_cfg = cfg.get("laplace", {})
+    tfb_cfg = cfg.get("tfb", {})
+
+    if method == "laplace":
+        from minigpt.laplace import (
+            compute_laplace_uncertainty,
+            fit_laplace,
+            save_laplace_state,
+            select_params,
+        )
+
+        selection_mode = lap_cfg.get("selection_mode", "ffn")
+        damping = lap_cfg.get("damping", 1.0)
+        sample_scale = lap_cfg.get("sample_scale", 1.0)
+        n_curv_batches = lap_cfg.get("n_curvature_batches", 30)
+
+        selected = select_params(model, mode=selection_mode)
+        n_selected = sum(p.numel() for p in selected.values())
+        print(f"[laplace] Selected {len(selected)} param groups "
+              f"({n_selected:,} elements), mode={selection_mode}")
+
+        fit_start = time.time()
+        state = fit_laplace(
+            model, train_data.to(device),
+            block_size=block_size,
+            batch_size=batch_size,
+            selection=selected,
+            n_batches=n_curv_batches,
+            damping=damping,
+            sample_scale=sample_scale,
+        )
+        print(f"[laplace] Fit time: {time.time() - fit_start:.1f}s")
+
+        ckpt_dir = Path(cfg["train"]["checkpoint_dir"])
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
+        save_laplace_state(state, ckpt_dir / "laplace_state.pt")
+
+        all_curv = torch.cat(
+            [state.curvature[n].flatten() for n in state.param_names]
+        )
+        curvature_mean = all_curv.mean().item()
+        print(f"[laplace] Curvature: mean={curvature_mean:.6f} "
+              f"std={all_curv.std().item():.6f} "
+              f"min={all_curv.min().item():.6f} max={all_curv.max().item():.6f}")
+
+        mi_fn = partial(compute_laplace_uncertainty, state=state)
+        return mi_fn, {"curvature_mean": curvature_mean}
+
+    if method == "tfb":
+        from minigpt.tfb import compute_tfb_uncertainty, fit_tfb, save_tfb_state
+
+        epsilon = tfb_cfg.get("epsilon", 0.1)
+        n_search_samples = tfb_cfg.get("n_search_samples", 10)
+        n_anchor_batches = tfb_cfg.get("n_anchor_batches", 20)
+
+        fit_start = time.time()
+        state = fit_tfb(
+            model, train_data.to(device),
+            block_size=block_size,
+            batch_size=batch_size,
+            n_batches=n_anchor_batches,
+            epsilon=epsilon,
+            n_search_samples=n_search_samples,
+        )
+        print(f"[tfb] Fit time: {time.time() - fit_start:.1f}s")
+        print(f"[tfb] sigma_q={state.sigma_q:.6f}, anchor_loss={state.anchor_loss:.4f}")
+
+        ckpt_dir = Path(cfg["train"]["checkpoint_dir"])
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
+        save_tfb_state(state, ckpt_dir / "tfb_state.pt")
+
+        mi_fn = partial(compute_tfb_uncertainty, state=state)
+        return mi_fn, {"sigma_q": state.sigma_q, "anchor_loss": state.anchor_loss}
+
+    return None
+
+
 class _NullProvider:
     name = "none"
 
@@ -356,6 +461,7 @@ class PipelineRunner(PipelineRunnerBase):
             uncertainty_eval_fn=compute_uncertainty_metrics,
             sigma_std_extractor=_sigma_std_extractor,
             prepare_model=_prepare_model,
+            posthoc_fit_fn=_posthoc_fit,
         )
         super().__init__(
             repo_root=repo_root,

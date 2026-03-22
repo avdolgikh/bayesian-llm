@@ -231,6 +231,7 @@ def train(
     no_improve_count = 0
     early_stop_reason = None
     eval_history: list[dict[str, float]] = []
+    step = start_step - 1  # default when loop is empty (steps=0)
     for step in range(start_step, cfg.steps + 1):
         # Update learning rate (cosine schedule with warmup)
         lr = _get_lr(step, cfg)

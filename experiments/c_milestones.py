@@ -59,7 +59,8 @@ C1_TEMPLATE = deep_merge(
 C2_TEMPLATE = deep_merge(
     C0_TEMPLATE,
     {
-        "train": {"checkpoint_dir": "data/checkpoints/c2"},
+        "posthoc_method": "laplace",
+        "train": {"checkpoint_dir": "data/checkpoints/c2", "steps": 0},
         "laplace": {
             "selection_mode": "ffn",
             "damping": 1.0,
@@ -105,8 +106,10 @@ C3_PHASE2_TEMPLATE = deep_merge(
 C4_TFB_TEMPLATE = deep_merge(
     C3_PHASE2_TEMPLATE,
     {
+        "posthoc_method": "tfb",
         "train": {
             "checkpoint_dir": "data/checkpoints/c4_tfb",
+            "steps": 0,
             "kl_weight": 0.0,
             "kl_annealing_steps": 0,
         },
@@ -117,8 +120,10 @@ C4_TFB_TEMPLATE = deep_merge(
 C4_LAP_TEMPLATE = deep_merge(
     C3_PHASE2_TEMPLATE,
     {
+        "posthoc_method": "laplace",
         "train": {
             "checkpoint_dir": "data/checkpoints/c4_lap",
+            "steps": 0,
             "kl_weight": 0.0,
             "kl_annealing_steps": 0,
         },

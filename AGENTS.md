@@ -912,10 +912,10 @@ AG News (~5M tokens) is structurally inadequate for 76M params. Using The Pile (
 ### Sub-Milestones
 - **C0:** Deterministic baseline on Pile ID — **DONE** (PPL 14.3)
 - **C1:** Variational full-weight Bayesian FFN (A2-equiv), batch=16, accum=2 — **DONE** (MI ratio 1.32x)
-- **C2:** Post-hoc Laplace on C0 checkpoint (B1-equiv). Depends on C0. Expected negative.
-- **C3:** BLoB LoRA (B2-equiv), batch=32, no accum. Phase 1 pretrain + Phase 2 BLoB fine-tune. Independent.
-- **C4-TFB:** Post-hoc TFB on C3 checkpoint (B3-TFB-equiv). Depends on C3. Expected positive (~1.10x).
-- **C4-LAP:** Post-hoc Laplace-LoRA on C3 checkpoint (B3-LAP-equiv). Depends on C3. Expected negative.
+- **C2:** Post-hoc Laplace on C0 checkpoint (B1-equiv). Depends on C0. Expected negative. — **READY** (pipeline integration done, 212/212 tests)
+- **C3:** BLoB LoRA (B2-equiv), batch=32, no accum. Phase 1 pretrain + Phase 2 BLoB fine-tune. Independent. — **DONE** (MI ratio 1.53x)
+- **C4-TFB:** Post-hoc TFB on C3 checkpoint (B3-TFB-equiv). Depends on C3. Expected positive (~1.10x). — **READY** (pipeline integration done)
+- **C4-LAP:** Post-hoc Laplace-LoRA on C3 checkpoint (B3-LAP-equiv). Depends on C3. Expected negative. — **READY** (pipeline integration done)
 
 ### Pipeline — Agentic Experiment Optimization (Auto-Research)
 `experiments/c_pipeline.py` — **autonomous HP optimization pipeline** (the "auto-research" layer). Run AFTER each sub-milestone's method code is implemented and tested via the usual BDD→TDD→Code process. The pipeline is a state machine (CONFIGURE → RUN → ANALYZE → DECIDE) that runs the implemented code, checks success gates, and on failure invokes an **agent via the Provider pattern** (Claude Code / Codex as subprocess — NOT API calls). The agent reads the repo, AGENTS.md, MLflow results, and proposes structured HP adjustments. Uses the same Provider adapter pattern as `vla-game-agent/pipeline`: `ClaudeProvider` → `claude -p`, `CodexProvider` → `codex exec`. **Each milestone is a separate invocation** — no batch mode. Workflow per sub-milestone: `BDD → TDD → Code (all green) → c_pipeline.py --milestone cN (auto-research)`. CLI: `--milestone {c0|c1|c2|c3|c4}`, `--resume <milestone>`, `--compare`, `--provider {claude|codex}`, `--no-agent`, `--dry-run`, `--budget`, `--state-dir`, `--no-mlflow`, `--provider-model`. State in `.pipeline-state/`. Max 4 runs/milestone, 12h GPU budget per milestone. Full spec: `specs/c-pipeline-spec.md`. TDD handoff: `specs/c-pipeline-tdd-handoff.md`.
@@ -1241,13 +1241,8 @@ Comparison with 4L reference:
 
 Ordering rationale: C4 depends on C3 (needs C3's deterministic LoRA checkpoint from Phase 1). C2 is independent (uses C0 checkpoint, already available). Running C3 first unblocks C4 immediately. C2 can slot in anywhere — it's a quick single run with expected negative result.
 
-1. **Run C3** (BLoB LoRA — variational LoRA, 16L scaled B2):
-   - **What:** Two-phase training. Phase 1: pretrain deterministic model on HackerNews domain (ID for LoRA). Phase 2: inject BLoB LoRA adapters into FFN layers, fine-tune with ELBO loss. `run_c3_phase1` is currently a stub — needs implementation before running.
-   - **Template:** rank=16, alpha=32, init_g=0.1, prior_std=0.2, kl_weight=0.2, steps=10K, bs=32
-   - **Gate:** mi_ratio_mean > 1.05. At 4L B2 achieved 1.13x (weak positive).
-   - **Dependency:** None (standalone). But its checkpoint is needed by C4.
-   - **Command:** `python experiments/c_pipeline.py --milestone c3 --provider claude --provider-model sonnet --initial-agent --max-runs 5`
-2. **Run C2** (Post-hoc Laplace on C0 deterministic checkpoint — 16L scaled B1):
+1. ~~**Run C3**~~ — **DONE** (2026-03-22). MI ratio **1.53x** (gate >1.05 PASSED). See C3 FINAL RESULTS below.
+2. **Run C2** (Post-hoc Laplace on C0 deterministic checkpoint — 16L scaled B1) — **NEXT**:
    - **What:** Take the trained C0 model (76M params, deterministic), fit diagonal Laplace approximation to FFN weights post-hoc (no retraining). Compute Fisher curvature from training data, then sample perturbed weights for MI evaluation.
    - **Template:** laplace selection_mode=ffn, damping=1.0, sample_scale=1.0, n_curvature_batches=30
    - **Gate:** Record-only (no gate). Has `should_early_abort`: if curvature_mean < 1e-4 AND mi_ratio_mean < 1.02, abort early.
@@ -1323,8 +1318,83 @@ Smoke test results (2026-03-21):
 - Agent initial reasoning invoked (`--initial-agent`).
 - Watching for: sigma (G²) collapse (σ_mean < 0.001 = bad), MI ratio > 1.05 (gate), patience behavior.
 
+**C3 FINAL RESULTS (2026-03-22) — PASSED:**
+
+| Metric | Value |
+|--------|-------|
+| Status | completed, Run 1/1 (agent correctly calibrated template HPs) |
+| Best val loss | 4.1572 at step 7000 |
+| Test ID PPL | **64.90** (hackernews domain) |
+| Test OOD PPL | arxiv=34.8, freelaw=91.3, pubmed=156.6 |
+| MI ratio | arxiv=1.69x, freelaw=1.43x, pubmed=1.45x |
+| **MI ratio mean** | **1.53x** (gate >1.05 PASSED) |
+| Sigma stats | sigma_std=0.0066 |
+| KL evolution | 1,852,368 → 1,633,221 (monotonic decrease, good convergence) |
+| Early stop | No early stop (ran full 10K steps) |
+| Training time | ~27 min (1,614s) — **7x faster than C1** (LoRA efficiency) |
+| Params | 1,966,080 trainable (LoRA), 1,310,720 Bayesian |
+| Checkpoint | `data/checkpoints/c3/ckpt_best.pt` |
+| Pipeline state | `.pipeline-state/c3.json` |
+| MLflow run | `3b22bfcfcd63475aaab5d16985414c77` |
+
+Key observations:
+- **MI ratio 1.53x at 16L vs 1.13x at 4L (B2). SCALING INVERSION.** BLoB LoRA scales BETTER than variational full-weight at 16L. At 4L the opposite held (B2 1.13x < A2 1.43x). At 16L: C3 1.53x > C1 1.32x. LoRA's low-rank structure provides a better posterior approximation at scale — the rank-16 subspace constrains posteriors to meaningful directions rather than spreading uncertainty across all parameters.
+- **C3 (1.53x) beats C1 (1.32x) at 16L.** This is the headline result. Variational LoRA > variational full-weight for OOD detection at 16L scale. The inversion from 4L results (A2 > B2) to 16L results (C3 > C1) is a key contribution for the comparison paper.
+- **Test ID PPL 64.90** — higher than C1's 21.9, as expected. LoRA fine-tuned on HackerNews only (not full ID corpus). The PPL gap reflects domain mismatch, not model quality.
+- **Sigma_std=0.0066** — lower than C1's 0.016 but well above collapse threshold (0.001). LoRA concentrates variance in fewer parameters.
+- **KL monotonic decrease** (1.85M → 1.63M) indicates healthy convergence — posteriors moved toward the prior during training (not diverging).
+- **Training 7x faster** than C1 (27 min vs 3.3 hours) due to LoRA's parameter efficiency. Only 1.97M trainable params vs 109.9M for C1.
+
+Comparison with 4L reference and C1:
+| Metric | 4L B2 | 16L C3 | 16L C1 (full-weight) | Notes |
+|--------|-------|--------|---------------------|-------|
+| MI ratio | 1.13x | **1.53x** | 1.32x | LoRA scales better than full-weight |
+| Sigma std | 0.0083 | 0.0066 | 0.016 | LoRA: fewer, more concentrated params |
+| ID PPL | 226.9 | 64.90 | 21.9 | LoRA fine-tune vs full ID training |
+| Training time | ~10 min | ~27 min | 3.3 hrs | LoRA is fast at any scale |
+| Bayesian params | 163K | 1.31M | 33.6M | 26x fewer than full-weight |
+
 ### Paper Structure
 Table 1: 4L results (existing). Table 2: 16L results (C milestone). Analysis: which methods scale? Which findings transfer? The 2×2 matrix at two scales gives a clean, publishable comparison.
+
+### C2 Implementation — Post-hoc Laplace Pipeline Integration (2026-03-22)
+
+**Problem:** C2 (and C4_TFB, C4_LAP) are post-hoc milestones that need Laplace/TFB fitting after model load, with NO training. The pipeline had three critical gaps:
+1. Would train 100K steps (inherited from C0) — wrong for post-hoc
+2. Laplace fitting never called — `minigpt/laplace.py` existed but wasn't wired to pipeline
+3. MI eval used `compute_uncertainty_metrics` (requires BayesianLinear layers) — deterministic model produces MI=0
+
+**Solution — 5 files changed, 21 new tests:**
+
+1. **`minigpt/train.py`** — Fixed `NameError` for steps=0: `step = start_step - 1` before loop.
+2. **`minigpt/config.py`** — Validation relaxed: `warmup_steps >= steps` skipped when steps=0.
+3. **`experiments/c_milestones.py`** — All post-hoc templates:
+   - C2: `"steps": 0, "posthoc_method": "laplace"`
+   - C4_TFB: `"steps": 0, "posthoc_method": "tfb"`
+   - C4_LAP: `"steps": 0, "posthoc_method": "laplace"`
+   - `posthoc_method` disambiguates because DEFAULT_CONFIG includes both `laplace` and `tfb` sections in all configs.
+4. **`experiments/pipeline_runner.py`** — Generic post-hoc plumbing:
+   - `posthoc_fit_fn` optional hook in `RuntimeHooks`
+   - Called after train, before eval. Returns `(mi_eval_fn, extra_stats)`.
+   - `_evaluate_mi` accepts `mi_fn_override` kwarg — uses it instead of default `uncertainty_eval_fn`.
+   - `extra_stats` (e.g. `curvature_mean`) merged into result dict.
+5. **`experiments/c_pipeline.py`** — `_posthoc_fit()` function:
+   - Dispatches on `cfg["posthoc_method"]`: `"laplace"` or `"tfb"`.
+   - Laplace path: `select_params` → `fit_laplace` → `save_laplace_state` → returns `partial(compute_laplace_uncertainty, state=state)` + `curvature_mean`.
+   - TFB path: `fit_tfb` → `save_tfb_state` → returns `partial(compute_tfb_uncertainty, state=state)` + `sigma_q`.
+   - Guard: returns None for non-nn.Module (test mocks) and missing `posthoc_method`.
+
+**21 new tests** (212/212 total):
+- `TestPosthocTemplates` (7): steps=0, posthoc_method correctness, validation
+- `TestPosthocFit` (5): dispatch logic, real Laplace fit on tiny model, mi_fn validity
+- `TestPosthocPipelineIntegration` (3): extras in result, mi_fn override passed to eval, default fn used without posthoc
+- `TestTrainStepsZero` (1): train() with steps=0 metadata
+
+**C2 ready to run:**
+```
+python experiments/c_pipeline.py --milestone c2 --no-agent --state-dir .pipeline-state
+```
+Expected: load C0 ckpt → fit Laplace FFN (30 batches, ~5-10 min) → MI eval → curvature_mean ~0 → MI ratio ~1.00x → record-only complete.
 
 ---
 
