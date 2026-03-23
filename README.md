@@ -29,7 +29,7 @@ python experiments/c_pipeline.py --milestone c3 --provider claude       # agenti
 python experiments/c_pipeline.py --compare                              # cross-scale comparison report
 ```
 
-Requires Python 3.12+ and CUDA-enabled PyTorch for GPU training.
+Requires Python 3.11+ and CUDA-enabled PyTorch for GPU training.
 
 ## Repository Structure
 
