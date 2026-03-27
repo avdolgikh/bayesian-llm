@@ -10,17 +10,16 @@ import numpy as np
 import torch
 
 from minigpt.uncertainty import (
-    auroc,
+    aggregate_sequence_scores,
     auprc,
+    aurc,
+    auroc,
     brier_score,
     ece,
     fpr_at_tpr,
     nll,
     risk_coverage_curve,
-    aurc,
-    aggregate_sequence_scores,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers

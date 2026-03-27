@@ -5,10 +5,17 @@ Core metrics:
 - Expected entropy E_bar: aleatoric uncertainty
 - Mutual information MI = H[p_bar] - E_bar: epistemic uncertainty
 - Top-1 flip rate: fraction of samples where argmax differs from mode
+
+Evaluation metrics (D0):
+- OOD detection: AUROC, FPR@TPR, AUPRC
+- Calibration: ECE, NLL, Brier score
+- Selective prediction: risk-coverage curve, AURC
+- Sequence-level aggregation (mean, max, proportion)
 """
 
 from collections.abc import Callable
 
+import numpy as np
 import torch
 from torch.nn import functional as F
 
@@ -207,3 +214,214 @@ def score_sequence(
         with torch.amp.autocast(device_type=device.type, dtype=torch.float16, enabled=use_amp):
             h = model.forward_body(x)  # (1, seq_len, n_embd)
         return _stream_metrics(model, h, n_samples)
+
+
+# ---------------------------------------------------------------------------
+# D0: OOD detection metrics
+# ---------------------------------------------------------------------------
+
+def _to_numpy(x) -> np.ndarray:
+    """Convert tensor or array to numpy."""
+    if isinstance(x, torch.Tensor):
+        return x.detach().cpu().numpy()
+    return np.asarray(x)
+
+
+def auroc(scores, labels) -> float:
+    """Area Under ROC Curve for OOD detection.
+
+    Args:
+        scores: uncertainty scores (higher = more likely OOD).
+        labels: binary labels (0=ID, 1=OOD).
+
+    Returns:
+        AUROC in [0, 1]. 1.0 = perfect, 0.5 = random.
+    """
+    from sklearn.metrics import roc_auc_score
+    return float(roc_auc_score(_to_numpy(labels), _to_numpy(scores)))
+
+
+def fpr_at_tpr(scores, labels, target_tpr: float = 0.95) -> float:
+    """False Positive Rate at a given True Positive Rate.
+
+    Args:
+        scores: uncertainty scores (higher = more likely OOD).
+        labels: binary labels (0=ID, 1=OOD).
+        target_tpr: TPR threshold (default 0.95).
+
+    Returns:
+        FPR in [0, 1]. Lower is better.
+    """
+    from sklearn.metrics import roc_curve
+    fpr, tpr, _ = roc_curve(_to_numpy(labels), _to_numpy(scores))
+    # Find the FPR at the first threshold where TPR >= target
+    idx = np.searchsorted(tpr, target_tpr)
+    if idx >= len(fpr):
+        return float(fpr[-1])
+    return float(fpr[idx])
+
+
+def auprc(scores, labels) -> float:
+    """Area Under Precision-Recall Curve (OOD as positive class).
+
+    Args:
+        scores: uncertainty scores (higher = more likely OOD).
+        labels: binary labels (0=ID, 1=OOD).
+
+    Returns:
+        AUPRC in [0, 1]. Baseline = class prior.
+    """
+    from sklearn.metrics import average_precision_score
+    return float(average_precision_score(_to_numpy(labels), _to_numpy(scores)))
+
+
+# ---------------------------------------------------------------------------
+# D0: Calibration metrics
+# ---------------------------------------------------------------------------
+
+def ece(confidences, correct, n_bins: int = 15) -> float:
+    """Expected Calibration Error.
+
+    Args:
+        confidences: predicted confidence (max softmax prob) per sample.
+        correct: binary (1=correct, 0=wrong) per sample.
+        n_bins: number of equal-width bins (default 15 per spec).
+
+    Returns:
+        ECE in [0, 1]. Lower is better.
+    """
+    conf = _to_numpy(confidences).astype(np.float64)
+    acc = _to_numpy(correct).astype(np.float64)
+    n = len(conf)
+    if n == 0:
+        return 0.0
+
+    bin_boundaries = np.linspace(0.0, 1.0, n_bins + 1)
+    total_ece = 0.0
+    for i in range(n_bins):
+        lo, hi = bin_boundaries[i], bin_boundaries[i + 1]
+        if i == n_bins - 1:
+            mask = (conf >= lo) & (conf <= hi)
+        else:
+            mask = (conf >= lo) & (conf < hi)
+        n_bin = mask.sum()
+        if n_bin == 0:
+            continue
+        avg_conf = conf[mask].mean()
+        avg_acc = acc[mask].mean()
+        total_ece += (n_bin / n) * abs(avg_acc - avg_conf)
+
+    return float(total_ece)
+
+
+def nll(probs, targets) -> float:
+    """Negative Log-Likelihood (mean per sample).
+
+    Args:
+        probs: (N, vocab) predicted probability distributions.
+        targets: (N,) integer class labels.
+
+    Returns:
+        Mean NLL. Lower is better. Perplexity = exp(NLL).
+    """
+    probs_t = torch.as_tensor(probs, dtype=torch.float64)
+    targets_t = torch.as_tensor(targets, dtype=torch.long)
+    eps = 1e-10
+    p_true = probs_t[torch.arange(len(targets_t)), targets_t]
+    return float(-(p_true + eps).log().mean())
+
+
+def brier_score(probs, targets) -> float:
+    """Brier Score for multi-class prediction.
+
+    Brier = mean over samples of (1 - 2*p(y_true) + sum(p_k^2)).
+
+    Args:
+        probs: (N, vocab) predicted probability distributions.
+        targets: (N,) integer class labels.
+
+    Returns:
+        Mean Brier score. Lower is better. Range [0, 2].
+    """
+    probs_t = torch.as_tensor(probs, dtype=torch.float64)
+    targets_t = torch.as_tensor(targets, dtype=torch.long)
+    p_true = probs_t[torch.arange(len(targets_t)), targets_t]
+    sum_p_sq = (probs_t ** 2).sum(dim=-1)
+    per_sample = 1.0 - 2.0 * p_true + sum_p_sq
+    return float(per_sample.mean())
+
+
+# ---------------------------------------------------------------------------
+# D0: Selective prediction
+# ---------------------------------------------------------------------------
+
+def risk_coverage_curve(uncertainties, correct):
+    """Compute risk-coverage curve.
+
+    Sort samples by uncertainty (descending), progressively include from
+    most certain to least certain. At each coverage level, compute error rate.
+
+    Args:
+        uncertainties: scalar uncertainty per sample (higher = less certain).
+        correct: binary (1=correct, 0=wrong) per sample.
+
+    Returns:
+        (coverages, risks): lists of floats, monotonically increasing coverage.
+    """
+    unc = _to_numpy(uncertainties)
+    cor = _to_numpy(correct)
+    n = len(unc)
+
+    # Sort by uncertainty ascending (most certain first)
+    order = np.argsort(unc)
+    cor_sorted = cor[order]
+
+    cumsum_correct = np.cumsum(cor_sorted)
+    counts = np.arange(1, n + 1, dtype=np.float64)
+    coverages = torch.from_numpy(counts / n)
+    risks = torch.from_numpy(1.0 - cumsum_correct / counts)
+
+    return coverages, risks
+
+
+def aurc(uncertainties, correct) -> float:
+    """Area Under Risk-Coverage Curve.
+
+    Args:
+        uncertainties: scalar uncertainty per sample.
+        correct: binary (1=correct, 0=wrong) per sample.
+
+    Returns:
+        AURC in [0, 1]. Lower is better.
+    """
+    coverages, risks = risk_coverage_curve(uncertainties, correct)
+    return float(np.trapezoid(risks.numpy(), coverages.numpy()))
+
+
+# ---------------------------------------------------------------------------
+# D0: Sequence-level aggregation
+# ---------------------------------------------------------------------------
+
+def aggregate_sequence_scores(
+    token_scores: torch.Tensor,
+    method: str = "mean",
+    threshold: float = 0.0,
+) -> float:
+    """Aggregate per-token uncertainty scores to a single sequence-level scalar.
+
+    Args:
+        token_scores: (seq_len,) per-token uncertainty values.
+        method: "mean", "max", or "proportion".
+        threshold: for "proportion" method, count tokens above this value.
+
+    Returns:
+        Scalar float.
+    """
+    if method == "mean":
+        return float(token_scores.mean())
+    elif method == "max":
+        return float(token_scores.max())
+    elif method == "proportion":
+        return float((token_scores > threshold).float().mean())
+    else:
+        raise ValueError(f"Unknown aggregation method: {method}")
