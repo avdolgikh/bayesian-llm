@@ -65,6 +65,8 @@ agents/           # Detail documents (read on demand, not every task)
 - **C: DONE** — Scaled replication at 16L/8H/512d (~76M params) on The Pile (domain-split). C0 ppl=14.3, C1 MI **1.32x**, C2 MI 1.00x, C3 MI **1.53x**, C4-TFB MI **1.35x**, C4-LAP MI 1.00x. **Scaling inversion: LoRA > full-weight at 16L.**
 - **D0: DONE** — Metrics framework (AUROC, FPR@95, AUPRC, ECE, Brier, NLL, AURC) in `minigpt/uncertainty.py`. 45 tests.
 - **D1: DONE** — Community-standard eval of all 6 C checkpoints. C3 AUROC=0.916, C4-TFB=0.917, C1=0.876. Laplace dead (C2=0.536, C4-LAP=0.494). Script: `scripts/eval_c_checkpoints.py`. Spec: `specs/d1-eval-c-checkpoints.md`.
+- **D2: DONE** — Mean-weights inference. `compute_perplexity_mc()` in `evaluate.py`. Verified mean-weights PPL ≈ MC-averaged PPL: C1 diff=0.29%, C3 diff=3.93% (gate <5%). 9 tests. Script: `scripts/verify_mean_weights.py`. Spec: `specs/d2-mean-weights-spec.md`.
+- **D3: DONE** — Production benchmarks (RTX 4070). LoRA MC N=5: AUROC=0.879, 84ms, 382 MB. **N=3 is the knee** — AUROC jumps 0.50→0.86 (97% of N=20 signal). LoRA MC uses 28% less VRAM than full variational (382 vs 534 MB). Script: `scripts/benchmark_inference.py`. Spec: `specs/prod-uncertainty-approaches.md`.
 
 Full results and cross-scale comparison: `report.md`.
 

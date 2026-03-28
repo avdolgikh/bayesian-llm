@@ -26,6 +26,37 @@ def compute_perplexity(
     return math.exp(sum(losses) / len(losses))
 
 
+@torch.no_grad()
+def compute_perplexity_mc(
+    model: MiniGPT,
+    data: torch.Tensor,
+    block_size: int,
+    batch_size: int,
+    device: torch.device,
+    n_samples: int = 20,
+    n_batches: int = 20,
+) -> float:
+    """Compute MC-averaged perplexity: average loss over N weight samples per batch.
+
+    For each batch, runs N forward passes with independently sampled weights
+    (via reparameterization trick), averages the cross-entropy losses, then
+    computes perplexity = exp(mean averaged loss).
+
+    For deterministic models, all N samples produce identical loss (degenerates).
+    """
+    model.eval()
+    losses = []
+    for _ in range(n_batches):
+        x, y = get_batch(data, block_size, batch_size, device)
+        batch_loss = 0.0
+        for _ in range(n_samples):
+            _, loss = model(x, y)
+            batch_loss += loss.item()
+        losses.append(batch_loss / n_samples)
+    model.train()
+    return math.exp(sum(losses) / len(losses))
+
+
 def generate_text(
     model: MiniGPT,
     enc: tiktoken.Encoding,

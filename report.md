@@ -65,6 +65,51 @@ C0 uses max-prob uncertainty (deterministic — MI=0). All others use MI.
 | Laplace full (B1 / C2) | 1.00x | 1.00x | Dead |
 | Laplace LoRA (B3 / C4) | 1.00x | 1.00x | Dead |
 
+## D2: Mean-Weights Inference Verification
+
+Mean-weights (posterior mean $\mu$) forward pass produces deterministic inference with quality matching MC-averaged perplexity. Gate: <5% relative difference.
+
+| Method | Mean-Wt PPL | MC-Avg PPL (N=20) | Relative Diff |
+|--------|-------------|--------------------|--------------:|
+| C1 Variational FFN | 24.48 | 24.41 | 0.29% |
+| C3 BLoB LoRA | 16.12 | 16.78 | 3.93% |
+
+**Production path:** Use $\mu$ weights for serving predictions (deterministic, no sampling overhead). Reserve MC sampling only for uncertainty estimation.
+
+## D3: Production Inference Benchmarks
+
+RTX 4070, sequence length 256, batch size 1, AMP fp16.
+
+### Latency / VRAM / Throughput
+
+| Method | N | Latency (ms) | Overhead | Throughput | VRAM (MB) |
+|--------|---|-------------|----------|------------|-----------|
+| C0 Deterministic | 1 | 8.1 | 1.00x | 123.2/s | 470 |
+| C3 Mean-Weights | 1 | 14.8 | 1.82x | 67.6/s | 382 |
+| C1 Full Var. MC | 1 | 14.0 | 1.73x | 71.2/s | 534 |
+| C1 Full Var. MC | 5 | 71.0 | 8.75x | 14.1/s | 534 |
+| C1 Full Var. MC | 20 | 286.9 | 35.35x | 3.5/s | 534 |
+| C3 LoRA MC | 1 | 17.2 | 2.12x | 58.2/s | 382 |
+| C3 LoRA MC | 3 | 50.5 | 6.22x | 19.8/s | 382 |
+| C3 LoRA MC | 5 | 84.4 | 10.41x | 11.8/s | 382 |
+| C3 LoRA MC | 20 | 315.6 | 38.89x | 3.2/s | 382 |
+| C4-TFB MC | 1 | 21.2 | 2.62x | 47.1/s | 389 |
+| C4-TFB MC | 5 | 133.0 | 16.39x | 7.5/s | 389 |
+| C4-TFB MC | 20 | 468.6 | 57.76x | 2.1/s | 389 |
+
+### AUROC vs N (Quality-Cost Tradeoff)
+
+200 ID + 200 OOD sequences, block_size=256. MI as uncertainty score.
+
+| Method | N=1 | N=3 | N=5 | N=10 | N=20 |
+|--------|-----|-----|-----|------|------|
+| C0 Deterministic (MaxProb) | 0.495 | — | — | — | — |
+| C1 Full Var. MC | 0.500 | 0.850 | 0.855 | 0.866 | 0.869 |
+| C3 LoRA MC | 0.500 | **0.861** | **0.879** | 0.880 | 0.888 |
+| C4-TFB MC | 0.500 | 0.847 | 0.859 | 0.881 | 0.886 |
+
+**N=3 is the knee.** Going from N=1→3 jumps AUROC from 0.50 to ~0.86. Further increases (N=5→20) add <3 points. For production: **N=3 at 50ms/seq with 382 MB VRAM** is the sweet spot.
+
 ## Key Findings
 
 1. **Scaling inversion.** At 4L: full-weight variational (1.43x) > LoRA (1.13x). At 16L: reversed — LoRA (1.53x) > full-weight (1.32x). LoRA's rank-16 subspace constrains posteriors to meaningful directions rather than spreading uncertainty across all parameters.
@@ -76,3 +121,7 @@ C0 uses max-prob uncertainty (deterministic — MI=0). All others use MI.
 4. **SVD-structured variance works where curvature-based fails.** Both TFB and Laplace are post-hoc and operate on LoRA. TFB succeeds (1.35x) because SVD of B captures the geometric structure of the LoRA subspace. Laplace fails (1.00x) because diagonal curvature at convergence carries no directional information.
 
 5. **Post-hoc methods need subspace structure.** Post-hoc on full weights (Laplace) = 1.00x. Post-hoc on LoRA with SVD structure (TFB) = 1.35x. The LoRA subspace provides the geometric structure that makes post-hoc methods viable.
+
+6. **N=3 MC samples capture most of the signal.** AUROC jumps from 0.50 (N=1) to ~0.86 (N=3) — 97% of the N=20 signal. Further samples add diminishing returns (<3 AUROC points from N=3→20). The cost is ~6x vs deterministic. LoRA MC uses 28% less VRAM than full variational MC (382 vs 534 MB) with equal or better AUROC at every N.
+
+7. **Mean-weights inference is production-ready.** Posterior mean ($\mu$) perplexity matches MC-averaged perplexity within 4% (C1: 0.29%, C3: 3.93%). For serving predictions: use $\mu$ weights (deterministic, 1.8x overhead vs vanilla). For uncertainty scoring: use N=3 MC as a post-processing step on generated text.
