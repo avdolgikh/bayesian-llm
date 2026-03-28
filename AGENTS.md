@@ -63,7 +63,8 @@ agents/           # Detail documents (read on demand, not every task)
 - **B2: DONE (WEAK POSITIVE)** — BLoB LoRA. MI ratio **1.13x**. Weaker than A2 at 4L.
 - **B3: DONE (MIXED)** — Post-hoc LoRA. **B3-TFB: 1.10x** (SVD works). **B3-LAP: 1.00x** (Laplace fails).
 - **C: DONE** — Scaled replication at 16L/8H/512d (~76M params) on The Pile (domain-split). C0 ppl=14.3, C1 MI **1.32x**, C2 MI 1.00x, C3 MI **1.53x**, C4-TFB MI **1.35x**, C4-LAP MI 1.00x. **Scaling inversion: LoRA > full-weight at 16L.**
-- **D: PROPOSED** — Production inference & community-standard evaluation. Spec: `specs/d-production-inference.md`.
+- **D0: DONE** — Metrics framework (AUROC, FPR@95, AUPRC, ECE, Brier, NLL, AURC) in `minigpt/uncertainty.py`. 45 tests.
+- **D1: DONE** — Community-standard eval of all 6 C checkpoints. C3 AUROC=0.916, C4-TFB=0.917, C1=0.876. Laplace dead (C2=0.536, C4-LAP=0.494). Script: `scripts/eval_c_checkpoints.py`. Spec: `specs/d1-eval-c-checkpoints.md`.
 
 Full results and cross-scale comparison: `report.md`.
 

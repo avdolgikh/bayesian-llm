@@ -26,6 +26,35 @@ Comparative study of Bayesian methods for epistemic uncertainty in language mode
 | C4-TFB | TFB LoRA | Post-hoc × LoRA | 1.35x | 66.3 | 7 min fit |
 | C4-LAP | Laplace LoRA | Post-hoc × LoRA | 1.00x | 65.4 | 17s fit |
 
+## Extended Evaluation (D1)
+
+16L C checkpoints evaluated with AUROC, FPR@95, AUPRC, ECE, Brier, NLL, AURC.
+500 ID sequences, 500 OOD sequences, block_size=256, N=20 MC samples.
+
+### OOD Detection (primary uncertainty score per method)
+
+| Milestone | Method          | MI Ratio | AUROC | FPR@95 | AUPRC | ECE    | Brier | NLL  | AURC  |
+|-----------|-----------------|----------|-------|--------|-------|--------|-------|------|-------|
+| C0        | Deterministic   |       -- | 0.591 | 0.794  | 0.552 | 0.0224 | 0.606 | 2.79 | 0.4995 |
+| C1        | Variational FFN |    1.32x | 0.876 | 0.500  | 0.870 | 0.0228 | 0.673 | 3.31 | 0.3470 |
+| C2        | Laplace FFN     |    1.00x | 0.536 | 0.934  | 0.533 | 0.0329 | 1.000 | 9.10 | 0.9876 |
+| C3        | BLoB LoRA       |    1.53x | 0.916 | 0.398  | 0.920 | 0.0436 | 0.658 | 3.06 | 0.3302 |
+| C4-TFB    | TFB LoRA        |    1.35x | 0.917 | 0.384  | 0.918 | 0.0215 | 0.658 | 3.06 | 0.3373 |
+| C4-LAP    | Laplace LoRA    |    1.00x | 0.494 | 0.956  | 0.495 | 0.0340 | 0.998 | 9.73 | 0.9634 |
+
+C0 uses max-prob uncertainty (deterministic — MI=0). All others use MI.
+
+### Uncertainty Score Comparison (AUROC)
+
+| Milestone | MI AUROC | Pred. Entropy AUROC | Max-Prob AUROC |
+|-----------|----------|---------------------|----------------|
+| C0        |       -- |               0.545 |          0.591 |
+| C1        |    0.876 |               0.506 |          0.548 |
+| C2        |    0.536 |               0.474 |          0.494 |
+| C3        |    0.916 |               0.532 |          0.569 |
+| C4-TFB    |    0.917 |               0.553 |          0.589 |
+| C4-LAP    |    0.494 |               0.499 |          0.486 |
+
 ## Cross-Scale Comparison
 
 | Method | 4L MI Ratio | 16L MI Ratio | Scales? |
