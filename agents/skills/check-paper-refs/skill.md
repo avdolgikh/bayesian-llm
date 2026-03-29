@@ -1,0 +1,67 @@
+# Skill: Check Paper References
+
+Verify all references in an academic markdown paper for correctness.
+
+## When to Use
+
+- Before submitting or sharing a paper draft
+- After editing references or adding new citations
+- When inheriting a paper with unverified references
+
+## Input
+
+Path to a markdown paper file (e.g., `docs/paper.md`).
+
+## Workflow
+
+### Step 1: Mechanical extraction
+
+Run the extraction script to get a structured report of all references and in-text citations, including cross-reference issues (orphaned refs, missing refs):
+
+```
+python agents/skills/check-paper-refs/scripts/extract_refs.py <paper.md>
+```
+
+Review the output. Fix any orphaned or missing references before proceeding.
+
+### Step 2: Web verification
+
+For **each** reference in the extraction report, search the web (arXiv, Google Scholar, Semantic Scholar, conference proceedings) and verify:
+
+1. **Author names** — all authors, spelled correctly, in the right order
+2. **Year** — matches the publication or submission year
+3. **Title** — exact title (not a colloquial name or abbreviation)
+4. **Venue** — correct conference/journal (ICML, NeurIPS, ICLR, etc.) and year
+
+Recommended search queries:
+- Search by title (in quotes): `"Exact Paper Title"`
+- Search by arXiv ID if available: `arXiv:XXXX.XXXXX`
+- Cross-check on the conference proceedings page (e.g., openreview.net for ICLR/NeurIPS)
+
+### Step 3: Report discrepancies
+
+For each reference, report one of:
+- **OK** — all fields verified correct
+- **FIX** — list the specific fields that need correction, with the correct values
+
+Common mistakes to watch for:
+- **Wrong authors** — papers from the same lab get confused; LLMs hallucinate author lists
+- **Wrong title** — colloquial names used instead of official title (e.g., "LoRA meets Laplace" vs actual title)
+- **Wrong venue** — preprint cited as published, or wrong conference year
+- **Wrong year** — arXiv submission year vs conference publication year
+
+### Step 4: Apply fixes
+
+After all discrepancies are identified, update both:
+- The `## References` section (author names, title, venue)
+- In-text citations if the first author changed (e.g., `Zheng et al.` -> `Shi et al.`)
+
+## Output
+
+A verification table:
+
+| # | Reference | Authors | Title | Year | Venue | Status |
+|---|-----------|---------|-------|------|-------|--------|
+| 1 | Blundell (2015) | OK | OK | OK | OK | OK |
+| 2 | Wang (2024) | FIX: should be Wang, Shi, Han, Metaxas, Wang | OK | OK | OK | FIX |
+| ... | | | | | | |

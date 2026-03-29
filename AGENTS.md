@@ -69,9 +69,10 @@ agents/           # Detail documents (read on demand, not every task)
 - **D3: DONE** — Production benchmarks (RTX 4070). LoRA MC N=5: AUROC=0.879, 84ms, 382 MB. **N=3 is the knee** — AUROC jumps 0.50→0.86 (97% of N=20 signal). LoRA MC uses 28% less VRAM than full variational (382 vs 534 MB). Script: `scripts/benchmark_inference.py`. Spec: `specs/prod-uncertainty-approaches.md`.
 - **P1: DONE** — Bootstrap 95% CIs for all methods. `bootstrap_ci()` in `uncertainty.py`. 11 tests (288 total). `eval_c_checkpoints.py --bootstrap --save-scores`. Saved: `data/d1_scores.pt`. Fast recompute: `--from-scores data/d1_scores.pt --bootstrap`.
 - **P2: DONE** — MC Dropout baseline. `enable_dropout()` CM in `layers.py`. 6 tests. Script: `scripts/eval_mc_dropout.py`. **AUROC 0.898 [0.877, 0.917]** — surprisingly competitive with trained Bayesian methods (zero extra training). Saved: `data/mc_dropout_scores.pt`.
-- **P3: TODO** — Narrow "Laplace" → "diagonal Laplace" throughout paper. Text edits only.
-- **P4: TODO** — Reframe LoRA vs full-weight claim: observational (not causal), list confounds. Text edits only.
-- **Paper tables: TODO** — Update `docs/paper.md` Tables 1-2 with bootstrap CIs + add MC Dropout row.
+- **P3: DONE** — Narrow "Laplace" → "diagonal Laplace" throughout paper. Table labels, 2×2 matrix, body text.
+- **P4: DONE** — Reframe LoRA vs full-weight claim: observational (not causal), list 3 confounds. All Section 6 "why" paragraphs rewritten as hypotheses. MC Dropout discussion added.
+- **Paper tables: DONE** — Tables 1-2 updated with bootstrap CIs + MC Dropout row. Point estimates from `data/d1_scores.pt` (self-consistent with CIs). Section 3.6 (MC Dropout method) added.
+- **References: FIXED** — 4/11 references had wrong authors (BLoB, TFB, Laplace-LoRA, ScalaBL). All verified against arXiv/proceedings. Orphaned Lakshminarayanan ref removed.
 
 Full results and cross-scale comparison: `report.md`. Paper improvements spec: `specs/paper-improvements.md`. Reviewer concerns: `specs/paper-reviewer-concerns.md`.
 

@@ -26,34 +26,37 @@ Comparative study of Bayesian methods for epistemic uncertainty in language mode
 | C4-TFB | TFB LoRA | Post-hoc × LoRA | 1.35x | 66.3 | 7 min fit |
 | C4-LAP | Laplace LoRA | Post-hoc × LoRA | 1.00x | 65.4 | 17s fit |
 
-## Extended Evaluation (D1)
+## Extended Evaluation
 
 16L C checkpoints evaluated with AUROC, FPR@95, AUPRC, ECE, Brier, NLL, AURC.
 500 ID sequences, 500 OOD sequences, block_size=256, N=20 MC samples.
+95% bootstrap CIs (10,000 resamples of per-sequence scores) from `data/d1_scores.pt`.
 
 ### OOD Detection (primary uncertainty score per method)
 
-| Milestone | Method          | MI Ratio | AUROC | FPR@95 | AUPRC | ECE    | Brier | NLL  | AURC  |
-|-----------|-----------------|----------|-------|--------|-------|--------|-------|------|-------|
-| C0        | Deterministic   |       -- | 0.591 | 0.794  | 0.552 | 0.0224 | 0.606 | 2.79 | 0.4995 |
-| C1        | Variational FFN |    1.32x | 0.876 | 0.500  | 0.870 | 0.0228 | 0.673 | 3.31 | 0.3470 |
-| C2        | Laplace FFN     |    1.00x | 0.536 | 0.934  | 0.533 | 0.0329 | 1.000 | 9.10 | 0.9876 |
-| C3        | BLoB LoRA       |    1.53x | 0.916 | 0.398  | 0.920 | 0.0436 | 0.658 | 3.06 | 0.3302 |
-| C4-TFB    | TFB LoRA        |    1.35x | 0.917 | 0.384  | 0.918 | 0.0215 | 0.658 | 3.06 | 0.3373 |
-| C4-LAP    | Laplace LoRA    |    1.00x | 0.494 | 0.956  | 0.495 | 0.0340 | 0.998 | 9.73 | 0.9634 |
+| Milestone  | Method              | MI Ratio | AUROC [95% CI]          | FPR@95 | AUPRC | ECE    | Brier | NLL  | AURC   |
+|------------|---------------------|----------|-------------------------|--------|-------|--------|-------|------|--------|
+| C0         | Deterministic       |       -- | 0.591 [0.556, 0.626]    | 0.794  | 0.552 | 0.0224 | 0.606 | 2.79 | 0.4995 |
+| P2         | MC Dropout          |       -- | 0.898 [0.877, 0.917]    | 0.368  | 0.870 | 0.0119 | 0.608 | 2.79 |     -- |
+| C1         | Variational FFN     |    1.32x | 0.874 [0.852, 0.895]    | 0.494  | 0.866 | 0.0228 | 0.673 | 3.31 | 0.3470 |
+| C2         | Diag. Laplace FFN   |    1.00x | 0.536 [0.500, 0.572]    | 0.934  | 0.533 | 0.0329 | 1.000 | 9.10 | 0.9876 |
+| C3         | BLoB LoRA           |    1.53x | 0.909 [0.890, 0.925]    | 0.424  | 0.909 | 0.0436 | 0.658 | 3.06 | 0.3302 |
+| C4-TFB     | TFB LoRA            |    1.35x | 0.917 [0.900, 0.933]    | 0.384  | 0.918 | 0.0215 | 0.658 | 3.06 | 0.3373 |
+| C4-LAP     | Diag. Laplace LoRA  |    1.00x | 0.494 [0.459, 0.529]    | 0.956  | 0.495 | 0.0340 | 0.998 | 9.73 | 0.9634 |
 
-C0 uses max-prob uncertainty (deterministic — MI=0). All others use MI.
+C0 uses max-prob uncertainty (deterministic — MI=0). All Bayesian methods use MI. MC Dropout uses C0 checkpoint with dropout enabled at inference (rate=0.1, N=20 passes). AUROC values for C checkpoints are recomputed from `data/d1_scores.pt` for self-consistency with bootstrap CIs.
 
 ### Uncertainty Score Comparison (AUROC)
 
-| Milestone | MI AUROC | Pred. Entropy AUROC | Max-Prob AUROC |
-|-----------|----------|---------------------|----------------|
-| C0        |       -- |               0.545 |          0.591 |
-| C1        |    0.876 |               0.506 |          0.548 |
-| C2        |    0.536 |               0.474 |          0.494 |
-| C3        |    0.916 |               0.532 |          0.569 |
-| C4-TFB    |    0.917 |               0.553 |          0.589 |
-| C4-LAP    |    0.494 |               0.499 |          0.486 |
+| Milestone  | MI AUROC | Pred. Entropy AUROC | Max-Prob AUROC |
+|------------|----------|---------------------|----------------|
+| C0         |       -- |               0.545 |          0.591 |
+| P2         |    0.898 |               0.561 |          0.615 |
+| C1         |    0.874 |               0.506 |          0.548 |
+| C2         |    0.536 |               0.474 |          0.494 |
+| C3         |    0.909 |               0.532 |          0.569 |
+| C4-TFB     |    0.917 |               0.553 |          0.589 |
+| C4-LAP     |    0.494 |               0.499 |          0.486 |
 
 ## Cross-Scale Comparison
 
@@ -112,16 +115,20 @@ RTX 4070, sequence length 256, batch size 1, AMP fp16.
 
 ## Key Findings
 
-1. **Scaling inversion.** At 4L: full-weight variational (1.43x) > LoRA (1.13x). At 16L: reversed — LoRA (1.53x) > full-weight (1.32x). LoRA's rank-16 subspace constrains posteriors to meaningful directions rather than spreading uncertainty across all parameters.
+1. **Scaling inversion (observational).** At 4L: full-weight variational (1.43x) > LoRA (1.13x). At 16L: reversed — LoRA (1.53x) > full-weight (1.32x). One hypothesis is that LoRA's rank-16 subspace constrains posteriors to meaningful directions, but this comparison is confounded by training procedure, backbone quality, and parameter count (see paper §6).
 
 2. **TFB (zero training) matches variational full-weight.** C4-TFB 1.35x ≈ C1 1.32x, but TFB requires zero gradient computation — only a 7-minute binary search on a trained checkpoint vs 3.3 hours of Bayesian training.
 
-3. **Diagonal Laplace is dead for LM OOD detection.** Four independent experiments (B1, B3-LAP, C2, C4-LAP) all produce MI ratio 1.00x. The failure is fundamental: diagonal Fisher curvature is flat at convergence for well-trained language models. Neither increasing parameters (82K → 33.5M) nor scaling models (4L → 16L) helps.
+3. **Diagonal Laplace is dead for LM OOD detection.** Four independent experiments (B1, B3-LAP, C2, C4-LAP) all produce MI ratio 1.00x. The failure is consistent: diagonal Fisher curvature is flat at convergence for well-trained language models. Neither increasing parameters (82K → 33.5M) nor scaling models (4L → 16L) helps. Does not extend to KFAC or full-Hessian variants (untested).
 
-4. **SVD-structured variance works where curvature-based fails.** Both TFB and Laplace are post-hoc and operate on LoRA. TFB succeeds (1.35x) because SVD of B captures the geometric structure of the LoRA subspace. Laplace fails (1.00x) because diagonal curvature at convergence carries no directional information.
+4. **SVD-structured variance works where curvature-based fails.** Both TFB and Laplace are post-hoc and operate on LoRA. TFB succeeds (1.35x) likely because SVD of B captures geometric structure of the LoRA subspace. Laplace fails (1.00x) because diagonal curvature at convergence carries no directional information.
 
-5. **Post-hoc methods need subspace structure.** Post-hoc on full weights (Laplace) = 1.00x. Post-hoc on LoRA with SVD structure (TFB) = 1.35x. The LoRA subspace provides the geometric structure that makes post-hoc methods viable.
+5. **Post-hoc methods need subspace structure.** Post-hoc on full weights (Laplace) = 1.00x. Post-hoc on LoRA with SVD structure (TFB) = 1.35x. The LoRA subspace appears to provide the geometric structure that makes post-hoc methods viable.
 
-6. **N=3 MC samples capture most of the signal.** AUROC jumps from 0.50 (N=1) to ~0.86 (N=3) — 97% of the N=20 signal. Further samples add diminishing returns (<3 AUROC points from N=3→20). The cost is ~6x vs deterministic. LoRA MC uses 28% less VRAM than full variational MC (382 vs 534 MB) with equal or better AUROC at every N.
+6. **MC Dropout is a surprisingly competitive baseline.** MC Dropout on the C0 deterministic checkpoint (zero extra training, dropout rate 0.1) achieves AUROC 0.898 [0.877, 0.917] — overlapping CIs with BLoB LoRA [0.890, 0.925]. Best calibration of all methods (ECE=0.012). The advantage of trained Bayesian methods over MC Dropout is not statistically significant at this sample size.
 
-7. **Mean-weights inference is production-ready.** Posterior mean ($\mu$) perplexity matches MC-averaged perplexity within 4% (C1: 0.29%, C3: 3.93%). For serving predictions: use $\mu$ weights (deterministic, 1.8x overhead vs vanilla). For uncertainty scoring: use N=3 MC as a post-processing step on generated text.
+7. **N=3 MC samples capture most of the signal.** AUROC jumps from 0.50 (N=1) to ~0.86 (N=3) — 97% of the N=20 signal. Further samples add diminishing returns (<3 AUROC points from N=3→20). The cost is ~6x vs deterministic. LoRA MC uses 28% less VRAM than full variational MC (382 vs 534 MB) with equal or better AUROC at every N.
+
+8. **Mean-weights inference is production-ready.** Posterior mean ($\mu$) perplexity matches MC-averaged perplexity within 4% (C1: 0.29%, C3: 3.93%). For serving predictions: use $\mu$ weights (deterministic, 1.8x overhead vs vanilla). For uncertainty scoring: use N=3 MC as a post-processing step on generated text.
+
+9. **Bootstrap CIs stabilize rankings but show overlapping top methods.** TFB (0.917 [0.900, 0.933]) ≈ BLoB (0.909 [0.890, 0.925]) ≈ MC Dropout (0.898 [0.877, 0.917]) — all three overlap. Variational FFN (0.874 [0.852, 0.895]) is clearly below. Diagonal Laplace (~0.5) is clearly dead. CIs capture evaluation variance only (single training run).
