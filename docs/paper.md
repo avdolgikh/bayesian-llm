@@ -19,7 +19,7 @@ We address this gap with a **controlled 2×2 comparison** on a single architectu
 | **Variational** (train-time) | Variational FFN | BLoB LoRA |
 | **Post-hoc** (no Bayesian training) | Laplace FFN | TFB / Laplace LoRA |
 
-All four cells are evaluated on the same 76M-parameter GPT-2-style model trained on The Pile with domain-split evaluation (in-distribution: HackerNews; OOD: ArXiv, FreeLaw, PubMed). We use community-standard metrics (AUROC, FPR@95, AUPRC, ECE, Brier, NLL, AURC) and report production inference costs.
+All four cells are evaluated on the same 76M-parameter GPT-2-style model trained on The Pile with domain-split evaluation (in-distribution: HackerNews; OOD: ArXiv, FreeLaw, PubMed). We evaluate using AUROC, FPR@95, AUPRC, ECE, Brier score, NLL, and AURC, and report production inference costs.
 
 **Contributions:**
 
@@ -27,7 +27,7 @@ All four cells are evaluated on the same 76M-parameter GPT-2-style model trained
 2. LoRA-based methods (BLoB, TFB) outperform full-weight variational at 76M parameters. LoRA's rank-16 subspace constrains posteriors to meaningful directions.
 3. Definitive negative result for **diagonal Laplace** in LM OOD detection — both full-weight and LoRA parameterizations produce MI ratio 1.00×.
 4. Evidence that **TFB** (zero retraining) matches or exceeds full-weight variational inference, achieving AUROC 0.917 with only a 7-minute binary search on existing checkpoints.
-5. Production deployment recipe: mean-weights for serving (1.8× overhead), N=3 MC for uncertainty scoring (97% of full signal at 50ms/sequence).
+5. Production deployment recipe: merged mean-weights for serving (zero overhead vs deterministic), N=3 MC for uncertainty scoring (97% of full signal at 50ms/sequence).
 
 ## 2. Related Work
 
@@ -75,7 +75,7 @@ Training-Free Bayesianization (Zheng et al., 2025). Converts a trained LoRA chec
 
 **Dataset.** The Pile (Gao et al., 2020), domain-split for OOD evaluation. Training domains: StackExchange, Ubuntu IRC, EuroParl, HackerNews. OOD domains: ArXiv, FreeLaw, PubMed Central. BPE tokenization (GPT-2 vocabulary, 50,257 tokens). Training: ~100K steps, batch size 16, sequence length 256.
 
-**Evaluation protocol.** 500 in-distribution sequences (HackerNews) and 500 OOD sequences (ArXiv + FreeLaw + PubMed) at block_size=256. N=20 MC weight samples. Community-standard metrics: AUROC, FPR@95 TPR, AUPRC, ECE, Brier score, NLL, AURC. Each Bayesian method uses MI as its uncertainty score; the deterministic baseline uses max-probability.
+**Evaluation protocol.** 500 in-distribution sequences (HackerNews) and 500 OOD sequences (ArXiv + FreeLaw + PubMed) at block_size=256. N=20 MC weight samples. Metrics: AUROC, FPR@95 TPR, AUPRC, ECE, Brier score, NLL, AURC. Each Bayesian method uses MI as its uncertainty score; the deterministic baseline uses max-probability.
 
 **Hardware.** Single NVIDIA RTX 4070 (12 GB VRAM). AMP fp16 enabled. PyTorch 2.x with Flash Attention.
 
@@ -114,7 +114,6 @@ MI is the only effective uncertainty score. Predictive entropy and max-probabili
 | Method | N | Latency (ms) | Overhead | VRAM (MB) |
 |---|---|---|---|---|
 | Deterministic | 1 | 8.1 | 1.0× | 470 |
-| Mean-Weights (μ) | 1 | 14.8 | 1.8× | 382 |
 | Full Var. MC | 5 | 71.0 | 8.8× | 534 |
 | Full Var. MC | 20 | 286.9 | 35.4× | 534 |
 | BLoB LoRA MC | 3 | 50.5 | 6.2× | 382 |
@@ -144,7 +143,7 @@ For serving predictions (without uncertainty scoring), mean-weights inference us
 | Variational FFN | 24.48 | 24.41 | 0.29% |
 | BLoB LoRA | 16.12 | 16.78 | 3.93% |
 
-Mean-weights perplexity matches MC-averaged perplexity within 4%. This enables a two-tier deployment: use $\mu$ weights for serving predictions (deterministic, 1.8× overhead) and reserve MC sampling only for uncertainty estimation as a post-processing step.
+Mean-weights perplexity matches MC-averaged perplexity within 4%. For LoRA methods, the posterior mean $\mu_A$ can be merged into the base weights ($W' = W + \frac{\alpha}{r} B \mu_A$), yielding a standard dense model with **zero overhead** — identical architecture and latency to the deterministic baseline. This enables a two-tier deployment: use merged mean-weights for serving predictions (no overhead, deterministic) and reserve MC sampling only for uncertainty estimation as a post-processing step.
 
 ## 6. Discussion
 
@@ -160,7 +159,7 @@ Mean-weights perplexity matches MC-averaged perplexity within 4%. This enables a
 
 In a controlled 2×2 comparison of Bayesian uncertainty methods for language models, LoRA-based approaches (BLoB and TFB) decisively outperform full-weight methods at 76M-parameter scale, achieving AUROC >0.91 for OOD detection with 17× fewer Bayesian parameters. TFB is particularly notable: it achieves equivalent performance to trained variational methods with zero retraining — only a 7-minute binary search on an existing LoRA checkpoint. Diagonal Laplace approximation fails consistently across all configurations.
 
-For production deployment, we recommend: (1) mean-weights inference for serving predictions (1.8× overhead, deterministic), (2) N=3 MC sampling for uncertainty scoring when needed (50ms/sequence, 382 MB VRAM, 97% of full signal). LoRA-based Bayesian inference adds meaningful epistemic uncertainty estimation to language models at practical cost.
+For production deployment, we recommend: (1) merged mean-weights for serving predictions (zero overhead — LoRA means fold into base weights, producing a standard dense model), (2) N=3 MC sampling for uncertainty scoring when needed (50ms/sequence, 382 MB VRAM, 97% of full signal). LoRA-based Bayesian inference adds meaningful epistemic uncertainty estimation to language models at practical cost.
 
 ## References
 

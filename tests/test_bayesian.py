@@ -1,11 +1,13 @@
 """A1/A2 unit tests — Bayesian layers, uncertainty invariants."""
 
 import torch
+from torch import nn
 
 from minigpt.layers import (
     BayesConfig,
     BayesianLinear,
     DeterministicLinear,
+    enable_dropout,
     frozen_bayesian_sample,
     use_mean_weights,
 )
@@ -342,3 +344,94 @@ class TestHasBayesianBody:
         from minigpt.uncertainty import _has_bayesian_body
         model = MiniGPT(_small_ffn_attn_v_bayesian_config())
         assert _has_bayesian_body(model)
+
+
+# ---------------------------------------------------------------------------
+# MC Dropout: enable_dropout context manager
+# ---------------------------------------------------------------------------
+
+def _small_deterministic_dropout_config() -> GPTConfig:
+    """Deterministic model with dropout=0.5 (high rate for test visibility)."""
+    return GPTConfig(
+        vocab_size=256, block_size=32, n_layer=2, n_head=2,
+        n_embd=64, dropout=0.5, bias=True,
+        bayes_head=BayesConfig(enabled=False),
+    )
+
+
+class TestEnableDropout:
+    """Context manager that enables dropout at inference time for MC Dropout."""
+
+    def test_dropout_disabled_in_eval_mode(self):
+        """Dropout should be off in eval mode (baseline sanity check)."""
+        model = MiniGPT(_small_deterministic_dropout_config())
+        model.eval()
+        x = torch.randint(0, 256, (1, 16))
+        out1, _ = model(x)
+        out2, _ = model(x)
+        assert torch.allclose(out1, out2), "eval mode should be deterministic"
+
+    def test_enable_dropout_produces_stochastic_outputs(self):
+        """With enable_dropout, repeated forward passes should differ."""
+        torch.manual_seed(42)
+        model = MiniGPT(_small_deterministic_dropout_config())
+        model.eval()
+        x = torch.randint(0, 256, (1, 16))
+        outputs = []
+        with enable_dropout(model):
+            for _ in range(5):
+                out, _ = model(x)
+                outputs.append(out.clone())
+        # At least some passes should differ (p≈1 with dropout=0.5)
+        differ = any(not torch.allclose(outputs[0], outputs[i]) for i in range(1, 5))
+        assert differ, "enable_dropout should produce stochastic outputs"
+
+    def test_restores_eval_mode(self):
+        """After exiting the context, model should be back in eval mode."""
+        model = MiniGPT(_small_deterministic_dropout_config())
+        model.eval()
+        x = torch.randint(0, 256, (1, 16))
+        with enable_dropout(model):
+            model(x)
+        # Model should be back in eval
+        assert not model.training
+        out1, _ = model(x)
+        out2, _ = model(x)
+        assert torch.allclose(out1, out2), "should be deterministic after context exit"
+
+    def test_restores_train_mode_if_was_training(self):
+        """If model was in train mode before, should restore to train."""
+        model = MiniGPT(_small_deterministic_dropout_config())
+        model.train()
+        with enable_dropout(model):
+            pass
+        assert model.training
+
+    def test_dropout_modules_are_active_inside_context(self):
+        """All nn.Dropout modules should be in training mode inside context."""
+        model = MiniGPT(_small_deterministic_dropout_config())
+        model.eval()
+        dropout_layers = [m for m in model.modules() if isinstance(m, nn.Dropout)]
+        assert len(dropout_layers) > 0, "model should have dropout layers"
+        with enable_dropout(model):
+            for layer in dropout_layers:
+                assert layer.training, "dropout should be in training mode"
+
+    def test_mc_dropout_produces_nonzero_mi(self):
+        """MC Dropout with N>1 should produce MI > 0."""
+        torch.manual_seed(0)
+        config = _small_deterministic_dropout_config()
+        model = MiniGPT(config)
+        model.eval()
+        x = torch.randint(0, 256, (1, 16))
+        N = 10
+        all_probs = []
+        with enable_dropout(model):
+            for _ in range(N):
+                logits, _ = model(x)
+                probs = torch.softmax(logits[0].float(), dim=-1)
+                all_probs.append(probs)
+        stacked = torch.stack(all_probs)
+        metrics = _compute_token_metrics(stacked)
+        mean_mi = metrics["mi"].mean().item()
+        assert mean_mi > 0, f"MC Dropout MI should be > 0, got {mean_mi}"

@@ -224,3 +224,19 @@ def use_mean_weights(module: nn.Module):
     finally:
         for layer in stochastic_layers:
             layer._use_mean = False
+
+
+@contextmanager
+def enable_dropout(module: nn.Module):
+    """Context manager: enable dropout at inference time for MC Dropout.
+
+    Sets the model to train mode (activating all nn.Dropout layers and
+    SDPA attention dropout). Restores original mode on exit.
+    """
+    was_training = module.training
+    module.train()
+    try:
+        yield
+    finally:
+        if not was_training:
+            module.eval()

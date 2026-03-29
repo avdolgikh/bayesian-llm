@@ -1,7 +1,8 @@
 """D0 unit tests — Evaluation metrics.
 
 Tests for OOD detection (AUROC, FPR@95TPR, AUPRC), calibration (ECE, NLL, Brier),
-selective prediction (risk-coverage, AURC), and sequence-level aggregation.
+selective prediction (risk-coverage, AURC), sequence-level aggregation,
+and bootstrap confidence intervals.
 
 All tests use synthetic data — no model checkpoints required.
 """
@@ -14,6 +15,7 @@ from minigpt.uncertainty import (
     auprc,
     aurc,
     auroc,
+    bootstrap_ci,
     brier_score,
     ece,
     fpr_at_tpr,
@@ -455,3 +457,103 @@ class TestCrossMetricConsistency:
 
         assert brier_score(good_probs, targets) < brier_score(bad_probs, targets)
         assert nll(good_probs, targets) < nll(bad_probs, targets)
+
+
+# ---------------------------------------------------------------------------
+# Bootstrap confidence intervals
+# ---------------------------------------------------------------------------
+
+class TestBootstrapCI:
+    """Tests for bootstrap_ci()."""
+
+    def test_returns_three_floats(self):
+        """Should return (point_estimate, ci_low, ci_high)."""
+        scores, labels = _perfect_separation()
+        point, lo, hi = bootstrap_ci(scores, labels, auroc)
+        assert isinstance(point, float)
+        assert isinstance(lo, float)
+        assert isinstance(hi, float)
+
+    def test_point_estimate_matches_direct_call(self):
+        """Point estimate should equal metric_fn(scores, labels)."""
+        scores, labels = _partial_separation()
+        point, _, _ = bootstrap_ci(scores, labels, auroc, n_bootstrap=500)
+        direct = auroc(scores, labels)
+        assert abs(point - direct) < 1e-9
+
+    def test_ci_contains_point_estimate(self):
+        """The CI must bracket the point estimate: lo <= point <= hi."""
+        scores, labels = _partial_separation()
+        point, lo, hi = bootstrap_ci(scores, labels, auroc, n_bootstrap=1000)
+        assert lo <= point <= hi
+
+    def test_perfect_separation_tight_ci(self):
+        """With perfect separation, CI should be very tight around 1.0."""
+        scores, labels = _perfect_separation()
+        point, lo, hi = bootstrap_ci(scores, labels, auroc, n_bootstrap=1000)
+        assert point == 1.0
+        assert lo >= 0.99
+        assert hi == 1.0
+
+    def test_ci_width_decreases_with_more_data(self):
+        """Wider data => tighter CI (law of large numbers)."""
+        rng = torch.Generator().manual_seed(99)
+        # Small dataset
+        id_small = 0.3 + 0.1 * torch.randn(20, generator=rng)
+        ood_small = 0.7 + 0.1 * torch.randn(20, generator=rng)
+        scores_small = torch.cat([id_small, ood_small])
+        labels_small = torch.cat([torch.zeros(20), torch.ones(20)])
+
+        # Large dataset (same distribution)
+        id_large = 0.3 + 0.1 * torch.randn(500, generator=rng)
+        ood_large = 0.7 + 0.1 * torch.randn(500, generator=rng)
+        scores_large = torch.cat([id_large, ood_large])
+        labels_large = torch.cat([torch.zeros(500), torch.ones(500)])
+
+        _, lo_s, hi_s = bootstrap_ci(scores_small, labels_small, auroc,
+                                     n_bootstrap=2000, seed=42)
+        _, lo_l, hi_l = bootstrap_ci(scores_large, labels_large, auroc,
+                                     n_bootstrap=2000, seed=42)
+        assert (hi_l - lo_l) < (hi_s - lo_s)
+
+    def test_seed_reproducibility(self):
+        """Same seed should produce identical CIs."""
+        scores, labels = _partial_separation()
+        r1 = bootstrap_ci(scores, labels, auroc, n_bootstrap=500, seed=123)
+        r2 = bootstrap_ci(scores, labels, auroc, n_bootstrap=500, seed=123)
+        assert r1 == r2
+
+    def test_different_seeds_differ(self):
+        """Different seeds should (almost certainly) produce different CIs."""
+        scores, labels = _partial_separation()
+        _, lo1, hi1 = bootstrap_ci(scores, labels, auroc, n_bootstrap=500, seed=1)
+        _, lo2, hi2 = bootstrap_ci(scores, labels, auroc, n_bootstrap=500, seed=2)
+        assert (lo1, hi1) != (lo2, hi2)
+
+    def test_works_with_fpr_at_tpr(self):
+        """Should work with any metric_fn(scores, labels) -> float."""
+        scores, labels = _partial_separation()
+        point, lo, hi = bootstrap_ci(scores, labels, fpr_at_tpr, n_bootstrap=500)
+        assert 0.0 <= lo <= point <= hi <= 1.0
+
+    def test_works_with_auprc(self):
+        scores, labels = _partial_separation()
+        point, lo, hi = bootstrap_ci(scores, labels, auprc, n_bootstrap=500)
+        assert 0.0 <= lo <= point <= hi <= 1.0
+
+    def test_accepts_numpy_inputs(self):
+        scores, labels = _partial_separation()
+        point, lo, hi = bootstrap_ci(
+            scores.numpy(), labels.numpy(), auroc, n_bootstrap=500,
+        )
+        assert isinstance(point, float)
+        assert lo <= point <= hi
+
+    def test_custom_ci_level(self):
+        """90% CI should be tighter than 99% CI."""
+        scores, labels = _partial_separation()
+        _, lo_90, hi_90 = bootstrap_ci(scores, labels, auroc,
+                                       n_bootstrap=2000, ci=0.90, seed=42)
+        _, lo_99, hi_99 = bootstrap_ci(scores, labels, auroc,
+                                       n_bootstrap=2000, ci=0.99, seed=42)
+        assert (hi_90 - lo_90) <= (hi_99 - lo_99)

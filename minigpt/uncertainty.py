@@ -425,3 +425,52 @@ def aggregate_sequence_scores(
         return float((token_scores > threshold).float().mean())
     else:
         raise ValueError(f"Unknown aggregation method: {method}")
+
+
+# ---------------------------------------------------------------------------
+# Bootstrap confidence intervals
+# ---------------------------------------------------------------------------
+
+def bootstrap_ci(
+    scores,
+    labels,
+    metric_fn,
+    n_bootstrap: int = 10_000,
+    ci: float = 0.95,
+    seed: int | None = None,
+) -> tuple[float, float, float]:
+    """Bootstrap confidence interval for any metric_fn(scores, labels) -> float.
+
+    Resamples *sequences* (paired scores+labels) with replacement.
+
+    Args:
+        scores: per-sequence uncertainty scores.
+        labels: binary labels (0=ID, 1=OOD).
+        metric_fn: callable(scores, labels) -> float (e.g. auroc, fpr_at_tpr).
+        n_bootstrap: number of bootstrap resamples.
+        ci: confidence level (default 0.95 for 95% CI).
+        seed: RNG seed for reproducibility.
+
+    Returns:
+        (point_estimate, ci_low, ci_high).
+    """
+    scores_np = _to_numpy(scores)
+    labels_np = _to_numpy(labels)
+    n = len(scores_np)
+
+    point = float(metric_fn(scores_np, labels_np))
+
+    rng = np.random.default_rng(seed)
+    boot_values = []
+    for _ in range(n_bootstrap):
+        idx = rng.integers(0, n, size=n)
+        b_labels = labels_np[idx]
+        if len(np.unique(b_labels)) < 2:
+            continue  # skip degenerate resamples (single class)
+        boot_values.append(metric_fn(scores_np[idx], b_labels))
+
+    boot_values = np.asarray(boot_values)
+    alpha = 1.0 - ci
+    lo = float(np.percentile(boot_values, 100 * alpha / 2))
+    hi = float(np.percentile(boot_values, 100 * (1 - alpha / 2)))
+    return point, lo, hi

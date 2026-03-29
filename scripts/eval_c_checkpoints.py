@@ -1,13 +1,16 @@
-"""Evaluate C checkpoints with community-standard metrics (D1).
+"""Evaluate C checkpoints with D1 metrics + bootstrap CIs.
 
 Runs AUROC, FPR@95, AUPRC, ECE, Brier, NLL, AURC on all 6 C checkpoints.
-Outputs publication-ready markdown tables.
+Outputs publication-ready markdown tables. Optionally saves per-sequence
+scores and computes bootstrap 95% confidence intervals.
 
 Usage:
     python scripts/eval_c_checkpoints.py                    # eval all 6
     python scripts/eval_c_checkpoints.py --milestone c3     # eval one
     python scripts/eval_c_checkpoints.py --n-samples 10     # fewer MC passes
     python scripts/eval_c_checkpoints.py --n-sequences 200  # fewer test sequences
+    python scripts/eval_c_checkpoints.py --bootstrap        # with 95% CIs
+    python scripts/eval_c_checkpoints.py --from-scores data/d1_scores.pt  # CIs from saved scores
 """
 
 # ruff: noqa: E402
@@ -43,6 +46,7 @@ from minigpt.uncertainty import (
     auprc,
     aurc,
     auroc,
+    bootstrap_ci,
     ece,
     fpr_at_tpr,
 )
@@ -336,11 +340,15 @@ def evaluate_milestone(
     labels = torch.cat([torch.zeros(n_id), torch.ones(n_ood)])
     results = {"mi_ratio": MI_RATIOS[milestone]}
 
+    # Save raw per-sequence scores for bootstrap
+    raw_scores = {}
     for name in ("mi", "pred_ent", "max_prob_unc"):
         scores = torch.tensor(id_scores[name] + ood_scores[name])
+        raw_scores[name] = scores
         results[f"auroc_{name}"] = auroc(scores, labels)
         results[f"fpr95_{name}"] = fpr_at_tpr(scores, labels)
         results[f"auprc_{name}"] = auprc(scores, labels)
+    raw_scores["labels"] = labels
 
     # --- Calibration (ID only, per-token) ---
     all_max_prob = torch.cat(cal_max_probs)
@@ -357,6 +365,7 @@ def evaluate_milestone(
 
     elapsed = time.time() - t0
     results["time_s"] = elapsed
+    results["_raw_scores"] = raw_scores
     print(f"  Completed in {elapsed:.0f}s")
 
     # Print summary
@@ -369,16 +378,96 @@ def evaluate_milestone(
 
 
 # ---------------------------------------------------------------------------
+# Score persistence
+# ---------------------------------------------------------------------------
+
+def save_scores(all_results: dict, path: Path):
+    """Save per-sequence scores for all milestones to a .pt file."""
+    payload = {}
+    for m, r in all_results.items():
+        if "_raw_scores" in r:
+            payload[m] = r["_raw_scores"]
+    torch.save(payload, path)
+    print(f"Saved per-sequence scores to {path}")
+
+
+def load_scores(path: Path) -> dict:
+    """Load per-sequence scores and recompute all metrics."""
+    payload = torch.load(path, weights_only=True)
+    all_results = {}
+    for m, raw in payload.items():
+        labels = raw["labels"]
+        r = {"mi_ratio": MI_RATIOS[m], "_raw_scores": raw}
+        for name in ("mi", "pred_ent", "max_prob_unc"):
+            scores = raw[name]
+            r[f"auroc_{name}"] = auroc(scores, labels)
+            r[f"fpr95_{name}"] = fpr_at_tpr(scores, labels)
+            r[f"auprc_{name}"] = auprc(scores, labels)
+        all_results[m] = r
+    print(f"Loaded scores for {list(all_results.keys())} from {path}")
+    return all_results
+
+
+# ---------------------------------------------------------------------------
+# Bootstrap CIs
+# ---------------------------------------------------------------------------
+
+def compute_bootstrap_cis(
+    all_results: dict,
+    n_bootstrap: int = 10_000,
+    seed: int = 42,
+) -> dict:
+    """Compute bootstrap 95% CIs for AUROC, FPR@95, AUPRC."""
+    cis = {}
+    for m, r in all_results.items():
+        raw = r.get("_raw_scores")
+        if raw is None:
+            continue
+        labels = raw["labels"]
+        ood_key = "max_prob_unc" if m == "c0" else "mi"
+        scores = raw[ood_key]
+        print(f"  {LABELS[m][0]}: bootstrapping ({n_bootstrap} resamples)...")
+        _, lo, hi = bootstrap_ci(scores, labels, auroc,
+                                 n_bootstrap=n_bootstrap, seed=seed)
+        _, fpr_lo, fpr_hi = bootstrap_ci(scores, labels, fpr_at_tpr,
+                                         n_bootstrap=n_bootstrap, seed=seed)
+        _, auprc_lo, auprc_hi = bootstrap_ci(scores, labels, auprc,
+                                             n_bootstrap=n_bootstrap, seed=seed)
+        cis[m] = {
+            "auroc_ci": (lo, hi),
+            "fpr95_ci": (fpr_lo, fpr_hi),
+            "auprc_ci": (auprc_lo, auprc_hi),
+        }
+    return cis
+
+
+# ---------------------------------------------------------------------------
 # Output tables
 # ---------------------------------------------------------------------------
 
-def print_primary_table(results: dict):
+def _fmt_ci(value: float, ci: tuple[float, float] | None) -> str:
+    """Format value with optional CI: '0.916 [0.89, 0.94]'."""
+    if ci is None:
+        return f"{value:.3f}"
+    return f"{value:.3f} [{ci[0]:.3f}, {ci[1]:.3f}]"
+
+
+def print_primary_table(results: dict, cis: dict | None = None):
     """Primary table: MI ratio + all metrics."""
+    has_ci = cis is not None
     print("\n## Primary Results Table\n")
-    print("| Milestone | Method          | MI Ratio | AUROC | FPR@95 | AUPRC "
-          "| ECE    | Brier | NLL  | AURC  |")
-    print("|-----------|-----------------|----------|-------|--------|-------"
-          "|--------|-------|------|-------|")
+    if has_ci:
+        print("| Milestone | Method          | MI Ratio | AUROC [95% CI]              "
+              "| FPR@95 [95% CI]             | AUPRC [95% CI]              "
+              "| ECE    | Brier | NLL  | AURC  |")
+        print("|-----------|-----------------|----------|-----------------------------"
+              "|-----------------------------|-----------------------------"
+              "|--------|-------|------|-------|")
+    else:
+        print("| Milestone | Method          | MI Ratio | AUROC | FPR@95 | AUPRC "
+              "| ECE    | Brier | NLL  | AURC  |")
+        print("|-----------|-----------------|----------|-------|--------|-------"
+              "|--------|-------|------|-------|")
 
     for m in ALL_MILESTONES:
         if m not in results:
@@ -386,17 +475,33 @@ def print_primary_table(results: dict):
         r = results[m]
         label, method_name = LABELS[m]
         mi_ratio = f"{r['mi_ratio']:.2f}x" if r["mi_ratio"] else "--"
-
-        # C0: use max-prob for OOD detection (MI=0 for deterministic)
         ood_key = "max_prob_unc" if m == "c0" else "mi"
 
-        print(
-            f"| {label:<9} | {method_name:<15} | {mi_ratio:>8} "
-            f"| {r[f'auroc_{ood_key}']:.3f} | {r[f'fpr95_{ood_key}']:.3f}  "
-            f"| {r[f'auprc_{ood_key}']:.3f} "
-            f"| {r['ece']:.4f} | {r['brier']:.3f} | {r['nll']:.2f} "
-            f"| {r['aurc']:.4f} |"
-        )
+        ci = cis.get(m) if cis else None
+        auroc_str = _fmt_ci(r[f"auroc_{ood_key}"], ci["auroc_ci"] if ci else None)
+        fpr_str = _fmt_ci(r[f"fpr95_{ood_key}"], ci["fpr95_ci"] if ci else None)
+        auprc_str = _fmt_ci(r[f"auprc_{ood_key}"], ci["auprc_ci"] if ci else None)
+
+        ece_str = f"{r['ece']:.4f}" if "ece" in r else "--"
+        brier_str = f"{r['brier']:.3f}" if "brier" in r else "--"
+        nll_str = f"{r['nll']:.2f}" if "nll" in r else "--"
+        aurc_str = f"{r['aurc']:.4f}" if "aurc" in r else "--"
+
+        if has_ci:
+            print(
+                f"| {label:<9} | {method_name:<15} | {mi_ratio:>8} "
+                f"| {auroc_str:<27} | {fpr_str:<27} | {auprc_str:<27} "
+                f"| {ece_str:>6} | {brier_str:>5} | {nll_str:>4} "
+                f"| {aurc_str:>5} |"
+            )
+        else:
+            print(
+                f"| {label:<9} | {method_name:<15} | {mi_ratio:>8} "
+                f"| {r[f'auroc_{ood_key}']:.3f} | {r[f'fpr95_{ood_key}']:.3f}  "
+                f"| {r[f'auprc_{ood_key}']:.3f} "
+                f"| {ece_str:>6} | {brier_str:>5} | {nll_str:>4} "
+                f"| {aurc_str:>5} |"
+            )
 
 
 def print_secondary_table(results: dict):
@@ -410,11 +515,13 @@ def print_secondary_table(results: dict):
             continue
         r = results[m]
         label = LABELS[m][0]
-        mi_auroc = f"{r['auroc_mi']:.3f}" if m != "c0" else "--"
+        mi_auroc = f"{r['auroc_mi']:.3f}" if m != "c0" and "auroc_mi" in r else "--"
+        pred_ent = f"{r['auroc_pred_ent']:.3f}" if "auroc_pred_ent" in r else "--"
+        max_prob = f"{r['auroc_max_prob_unc']:.3f}" if "auroc_max_prob_unc" in r else "--"
         print(
             f"| {label:<9} | {mi_auroc:>8} "
-            f"| {r['auroc_pred_ent']:>19.3f} "
-            f"| {r['auroc_max_prob_unc']:>14.3f} |"
+            f"| {pred_ent:>19} "
+            f"| {max_prob:>14} |"
         )
 
 
@@ -436,8 +543,36 @@ def main():
         "--n-sequences", type=int, default=500,
         help="Test sequences per split (default: 500)",
     )
+    p.add_argument(
+        "--bootstrap", action="store_true",
+        help="Compute 95%% bootstrap CIs for AUROC, FPR@95, AUPRC",
+    )
+    p.add_argument(
+        "--n-bootstrap", type=int, default=10_000,
+        help="Bootstrap resamples (default: 10000)",
+    )
+    p.add_argument(
+        "--save-scores", type=str, default=None,
+        help="Save per-sequence scores to .pt file",
+    )
+    p.add_argument(
+        "--from-scores", type=str, default=None,
+        help="Load saved scores and compute tables/CIs (no GPU needed)",
+    )
     args = p.parse_args()
 
+    # --- Fast path: load saved scores (no GPU, no checkpoints) ---
+    if args.from_scores:
+        all_results = load_scores(Path(args.from_scores))
+        cis = None
+        if args.bootstrap:
+            print(f"\nBootstrap CIs ({args.n_bootstrap} resamples)...")
+            cis = compute_bootstrap_cis(all_results, args.n_bootstrap)
+        print_primary_table(all_results, cis)
+        print_secondary_table(all_results)
+        return
+
+    # --- Full eval path ---
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
     print(f"MC samples: {args.n_samples}, sequences per split: {args.n_sequences}")
@@ -447,9 +582,9 @@ def main():
     # Validate checkpoints
     valid = []
     for m in milestones:
-        missing = [p for p in _checkpoint_paths(m) if not p.exists()]
+        missing = [cp for cp in _checkpoint_paths(m) if not cp.exists()]
         if missing:
-            print(f"WARNING: {m} — missing: {', '.join(str(p) for p in missing)}. Skipping.")
+            print(f"WARNING: {m} — missing: {', '.join(str(cp) for cp in missing)}. Skipping.")
         else:
             valid.append(m)
     milestones = valid
@@ -472,8 +607,18 @@ def main():
     total_elapsed = time.time() - total_t0
     print(f"\nTotal wall time: {total_elapsed:.0f}s ({total_elapsed / 60:.1f} min)")
 
+    # Save scores if requested
+    if args.save_scores:
+        save_scores(all_results, Path(args.save_scores))
+
+    # Bootstrap CIs
+    cis = None
+    if args.bootstrap:
+        print(f"\nBootstrap CIs ({args.n_bootstrap} resamples)...")
+        cis = compute_bootstrap_cis(all_results, args.n_bootstrap)
+
     # Print publication-ready tables
-    print_primary_table(all_results)
+    print_primary_table(all_results, cis)
     print_secondary_table(all_results)
 
 
