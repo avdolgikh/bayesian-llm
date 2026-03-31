@@ -21,6 +21,8 @@ We address this gap with a **controlled 2×2 comparison** on a single architectu
 
 All four cells are evaluated on the same 76M-parameter GPT-2-style model trained on The Pile with domain-split evaluation (in-distribution: HackerNews; OOD: ArXiv, FreeLaw, PubMed). We evaluate using AUROC, FPR@95, AUPRC, ECE, Brier score, NLL, and AURC, and report production inference costs.
 
+![Fig 1. Point Weights vs Bayesian Weight Posteriors](../figures/fig1_point_vs_bayesian.png)
+
 **Contributions:**
 
 1. First controlled head-to-head comparison of variational vs post-hoc Bayesian methods on the same LM architecture, dataset, and evaluation protocol, including an MC Dropout baseline.
@@ -28,6 +30,8 @@ All four cells are evaluated on the same 76M-parameter GPT-2-style model trained
 3. Definitive negative result for **diagonal Laplace** in LM OOD detection — both full-weight and LoRA parameterizations produce MI ratio 1.00×. This does not extend to KFAC or full-Hessian variants.
 4. **MC Dropout** (zero extra training) achieves AUROC 0.898 — a surprisingly strong baseline whose confidence interval overlaps with trained BLoB LoRA (0.909). **TFB** (also zero Bayesian training) achieves the best AUROC (0.917) via SVD-structured variance on existing LoRA checkpoints.
 5. Production deployment recipe: merged mean-weights for serving (zero overhead vs deterministic), N=3 MC for uncertainty scoring (97% of full signal at 50ms/sequence).
+
+![Fig 2. Four Bayesian Methods: 2×2 Comparison at 76M Parameters](../figures/fig2_method_matrix.png)
 
 ## 2. Related Work
 
@@ -60,6 +64,8 @@ Standard Bayes by Backprop applied to all FFN layers (fc and proj sublayers acro
 ### 3.3. BLoB LoRA
 
 Bayesian Low-Rank Adaptation by Backpropagation (Wang et al., 2024). LoRA decomposes weight updates as $\Delta W = \frac{\alpha}{r} BA$, with rank $r=16$. BLoB places variational Gaussian posteriors on $A$ while keeping $B$ deterministic. Via a KL factorization theorem, the full-weight KL reduces to a diagonal computation in the low-rank A-space. Training uses Flipout for variance reduction. Total Bayesian parameters: 1.97M (2.5% of model).
+
+![Fig 3. BLoB LoRA: Variational Posterior on Low-Rank A Matrix](../figures/fig3_blob_lora.png)
 
 ### 3.4. Laplace Approximation
 
@@ -98,6 +104,8 @@ Monte Carlo Dropout (Gal & Ghahramani, 2016) interprets dropout at inference as 
 | **BLoB LoRA** | **Var × LoRA** | **1.53×** | **0.909 [0.890, 0.925]** | **0.424** | **0.909** | 0.044 | 0.658 | 3.06 | **0.330** |
 | **TFB LoRA** | **Post × LoRA** | **1.35×** | **0.917 [0.900, 0.933]** | **0.384** | **0.918** | **0.022** | 0.658 | 3.06 | 0.337 |
 | Diag. Laplace LoRA | Post × LoRA | 1.00× | 0.494 [0.459, 0.529] | 0.956 | 0.495 | 0.034 | 0.998 | 9.73 | 0.963 |
+
+![Fig 5. OOD Detection: AUROC with 95% Bootstrap CIs](../figures/fig5_auroc_bars.png)
 
 The two LoRA methods — BLoB (variational) and TFB (post-hoc) — achieve the strongest OOD detection (AUROC 0.909 and 0.917, with overlapping 95% bootstrap CIs). MC Dropout, a zero-training baseline applied to the deterministic checkpoint, is surprisingly competitive at AUROC 0.898 with the best calibration (ECE=0.012). Full-weight variational inference reaches 0.874 but requires 17× more Bayesian parameters than LoRA methods. Both diagonal Laplace variants produce near-random OOD detection (AUROC ≈ 0.5) with severely degraded calibration (Brier ≈ 1.0, NLL > 9.0). All 95% CIs are computed via 10,000 bootstrap resamples of per-sequence scores.
 
@@ -138,6 +146,8 @@ Each MC sample requires a full forward pass because the residual stream diverges
 | BLoB LoRA MC | 0.500 | **0.861** | **0.879** | 0.880 | 0.888 |
 | TFB LoRA MC | 0.500 | 0.847 | 0.859 | 0.881 | 0.886 |
 
+![Fig 6. AUROC vs MC Samples: N=3 Captures 97% of Signal](../figures/fig6_n_vs_auroc.png)
+
 **N=3 is the knee.** AUROC jumps from 0.50 (N=1, no disagreement possible) to ~0.86 (N=3) — 97% of the N=20 signal. Further samples add diminishing returns: N=5→20 contributes <3 AUROC points. The production sweet spot is **N=3 at 50ms/sequence with 382 MB VRAM**.
 
 ### 5.3. Mean-Weights Inference
@@ -155,9 +165,13 @@ Mean-weights perplexity matches MC-averaged perplexity within 4%. For LoRA metho
 
 ## 6. Discussion
 
+![Fig 7. Scaling Inversion: MI Ratio at 4L vs 16L](../figures/fig7_scaling_inversion.png)
+
 **LoRA vs full-weight: an observational comparison.** LoRA-based methods (BLoB, TFB) achieved stronger OOD detection than full-weight variational inference in our experiments (AUROC 0.909–0.917 vs 0.874). However, this comparison is confounded by at least three factors: (1) **training procedure** — variational FFN trains the entire model from scratch with ELBO, while LoRA methods fine-tune adapters on a pre-trained deterministic backbone; (2) **backbone quality** — LoRA methods inherit a well-converged base model (ppl=14.3), while full-weight variational must learn representations and posteriors jointly (ppl=21.9); (3) **parameter count** — 1.97M vs 33.6M Bayesian parameters. One hypothesis is that LoRA's rank-16 subspace constrains posteriors to directions that matter for adaptation, producing more meaningful weight disagreement. But disentangling this subspace effect from the training-procedure and backbone-quality confounds requires ablations (e.g., variational fine-tuning on the pre-trained backbone, or BLoB LoRA from random initialization) that we leave to future work.
 
 **Diagonal Laplace: a hypothesis for the failure.** Diagonal Laplace approximates the posterior covariance as the inverse of the diagonal Fisher information matrix. We observe that at convergence, the per-parameter Fisher values are near-zero for our well-trained language models — the loss landscape appears flat in most coordinate directions. We hypothesize that this produces an overly diffuse posterior that generates no meaningful prediction disagreement. The failure is consistent across full weights (33.6M params) and LoRA weights (1.97M params) at both 4L and 16L scale, suggesting the pattern may be general for diagonal Laplace on language models — though we note this does not extend to KFAC or full-Hessian variants, which capture off-diagonal curvature.
+
+![Fig 4. Why Post-Hoc Variance Structure Matters](../figures/fig4_tfb_vs_laplace.png)
 
 **TFB vs diagonal Laplace: a possible explanation.** Both are post-hoc methods operating on LoRA parameters, yet TFB succeeds (AUROC 0.917) where diagonal Laplace fails (0.494). The key difference appears to be variance structure: diagonal Laplace uses curvature (diagonal Fisher), which in our experiments carries no directional information at convergence. TFB uses SVD of the B matrix, which captures the geometric structure of the LoRA subspace — singular values encode how much each direction contributes to the weight update. We conjecture that this geometric information, being independent of the loss landscape's curvature, remains informative at convergence. Testing this hypothesis would require comparing TFB's SVD-structured variance against alternative variance structures (e.g., random isotropic, Fisher-weighted).
 

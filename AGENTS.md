@@ -31,11 +31,12 @@ experiments/      # Runnable scripts + pipeline
   c_milestones.py      # C-specific: templates, gates, knobs, comparison report
   c_pipeline.py        # C pipeline CLI: wires hooks+policy, providers, entry point
   agent_briefing.md    # HP tuning playbook injected into agent prompts
-scripts/          # Utilities (dump_mlflow_run, compare_runs, profile_gpu, eval_checkpoint)
+scripts/          # Utilities (dump_mlflow_run, compare_runs, profile_gpu, eval_checkpoint, generate_figures)
 tests/            # pytest (217 tests: 134 core + 83 pipeline)
 data/             # Local datasets (gitignored)
+figures/          # Generated paper figures (PDF/PNG) — from scripts/generate_figures.py
 specs/            # Design documents
-docs/             # PDF papers (theory reference)
+docs/             # Paper (paper.md), arXiv requirements, metrics guide, reference PDFs
 agents/           # Detail documents (read on demand, not every task)
 ```
 
@@ -52,6 +53,14 @@ agents/           # Detail documents (read on demand, not every task)
 - [`agents/technical-reference.md`](agents/technical-reference.md) — Datasets, tokenization, experiment tracking, uncertainty measurement, config system, tests listing, references
 - [`agents/design-rationale.md`](agents/design-rationale.md) — Why specific technical decisions were made (A1-B3, C scaling hypothesis, infra fixes)
 - [`agents/pipeline-guide.md`](agents/pipeline-guide.md) — Agentic HP optimization pipeline (architecture, providers, features, CLI, template HPs)
+
+## Skills
+- [`agents/skills/check-paper-refs/`](agents/skills/check-paper-refs/skill.md) — Verify paper references against arXiv/Scholar. Script: `scripts/extract_refs.py`.
+- [`agents/skills/convert-md-to-pdf/`](agents/skills/convert-md-to-pdf/skill.md) — Markdown -> PDF with MathJax + Mermaid + Puppeteer. Scripts: `build-pdf.ps1`/`.sh`, `md-to-pdf.config.js`. Prereqs: `npm install -g md-to-pdf @mermaid-js/mermaid-cli`.
+
+## Figures & TikZ
+- **Current:** All 7 paper figures generated via matplotlib (`scripts/generate_figures.py` -> `figures/`).
+- **TikZ/PGF (deferred):** For future conference submission, convert conceptual diagrams (Fig 1-4) to TikZ for native LaTeX rendering. Use `tikzpicture` + `pgfplots`; libraries: `positioning`, `arrows.meta`, `decorations`. Data plots (Fig 5-7) fine as matplotlib. Switch when targeting NeurIPS/ICML where visual polish matters.
 
 ## Milestones
 
@@ -75,6 +84,22 @@ agents/           # Detail documents (read on demand, not every task)
 - **References: FIXED** — 4/11 references had wrong authors (BLoB, TFB, Laplace-LoRA, ScalaBL). All verified against arXiv/proceedings. Orphaned Lakshminarayanan ref removed.
 
 Full results and cross-scale comparison: `report.md`. Paper improvements spec: `specs/paper-improvements.md`. Reviewer concerns: `specs/paper-reviewer-concerns.md`.
+
+### Paper Publishing (arXiv)
+- **Paper content: COMPLETE** — `docs/paper.md` (Abstract, 7 sections, 5 tables, 11 references).
+- **arXiv requirements:** `docs/arxiv-requirements.md`. Target categories: `cs.LG`, cross-list `stat.ML`.
+- **Figures: GENERATED** — `scripts/generate_figures.py` produces 7 figures to `figures/`:
+  - Fig 1: Point weights vs Bayesian weight posteriors (conceptual)
+  - Fig 2: 2x2 method matrix with AUROC results
+  - Fig 3: BLoB LoRA internals (A matrix distributions, B deterministic)
+  - Fig 4: TFB vs diagonal Laplace (SVD structure vs flat Fisher)
+  - Fig 5: AUROC bar chart with 95% bootstrap CIs
+  - Fig 6: N vs AUROC curve (N=3 knee)
+  - Fig 7: Scaling inversion (4L vs 16L MI ratios)
+- **PDF build:** `docs/paper.pdf` generated (1.5 MB). Skill: `/convert-md-to-pdf docs/paper.md docs/paper.pdf`. Pipeline: mmdc (Mermaid) -> md-to-pdf (MathJax + Puppeteer -> PDF). Prereqs: `npm install -g md-to-pdf @mermaid-js/mermaid-cli`.
+- **Figures in paper:** All 7 figures injected into `docs/paper.md` as PNG references at semantically correct locations.
+- **Postponed experiments:** Deep Ensembles, LoRA ablation, multi-seed runs, KFAC Laplace — all documented, none blocking publication.
+- **Next steps:** Review PDF quality (figures, math rendering, tables), iterate on figure polish, then arXiv submission.
 
 ## Environment & Tooling
 - **`uv`** for dev tooling (lint, test, deps). **Global Python** (CUDA PyTorch) for GPU training only.
