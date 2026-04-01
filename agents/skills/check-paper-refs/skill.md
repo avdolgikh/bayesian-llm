@@ -1,6 +1,15 @@
-# Skill: Check Paper References
+---
+name: check-paper-refs
+description: Verify academic paper references — extract citations, cross-reference, and web-verify author names, titles, years, venues against actual papers.
+user-invocable: true
+allowed-tools: Read, Grep, Bash, Agent, WebSearch, WebFetch
+effort: high
+argument-hint: <paper-path>
+---
 
-Verify all references in an academic markdown paper for correctness.
+# Check Paper References
+
+Verify all references in an academic paper (markdown or LaTeX) for correctness.
 
 ## When to Use
 
@@ -8,9 +17,18 @@ Verify all references in an academic markdown paper for correctness.
 - After editing references or adding new citations
 - When inheriting a paper with unverified references
 
+## Contents
+
+```
+check-paper-refs/
+  skill.md                    # This file
+  scripts/
+    extract_refs.py           # Extraction script (markdown papers)
+```
+
 ## Input
 
-Path to a markdown paper file (e.g., `docs/paper.md`).
+Path to a paper file (markdown or LaTeX).
 
 ## Workflow
 
@@ -19,7 +37,7 @@ Path to a markdown paper file (e.g., `docs/paper.md`).
 Run the extraction script to get a structured report of all references and in-text citations, including cross-reference issues (orphaned refs, missing refs):
 
 ```
-python agents/skills/check-paper-refs/scripts/extract_refs.py <paper.md>
+python <skill-dir>/scripts/extract_refs.py <paper-path>
 ```
 
 Review the output. Fix any orphaned or missing references before proceeding.
@@ -53,7 +71,7 @@ Common mistakes to watch for:
 ### Step 4: Apply fixes
 
 After all discrepancies are identified, update both:
-- The `## References` section (author names, title, venue)
+- The references section (author names, title, venue)
 - In-text citations if the first author changed (e.g., `Zheng et al.` -> `Shi et al.`)
 
 ## Output

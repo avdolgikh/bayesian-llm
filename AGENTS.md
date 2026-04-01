@@ -55,6 +55,8 @@ agents/           # Detail documents (read on demand, not every task)
 - [`agents/pipeline-guide.md`](agents/pipeline-guide.md) — Agentic HP optimization pipeline (architecture, providers, features, CLI, template HPs)
 
 ## Skills
+Two-layer architecture: **portable** `agents/skills/*/skill.md` (YAML frontmatter + full docs, repo-agnostic) + **thin wrappers** `.claude/skills/*/SKILL.md` (frontmatter + 1 line with project defaults). Portable skills use `<skill-dir>` placeholders — copy the whole directory to any project.
+
 - [`agents/skills/check-paper-refs/`](agents/skills/check-paper-refs/skill.md) — Verify paper references against arXiv/Scholar. Script: `scripts/extract_refs.py`.
 - [`agents/skills/convert-md-to-pdf/`](agents/skills/convert-md-to-pdf/skill.md) — Markdown -> PDF with MathJax + Mermaid + Puppeteer. Scripts: `build-pdf.ps1`/`.sh`, `md-to-pdf.config.js`. Prereqs: `npm install -g md-to-pdf @mermaid-js/mermaid-cli`.
 - [`agents/skills/build-latex-pdf/`](agents/skills/build-latex-pdf/skill.md) — LaTeX -> PDF via Docker + TeX Live + pdflatex. NeurIPS preprint format, Times fonts, booktabs, natbib. Self-contained (`.sty` + build scripts bundled). Prereqs: Docker.

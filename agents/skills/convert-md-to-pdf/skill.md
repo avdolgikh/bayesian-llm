@@ -1,4 +1,13 @@
-# Skill: Convert Markdown to PDF
+---
+name: convert-md-to-pdf
+description: Convert markdown paper (with LaTeX math, tables, figures) to publication-quality PDF via Mermaid + MathJax + Puppeteer pipeline.
+user-invocable: true
+allowed-tools: Read, Bash
+effort: medium
+argument-hint: <input.md> <output.pdf>
+---
+
+# Convert Markdown to PDF
 
 Convert a markdown document with LaTeX formulas, tables, and images to a publication-quality PDF.
 
@@ -6,7 +15,18 @@ Convert a markdown document with LaTeX formulas, tables, and images to a publica
 
 - Before submitting a paper to arXiv
 - When generating a PDF for review or sharing
-- After editing `docs/paper.md` or any markdown document with math/figures
+- After editing any markdown document with math/figures
+
+## Contents
+
+```
+convert-md-to-pdf/
+  skill.md                    # This file
+  scripts/
+    build-pdf.ps1             # PowerShell orchestrator (Windows)
+    build-pdf.sh              # Bash orchestrator (Linux/macOS)
+    md-to-pdf.config.js       # All-in-one config: MathJax injection, math protection, CSS, PDF options
+```
 
 ## Prerequisites
 
@@ -29,8 +49,8 @@ MathJax 3 is loaded from CDN at generation time (requires internet).
 ## Input
 
 Two arguments:
-1. Path to input markdown file (e.g., `docs/paper.md`)
-2. Path to output PDF file (e.g., `paper.pdf`)
+1. Path to input markdown file
+2. Path to output PDF file
 
 ## Workflow
 
@@ -48,13 +68,15 @@ If any are missing, instruct the user to install them.
 
 **Windows (PowerShell):**
 ```powershell
-powershell agents/skills/convert-md-to-pdf/scripts/build-pdf.ps1 <input.md> <output.pdf>
+powershell <skill-dir>/scripts/build-pdf.ps1 <input.md> <output.pdf>
 ```
 
 **Linux/macOS (Bash):**
 ```bash
-bash agents/skills/convert-md-to-pdf/scripts/build-pdf.sh <input.md> <output.pdf>
+bash <skill-dir>/scripts/build-pdf.sh <input.md> <output.pdf>
 ```
+
+Replace `<skill-dir>` with the path to this skill directory in your project.
 
 ### Step 3: Verify output
 
@@ -96,23 +118,9 @@ Three things happen internally:
 | Math formulas not rendered | `md-to-pdf` doesn't know about LaTeX | `script` injects MathJax 3 config + CDN; Puppeteer executes it before printing |
 | Tables/images unstyled | `md-to-pdf` default CSS is minimal | `css` adds borders, headers, striped rows, centered images, blockquotes |
 
-## Project Files
-
-| File | Role |
-|---|---|
-| `agents/skills/convert-md-to-pdf/scripts/build-pdf.ps1` | PowerShell orchestrator (Windows) |
-| `agents/skills/convert-md-to-pdf/scripts/build-pdf.sh` | Bash orchestrator (Linux/macOS) |
-| `agents/skills/convert-md-to-pdf/scripts/md-to-pdf.config.js` | All-in-one config: MathJax injection, math protection, CSS, PDF options |
-
 ## Figures
 
-The paper references figures as `![caption](../figures/filename.pdf)`. For md-to-pdf (which uses HTML rendering), PNG figures may work better than PDF. Generate PNG versions first:
-
-```bash
-uv run python scripts/generate_figures.py --png
-```
-
-Then ensure the image paths in the markdown resolve correctly relative to where the build script runs. If paths break, temporarily adjust them or copy figures alongside the markdown.
+If your paper references PDF figures, PNG may work better for md-to-pdf (HTML rendering). Generate PNG versions and ensure image paths in the markdown resolve correctly relative to the input file's directory.
 
 ## Troubleshooting
 

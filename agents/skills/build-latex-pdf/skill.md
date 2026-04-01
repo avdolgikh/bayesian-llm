@@ -1,4 +1,13 @@
-# Skill: Build LaTeX PDF
+---
+name: build-latex-pdf
+description: Compile LaTeX paper to professional PDF using Docker + TeX Live (pdflatex, NeurIPS format with Times fonts, booktabs, natbib). Self-contained skill — portable across projects.
+user-invocable: true
+allowed-tools: Read, Bash
+effort: medium
+argument-hint: <input.tex> [output.pdf]
+---
+
+# Build LaTeX PDF
 
 Compile a LaTeX paper to professional PDF using Docker + TeX Live + pdflatex. Produces NeurIPS-formatted output with Times fonts, booktabs tables, and natbib bibliography.
 
@@ -25,14 +34,16 @@ build-latex-pdf/
 
 ```bash
 # Bash (Git Bash / Linux / macOS)
-bash agents/skills/build-latex-pdf/scripts/build.sh docs/paper.tex
+bash <skill-dir>/scripts/build.sh <input.tex>
 
 # With custom output path
-bash agents/skills/build-latex-pdf/scripts/build.sh docs/paper.tex output/paper.pdf
+bash <skill-dir>/scripts/build.sh <input.tex> <output.pdf>
 
 # PowerShell
-powershell agents/skills/build-latex-pdf/scripts/build.ps1 -TexFile docs/paper.tex
+powershell <skill-dir>/scripts/build.ps1 -TexFile <input.tex>
 ```
+
+Replace `<skill-dir>` with the path to this skill directory in your project.
 
 ## How it works
 
@@ -40,7 +51,7 @@ powershell agents/skills/build-latex-pdf/scripts/build.ps1 -TexFile docs/paper.t
 2. Mounts the project root into Docker as `/repo` (so relative paths like `../figures/` resolve)
 3. Mounts this skill directory as `/skill` (read-only)
 4. Sets `TEXINPUTS=/skill//:` so LaTeX finds the bundled `.sty` without copying
-5. Runs the standard `pdflatex → bibtex → pdflatex → pdflatex` recipe
+5. Runs the standard `pdflatex -> bibtex -> pdflatex -> pdflatex` recipe
 6. Cleans intermediate files (`.aux`, `.bbl`, `.blg`, `.log`, `.out`)
 
 ## Your .tex file needs
@@ -54,8 +65,8 @@ powershell agents/skills/build-latex-pdf/scripts/build.ps1 -TexFile docs/paper.t
 If Docker is unavailable, [tectonic](https://github.com/tectonic-typesetting/tectonic/releases) (~20 MB binary) can compile the paper. Copy `neurips_2024.sty` to the tex directory first:
 
 ```bash
-cp agents/skills/build-latex-pdf/references/neurips_2024.sty docs/
-cd docs && tectonic paper.tex
+cp <skill-dir>/references/neurips_2024.sty <tex-dir>/
+cd <tex-dir> && tectonic paper.tex
 ```
 
 Note: tectonic uses XeTeX (Latin Modern fonts), not pdflatex (Times). Output will look slightly different.
