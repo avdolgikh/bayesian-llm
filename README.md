@@ -74,6 +74,14 @@ The agent receives full context (AGENTS.md + briefing) and produces evidence-bas
 
 See [`agents/pipeline-guide.md`](agents/pipeline-guide.md) and [`specs/c-pipeline-spec.md`](specs/c-pipeline-spec.md) for details.
 
+## Skills
+
+Reusable agent skills in [`agents/skills/`](agents/skills/):
+
+- **[`check-paper-refs`](agents/skills/check-paper-refs/skill.md)** — Verify paper references against arXiv/Scholar. Catches wrong authors, outdated citations.
+- **[`convert-md-to-pdf`](agents/skills/convert-md-to-pdf/skill.md)** — Markdown to PDF with LaTeX math, Mermaid diagrams, and Puppeteer rendering.
+- **[`build-latex-pdf`](agents/skills/build-latex-pdf/skill.md)** — LaTeX to PDF via Docker + TeX Live. NeurIPS preprint format. Portable — copy the skill directory to any project.
+
 ## Repository Structure
 
 ```

@@ -57,6 +57,7 @@ agents/           # Detail documents (read on demand, not every task)
 ## Skills
 - [`agents/skills/check-paper-refs/`](agents/skills/check-paper-refs/skill.md) — Verify paper references against arXiv/Scholar. Script: `scripts/extract_refs.py`.
 - [`agents/skills/convert-md-to-pdf/`](agents/skills/convert-md-to-pdf/skill.md) — Markdown -> PDF with MathJax + Mermaid + Puppeteer. Scripts: `build-pdf.ps1`/`.sh`, `md-to-pdf.config.js`. Prereqs: `npm install -g md-to-pdf @mermaid-js/mermaid-cli`.
+- [`agents/skills/build-latex-pdf/`](agents/skills/build-latex-pdf/skill.md) — LaTeX -> PDF via Docker + TeX Live + pdflatex. NeurIPS preprint format, Times fonts, booktabs, natbib. Self-contained (`.sty` + build scripts bundled). Prereqs: Docker.
 
 ## Figures & TikZ
 - **Current:** All 7 paper figures generated via matplotlib (`scripts/generate_figures.py` -> `figures/`).
@@ -86,7 +87,7 @@ agents/           # Detail documents (read on demand, not every task)
 Full results and cross-scale comparison: `report.md`. Paper improvements spec: `specs/paper-improvements.md`. Reviewer concerns: `specs/paper-reviewer-concerns.md`.
 
 ### Paper Publishing (arXiv)
-- **Paper content: COMPLETE** — `docs/paper.md` (Abstract, 7 sections, 5 tables, 11 references).
+- **Paper content: COMPLETE** — `paper/paper.md` (Abstract, 7 sections, 5 tables, 11 references).
 - **arXiv requirements:** `docs/arxiv-requirements.md`. Target categories: `cs.LG`, cross-list `stat.ML`.
 - **Figures: GENERATED** — `scripts/generate_figures.py` produces 7 figures to `figures/`:
   - Fig 1: Point weights vs Bayesian weight posteriors (conceptual)
@@ -96,10 +97,12 @@ Full results and cross-scale comparison: `report.md`. Paper improvements spec: `
   - Fig 5: AUROC bar chart with 95% bootstrap CIs
   - Fig 6: N vs AUROC curve (N=3 knee)
   - Fig 7: Scaling inversion (4L vs 16L MI ratios)
-- **PDF build:** `docs/paper.pdf` generated (1.5 MB). Skill: `/convert-md-to-pdf docs/paper.md docs/paper.pdf`. Pipeline: mmdc (Mermaid) -> md-to-pdf (MathJax + Puppeteer -> PDF). Prereqs: `npm install -g md-to-pdf @mermaid-js/mermaid-cli`.
-- **Figures in paper:** All 7 figures injected into `docs/paper.md` as PNG references at semantically correct locations.
+- **LaTeX paper: DONE** — `paper/paper.tex` (NeurIPS preprint format, 10 pages). `paper/references.bib` (11 entries). Compiled via Docker + TeX Live + pdflatex. Times fonts, booktabs tables, natbib bibliography.
+- **LaTeX PDF build:** `paper/paper.pdf` (1.4 MB, 10 pages). Skill: `/build-latex-pdf paper/paper.tex`. Self-contained skill dir with `.sty` + build scripts. Prereqs: Docker.
+- **Markdown PDF (legacy):** Replaced by LaTeX build.
+- **Figures in paper:** All 7 PNG figures from `figures/` referenced in `paper/paper.tex` with proper LaTeX figure floats and captions.
 - **Postponed experiments:** Deep Ensembles, LoRA ablation, multi-seed runs, KFAC Laplace — all documented, none blocking publication.
-- **Next steps:** Review PDF quality (figures, math rendering, tables), iterate on figure polish, then arXiv submission.
+- **Next steps:** Review LaTeX PDF quality, then arXiv submission (submit `.tex` + `.bib` + `.sty` + figures).
 
 ## Environment & Tooling
 - **`uv`** for dev tooling (lint, test, deps). **Global Python** (CUDA PyTorch) for GPU training only.

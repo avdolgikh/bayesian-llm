@@ -10,11 +10,12 @@ import argparse
 from pathlib import Path
 
 import matplotlib
+
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
-from matplotlib.patches import FancyBboxPatch, FancyArrowPatch
-import numpy as np
+
+import matplotlib.pyplot as plt  # noqa: E402
+import numpy as np  # noqa: E402
+from matplotlib.patches import FancyBboxPatch  # noqa: E402
 
 OUT_DIR = Path(__file__).resolve().parent.parent / "figures"
 
@@ -135,8 +136,6 @@ def fig1_point_vs_bayesian(fmt="pdf"):
              "N weight samples -> N predictions -> disagreement = epistemic uncertainty (MI)",
              ha="center", fontsize=10, style="italic", color="#555555")
 
-    fig.suptitle("Fig 1. Point Weights vs Bayesian Weight Posteriors",
-                 fontsize=14, fontweight="bold", y=1.02)
     fig.tight_layout()
     _save(fig, "fig1_point_vs_bayesian", fmt)
 
@@ -204,8 +203,6 @@ def fig2_method_matrix(fmt="pdf"):
              "overlapping CI with BLoB LoRA",
              ha="center", fontsize=9, style="italic", color=COLORS["mc_dropout"])
 
-    fig.suptitle("Fig 2. Four Bayesian Methods: 2×2 Comparison at 76M Parameters",
-                 fontsize=13, fontweight="bold", y=1.02)
     fig.tight_layout(rect=[0.05, 0.02, 1, 0.96])
     _save(fig, "fig2_method_matrix", fmt)
 
@@ -264,13 +261,13 @@ def fig3_blob_lora(fmt="pdf"):
 
     # Matrix B (deterministic): d × r  (show 4×2)
     b_vals = [0.3, -0.1, 0.5, 0.2, -0.4, 0.7, 0.1, -0.3]
-    bx = _draw_matrix(ax, 1, 4, 4, 2, "$B$ (deterministic)", False, b_vals)
+    _draw_matrix(ax, 1, 4, 4, 2, "$B$ (deterministic)", False, b_vals)
 
     # Multiplication sign
     ax.text(3.5, 2.5, "×", fontsize=20, ha="center", va="center")
 
     # Matrix A (Bayesian): r × d  (show 2×4)
-    ax_mid = _draw_matrix(ax, 5, 4, 2, 4, "$A$ (Bayesian: $\\mu, \\sigma$)", True)
+    _draw_matrix(ax, 5, 4, 2, 4, "$A$ (Bayesian: $\\mu, \\sigma$)", True)
 
     # Equals sign
     ax.text(9.0, 2.5, "=", fontsize=20, ha="center", va="center")
@@ -293,8 +290,7 @@ def fig3_blob_lora(fmt="pdf"):
                       edgecolor=COLORS["accent"], lw=1.2),
             linespacing=1.6)
 
-    fig.suptitle("Fig 3. BLoB LoRA: Variational Posterior on Low-Rank A Matrix",
-                 fontsize=13, fontweight="bold")
+    fig.tight_layout()
     _save(fig, "fig3_blob_lora", fmt)
 
 
@@ -350,8 +346,8 @@ def fig4_tfb_vs_laplace(fmt="pdf"):
 
     ax_tfb_sv = ax_tfb
     bar_colors = plt.cm.Purples(np.linspace(0.3, 0.9, rank))
-    bars = ax_tfb_sv.bar(range(rank), singular_vals, color=bar_colors,
-                         edgecolor="#555555", lw=0.5, alpha=0.8)
+    ax_tfb_sv.bar(range(rank), singular_vals, color=bar_colors,
+                   edgecolor="#555555", lw=0.5, alpha=0.8)
     ax_tfb_sv.set_xlabel("SVD direction $i$")
     ax_tfb_sv.set_ylabel("Singular value $d_i$", color=COLORS["post_lora"])
 
@@ -378,8 +374,6 @@ def fig4_tfb_vs_laplace(fmt="pdf"):
                    transform=ax_tfb_sv.transAxes, ha="center", fontsize=10,
                    fontweight="bold", color=COLORS["success"], bbox=result_box_g)
 
-    fig.suptitle("Fig 4. Why Post-Hoc Variance Structure Matters",
-                 fontsize=13, fontweight="bold", y=1.02)
     fig.tight_layout()
     _save(fig, "fig4_tfb_vs_laplace", fmt)
 
@@ -425,8 +419,6 @@ def fig5_auroc_bars(fmt="pdf"):
     ax.text(0.948, 1, "CIs\noverlap", fontsize=7, ha="center", va="center",
             color="#888888")
 
-    ax.set_title("Fig 5. OOD Detection: AUROC with 95% Bootstrap CIs",
-                 fontsize=12, fontweight="bold", pad=10)
     fig.tight_layout()
     _save(fig, "fig5_auroc_bars", fmt)
 
@@ -476,8 +468,6 @@ def fig6_n_vs_auroc(fmt="pdf"):
     ax.set_xticks(ns)
     ax.set_ylim(0.45, 0.95)
     ax.legend(loc="lower right")
-    ax.set_title("Fig 6. AUROC vs MC Samples: N=3 Captures 97% of Signal",
-                 fontsize=12, fontweight="bold", pad=10)
     fig.tight_layout()
     _save(fig, "fig6_n_vs_auroc", fmt)
 
@@ -537,8 +527,6 @@ def fig7_scaling_inversion(fmt="pdf"):
                 bbox=dict(boxstyle="round,pad=0.3", facecolor="#FFF8E1",
                           edgecolor=COLORS["accent"]))
 
-    ax.set_title("Fig 7. Scaling Inversion: MI Ratio at 4L vs 16L",
-                 fontsize=12, fontweight="bold", pad=10)
     fig.tight_layout()
     _save(fig, "fig7_scaling_inversion", fmt)
 
