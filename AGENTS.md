@@ -60,6 +60,7 @@ Two-layer architecture: **portable** `agents/skills/*/skill.md` (YAML frontmatte
 - [`agents/skills/check-paper-refs/`](agents/skills/check-paper-refs/skill.md) — Verify paper references against arXiv/Scholar. Script: `scripts/extract_refs.py`.
 - [`agents/skills/convert-md-to-pdf/`](agents/skills/convert-md-to-pdf/skill.md) — Markdown -> PDF with MathJax + Mermaid + Puppeteer. Scripts: `build-pdf.ps1`/`.sh`, `md-to-pdf.config.js`. Prereqs: `npm install -g md-to-pdf @mermaid-js/mermaid-cli`.
 - [`agents/skills/build-latex-pdf/`](agents/skills/build-latex-pdf/skill.md) — LaTeX -> PDF via Docker + TeX Live + pdflatex. NeurIPS preprint format, Times fonts, booktabs, natbib. Self-contained (`.sty` + build scripts bundled). Prereqs: Docker.
+- [`agents/skills/build-arxiv-submission/`](agents/skills/build-arxiv-submission/skill.md) — LaTeX -> arXiv submission zip. Auto-detects figures/bib/sty, rewrites paths, verifies compilation via Docker. Scripts: `build.sh`/`build.ps1`. Prereqs: Docker (optional, for verification).
 
 ## Figures & TikZ
 - **Current:** All 7 paper figures generated via matplotlib (`scripts/generate_figures.py` -> `figures/`).
