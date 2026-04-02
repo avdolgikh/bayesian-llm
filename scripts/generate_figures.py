@@ -131,11 +131,6 @@ def fig1_point_vs_bayesian(fmt="pdf"):
     _draw_layer(ax_bay, r"Bayesian: $w_{ij} \sim \mathcal{N}(\mu, \sigma^2)$",
                 bayesian=True)
 
-    # Bottom annotation
-    fig.text(0.5, -0.02,
-             "N weight samples -> N predictions -> disagreement = epistemic uncertainty (MI)",
-             ha="center", fontsize=10, style="italic", color="#555555")
-
     fig.tight_layout()
     _save(fig, "fig1_point_vs_bayesian", fmt)
 
@@ -162,7 +157,7 @@ def fig2_method_matrix(fmt="pdf"):
          "AUROC 0.536", False),
         ("TFB LoRA\n(LoRA Adapters)", "post_lora",
          "Post-hoc on LoRA via SVD:\n$\\Omega_{ij} = \\sigma_q / d_i$\n"
-         "Fit: binary search (7 min)\n1.97M params",
+         "Fit: fast binary search\n1.97M params",
          "AUROC 0.917", True),
     ]
 
@@ -197,12 +192,6 @@ def fig2_method_matrix(fmt="pdf"):
         axes[0, j].set_title(label, fontsize=11, fontweight="bold",
                              color="#444444", pad=10)
 
-    # Also add MC Dropout annotation
-    fig.text(0.5, -0.03,
-             "Plus MC Dropout baseline (zero training): AUROC 0.898 — "
-             "overlapping CI with BLoB LoRA",
-             ha="center", fontsize=9, style="italic", color=COLORS["mc_dropout"])
-
     fig.tight_layout(rect=[0.05, 0.02, 1, 0.96])
     _save(fig, "fig2_method_matrix", fmt)
 
@@ -212,9 +201,9 @@ def fig2_method_matrix(fmt="pdf"):
 # ===================================================================
 def fig3_blob_lora(fmt="pdf"):
     """ΔW = (α/r) B A — A has distributions, B is deterministic."""
-    fig, ax = plt.subplots(1, 1, figsize=(10, 5))
-    ax.set_xlim(-1, 13)
-    ax.set_ylim(-1.5, 6)
+    fig, ax = plt.subplots(1, 1, figsize=(9, 3.5))
+    ax.set_xlim(-0.2, 13.2)
+    ax.set_ylim(0.8, 5.5)
     ax.set_aspect("equal")
     ax.axis("off")
 
@@ -254,9 +243,6 @@ def fig3_blob_lora(fmt="pdf"):
         mid_x = x + (cols - 1) * cell_w / 2
         ax.text(mid_x, y + cell_h * 0.8, label, ha="center", va="bottom",
                 fontsize=11, fontweight="bold")
-        # Dimensions
-        ax.text(mid_x, y - rows * cell_h + 0.05, f"{rows}×{cols}",
-                ha="center", va="top", fontsize=8, color="#888888")
         return mid_x
 
     # Matrix B (deterministic): d × r  (show 4×2)
@@ -280,15 +266,6 @@ def fig3_blob_lora(fmt="pdf"):
     # Annotations
     ax.annotate("$\\frac{\\alpha}{r}$", xy=(3.5, 3.5), fontsize=14,
                 ha="center", va="center", color="#555555")
-
-    # Key insight box
-    box_text = ("Only $A$ carries uncertainty ($\\mu_{ij}, \\sigma_{ij}$)\n"
-                "$B$ is deterministic -> KL factorizes in rank-$r$ A-space\n"
-                "1.97M Bayesian params (2.5% of 76M model)")
-    ax.text(6.5, -1.0, box_text, ha="center", va="center", fontsize=9,
-            bbox=dict(boxstyle="round,pad=0.5", facecolor="#FFF8E1",
-                      edgecolor=COLORS["accent"], lw=1.2),
-            linespacing=1.6)
 
     fig.tight_layout()
     _save(fig, "fig3_blob_lora", fmt)
