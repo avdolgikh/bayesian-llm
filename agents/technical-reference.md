@@ -45,7 +45,12 @@ Key conventions:
 - **PyYAML gotcha:** write `3.0e-4` not `3e-4` (parsed as string without decimal).
 - Checkpoint resume: saves full config, `best_val_loss`, RNG states. Best-checkpoint: ELBO for Bayesian, CE for deterministic.
 
-## Tests (217 total: 134 core + 83 pipeline)
+## Figures & TikZ
+
+- **Current:** 3 paper figures in `paper/figures/` (Fig 1: conceptual posteriors, Fig 2: 2x2 method matrix, Fig 3: BLoB architecture). Source PNGs generated via matplotlib (`scripts/generate_figures.py` -> `figures/`).
+- **TikZ/PGF (deferred):** For future conference submission, convert conceptual diagrams to TikZ for native LaTeX rendering. Use `tikzpicture` + `pgfplots`; libraries: `positioning`, `arrows.meta`, `decorations`. Switch when targeting NeurIPS/ICML where visual polish matters.
+
+## Tests (288 total: 134 core + 83 pipeline + 71 metrics/eval)
 
 ```
 tests/

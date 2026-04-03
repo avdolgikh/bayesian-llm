@@ -4,62 +4,63 @@ Estimating **epistemic uncertainty** in language models via Bayesian inference o
 
 Replace point-estimate weights with learned posterior distributions (mean + variance per weight). Sample weights multiple times, measure prediction disagreement via **mutual information** (MI). High MI on a given input = the model knows it doesn't know.
 
-## What This Is
+## Paper
 
-A **comparative study** of 4 Bayesian methods in a 2x2 matrix — (variational vs post-hoc) x (full weights vs LoRA) — tested at two scales on the same architecture, dataset, and evaluation protocol:
+**Epistemic Uncertainty in Language Models via Bayesian Inference over Weights: A Comparative Study**
 
-- **4-layer** (4L/4H/256d, ~16M params) on AG News (topic-split OOD)
-- **16-layer** (16L/8H/512d, ~76M params) on The Pile (domain-split OOD)
+A comparative study of 4 Bayesian methods in a 2x2 matrix — (variational vs post-hoc) x (full weights vs LoRA) — tested at two scales on the same architecture, dataset, and evaluation protocol.
 
-The 16L experiments are run by an **agentic HP optimization pipeline** — an LLM agent (Claude) that automatically tunes hyperparameters, diagnoses failures, and proposes adjustments.
+- [`paper/paper.pdf`](paper/paper.pdf) — compiled paper (NeurIPS preprint format, 8 pages)
+- [`paper/paper.tex`](paper/paper.tex) — LaTeX source
+- [`paper/arxiv-submission.zip`](paper/arxiv-submission.zip) — arXiv submission package
 
 ## Results
 
-### 4-Layer Scale (AG News)
+### OOD Detection (16-Layer, The Pile, 76M params)
 
-| Milestone | Method | Type | MI Ratio | Test ID PPL | Bayesian Params |
-|-----------|--------|------|----------|-------------|-----------------|
-| A0 | Deterministic baseline | — | — | 49.1 | 0 |
-| A1 | Variational output head | Variational x Full | 1.36x | 56.3 | 25.7M |
-| **A2** | **Variational FFN** | **Variational x Full** | **1.43x** | 53.5 | 4.2M |
-| A3 | Variational FFN + Attn V | Variational x Full | <1.29x | 59.2 | 4.7M |
-| B1 | Laplace FFN | Post-hoc x Full | 1.00x | 41.0 | 2.1M |
-| B2 | BLoB LoRA | Variational x LoRA | 1.13x | 226.9 | 163K |
-| B3-TFB | TFB LoRA | Post-hoc x LoRA | 1.10x | 224.6 | 82K |
-| B3-LAP | Laplace LoRA | Post-hoc x LoRA | 1.00x | 224.6 | 82K |
+Community-standard evaluation: 500 ID + 500 OOD sequences, N=20 MC samples, 95% bootstrap CIs.
 
-### 16-Layer Scale (The Pile)
+| Method | Type | AUROC [95% CI] | MI Ratio | FPR@95 | ECE |
+|--------|------|-----------------|----------|--------|-----|
+| TFB LoRA | Post-hoc x LoRA | **0.917** [0.900, 0.933] | 1.35x | 0.384 | 0.022 |
+| BLoB LoRA | Variational x LoRA | **0.909** [0.890, 0.925] | 1.53x | 0.424 | 0.044 |
+| MC Dropout | Baseline | **0.898** [0.877, 0.917] | -- | 0.368 | 0.012 |
+| Variational FFN | Variational x Full | 0.874 [0.852, 0.895] | 1.32x | 0.494 | 0.023 |
+| Deterministic | -- | 0.591 [0.556, 0.626] | -- | 0.794 | 0.022 |
+| Diag. Laplace FFN | Post-hoc x Full | 0.536 [0.500, 0.572] | 1.00x | 0.934 | 0.033 |
+| Diag. Laplace LoRA | Post-hoc x LoRA | 0.494 [0.459, 0.529] | 1.00x | 0.956 | 0.034 |
 
-| Milestone | Method | Type | MI Ratio | Test ID PPL | Training Time |
-|-----------|--------|------|----------|-------------|---------------|
-| C0 | Deterministic baseline | — | — | 14.3 | 4.5 hrs |
-| C1 | Variational FFN | Variational x Full | 1.32x | 21.9 | 3.3 hrs |
-| C2 | Laplace FFN | Post-hoc x Full | 1.00x | 12.7 | 8s fit |
-| **C3** | **BLoB LoRA** | **Variational x LoRA** | **1.53x** | 64.9 | 27 min |
-| C4-TFB | TFB LoRA | Post-hoc x LoRA | 1.35x | 66.3 | 7 min fit |
-| C4-LAP | Laplace LoRA | Post-hoc x LoRA | 1.00x | 65.4 | 17s fit |
+### Cross-Scale Comparison (MI Ratio)
 
-### Cross-Scale Comparison
+| Method | 4L (16M params) | 16L (76M params) | Scales? |
+|--------|------------------|-------------------|---------|
+| Variational full | 1.43x | 1.32x | Slight decrease |
+| BLoB LoRA | 1.13x | **1.53x** | Strong increase |
+| TFB post-hoc LoRA | 1.10x | **1.35x** | Strong increase |
+| Diag. Laplace full | 1.00x | 1.00x | Dead |
+| Diag. Laplace LoRA | 1.00x | 1.00x | Dead |
 
-| Method | 4L MI Ratio | 16L MI Ratio | Scales? |
-|--------|-------------|--------------|---------|
-| Variational full (A2 / C1) | 1.43x | 1.32x | Slight decrease |
-| BLoB LoRA (B2 / C3) | 1.13x | **1.53x** | Strong increase |
-| TFB post-hoc LoRA (B3 / C4) | 1.10x | **1.35x** | Strong increase |
-| Laplace full (B1 / C2) | 1.00x | 1.00x | Dead |
-| Laplace LoRA (B3 / C4) | 1.00x | 1.00x | Dead |
+Full results including production benchmarks and AUROC-vs-N tradeoffs: [`report.md`](report.md).
 
 ## Key Findings
 
-1. **Scaling inversion.** At 4L, full-weight variational (1.43x) beats LoRA (1.13x). At 16L, reversed — LoRA (1.53x) beats full-weight (1.32x). LoRA's rank-16 subspace constrains posteriors to meaningful directions.
+1. **Scaling inversion (observational).** At 4L, full-weight variational (1.43x) beats LoRA (1.13x). At 16L, reversed — LoRA (1.53x) beats full-weight (1.32x). One hypothesis: LoRA's rank-16 subspace constrains posteriors to meaningful directions. Confounded by training procedure, backbone quality, and parameter count.
 
-2. **TFB (zero training) matches variational full-weight.** C4-TFB 1.35x ~ C1 1.32x, but TFB needs only a 7-minute binary search on a trained checkpoint vs 3.3 hours of Bayesian training.
+2. **TFB (zero training) matches variational full-weight.** C4-TFB AUROC 0.917 vs C1 0.874, but TFB needs only a 7-minute binary search on a trained checkpoint vs 3.3 hours of Bayesian training.
 
-3. **Diagonal Laplace is dead for LM OOD detection.** Four independent experiments (B1, B3-LAP, C2, C4-LAP) all produce MI ratio 1.00x. Diagonal Fisher curvature is flat at convergence.
+3. **Diagonal Laplace is dead for LM OOD detection.** Four independent experiments all produce MI ratio 1.00x. Diagonal Fisher curvature is flat at convergence. Does not extend to KFAC or full-Hessian variants (untested).
 
-4. **SVD-structured variance works where curvature fails.** TFB (1.35x) and Laplace (1.00x) are both post-hoc on LoRA. TFB succeeds because SVD captures geometric structure; Laplace fails because diagonal curvature carries no directional information.
+4. **SVD-structured variance works where curvature fails.** TFB succeeds (AUROC 0.917) because SVD captures geometric structure; diagonal Laplace fails (AUROC ~0.5) because curvature carries no directional information. Both are post-hoc on LoRA.
 
-5. **Post-hoc methods need subspace structure.** Post-hoc on full weights = 1.00x. Post-hoc on LoRA with SVD = 1.35x. The LoRA subspace makes post-hoc methods viable.
+5. **Post-hoc methods need subspace structure.** Post-hoc on full weights = dead. Post-hoc on LoRA with SVD = 0.917 AUROC. The LoRA subspace makes post-hoc methods viable.
+
+6. **MC Dropout is surprisingly competitive.** Zero extra training, just dropout-at-inference: AUROC 0.898 — overlapping CIs with trained Bayesian methods. Best calibration (ECE=0.012).
+
+7. **N=3 MC samples capture most of the signal.** AUROC jumps 0.50 -> 0.86 at N=3 (97% of N=20 signal). Diminishing returns beyond N=5. Production sweet spot: N=3 at 50ms/seq, 382 MB VRAM.
+
+8. **Mean-weights inference is production-ready.** Posterior mean perplexity matches MC-averaged within 4%. Use mean weights for serving (zero overhead), N=3 MC for uncertainty scoring.
+
+9. **Bootstrap CIs show overlapping top methods.** TFB, BLoB, and MC Dropout all overlap — none is statistically significantly better at this sample size. Variational FFN is clearly below. Diagonal Laplace is clearly dead.
 
 ## Agentic Pipeline
 
@@ -76,29 +77,33 @@ See [`agents/pipeline-guide.md`](agents/pipeline-guide.md) and [`specs/c-pipelin
 
 ## Skills
 
-Reusable agent skills in [`agents/skills/`](agents/skills/):
+Reusable agent skills in [`agents/skills/`](agents/skills/). Two-layer architecture: portable `agents/skills/*/skill.md` (repo-agnostic, full docs) + thin `.claude/skills/*/SKILL.md` wrappers (project defaults).
 
 - **[`check-paper-refs`](agents/skills/check-paper-refs/skill.md)** — Verify paper references against arXiv/Scholar. Catches wrong authors, outdated citations.
 - **[`convert-md-to-pdf`](agents/skills/convert-md-to-pdf/skill.md)** — Markdown to PDF with LaTeX math, Mermaid diagrams, and Puppeteer rendering.
 - **[`build-latex-pdf`](agents/skills/build-latex-pdf/skill.md)** — LaTeX to PDF via Docker + TeX Live. NeurIPS preprint format. Portable — copy the skill directory to any project.
+- **[`build-arxiv-submission`](agents/skills/build-arxiv-submission/skill.md)** — LaTeX to arXiv submission zip. Auto-detects figures/bib/sty, rewrites paths, verifies compilation via Docker.
 
 ## Repository Structure
 
 ```
-minigpt/       Model, training, Bayesian layers, LoRA, Laplace, TFB
+minigpt/       Model, training, Bayesian layers, LoRA, Laplace, TFB, uncertainty metrics
 experiments/   Experiment scripts (A0-B3) + agentic pipeline (C0-C4)
-tests/         217 tests (134 core + 83 pipeline)
+tests/         288 tests (134 core + 83 pipeline + 71 metrics/eval)
 configs/       YAML configs per experiment
+paper/         LaTeX paper, compiled PDF, arXiv submission zip
+figures/       Generated paper figures (PDF/PNG) — from scripts/generate_figures.py
+scripts/       Utilities (MLflow inspection, GPU profiling, checkpoint eval, figure generation)
 specs/         Design documents
-scripts/       Utilities (MLflow inspection, GPU profiling, checkpoint eval)
-agents/        Detail documents (research findings, pipeline guide)
+docs/          arXiv requirements, metrics guide, reference PDFs
+agents/        Detail documents, portable skills, pipeline guide
 ```
 
 ## Quick Start
 
 ```bash
 uv sync                                          # install dependencies
-uv run pytest tests/ -v                          # 217 tests
+uv run pytest tests/ -v                          # 288 tests
 uv run ruff check minigpt/ experiments/ tests/   # lint
 
 # Example experiments (require CUDA):
@@ -106,6 +111,12 @@ python experiments/a0_baseline.py --config configs/a0_agnews.yaml       # determ
 python experiments/a2_bayes_ffn.py --config configs/a2_agnews.yaml      # variational FFN (best at 4L)
 python experiments/c_pipeline.py --milestone c3 --provider claude       # agentic pipeline (16L BLoB LoRA)
 python experiments/c_pipeline.py --compare                              # cross-scale comparison report
+
+# Evaluation & benchmarks:
+python scripts/eval_c_checkpoints.py --from-scores data/d1_scores.pt --bootstrap  # AUROC + CIs
+python scripts/benchmark_inference.py                                              # latency/VRAM
+python scripts/eval_mc_dropout.py                                                  # MC Dropout baseline
+python scripts/generate_figures.py --png                                           # paper figures
 ```
 
 Requires Python 3.11+ and CUDA-enabled PyTorch for GPU training.
@@ -125,3 +136,7 @@ Requires Python 3.11+ and CUDA-enabled PyTorch for GPU training.
 - **Laplace-LoRA** (2023) — Laplace approximation on LoRA params. [arXiv:2308.13111](https://arxiv.org/abs/2308.13111)
 - **Laplace Redux** (NeurIPS 2021) — Effortless Bayesian Deep Learning. [arXiv:2106.14806](https://arxiv.org/abs/2106.14806)
 - **ICLA** (WACV 2025) — Identity Curvature Laplace for OOD. [arXiv:2312.10464](https://arxiv.org/abs/2312.10464)
+
+## License
+
+MIT — see [LICENSE](LICENSE).

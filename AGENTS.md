@@ -31,13 +31,14 @@ experiments/      # Runnable scripts + pipeline
   c_milestones.py      # C-specific: templates, gates, knobs, comparison report
   c_pipeline.py        # C pipeline CLI: wires hooks+policy, providers, entry point
   agent_briefing.md    # HP tuning playbook injected into agent prompts
-scripts/          # Utilities (dump_mlflow_run, compare_runs, profile_gpu, eval_checkpoint, generate_figures)
-tests/            # pytest (217 tests: 134 core + 83 pipeline)
-data/             # Local datasets (gitignored)
+scripts/          # Utilities (dump_mlflow_run, compare_runs, profile_gpu, eval_checkpoint, generate_figures, benchmark_inference, eval_mc_dropout, verify_mean_weights)
+tests/            # pytest (288 tests: 134 core + 83 pipeline + 71 metrics/eval)
+data/             # Local datasets + saved scores (gitignored)
+paper/            # LaTeX paper, compiled PDF, arXiv submission zip, figures/
 figures/          # Generated paper figures (PDF/PNG) — from scripts/generate_figures.py
 specs/            # Design documents
-docs/             # Paper (paper.md), arXiv requirements, metrics guide, reference PDFs
-agents/           # Detail documents (read on demand, not every task)
+docs/             # arXiv requirements, metrics guide, reference PDFs
+agents/           # Detail documents, portable skills (read on demand, not every task)
 ```
 
 ## Hard Rules
@@ -48,11 +49,28 @@ agents/           # Detail documents (read on demand, not every task)
 - **No unsolicited AGENTS.md cleanup.** Do not reformat or rewrite text unless explicitly requested.
 - **Explicit configs.** Every parameter in YAML — never rely on code defaults.
 - **LaTeX formulas in specs.** All formulas in `specs/` documents must use LaTeX.
+- **Keep repo docs fresh.** When any of the following change, update the corresponding files immediately — not after, not in a batch:
+  - **New skill created** → update AGENTS.md Skills section + README.md Skills section.
+  - **Test count changes** → update AGENTS.md project structure + README.md (both the structure block and Quick Start commands).
+  - **Milestone completes** → update `report.md` first (source of truth), then README.md summary, then AGENTS.md milestones.
+  - **Paper status changes** (new build, figure change, submission) → update AGENTS.md Paper Publishing section.
+  - **New script added** → update AGENTS.md project structure scripts line + README.md Quick Start if user-facing.
+  - **Reusable workflow emerges** (build, verify, convert, check) → wrap as portable skill in `agents/skills/` + thin wrapper in `.claude/skills/`. Update AGENTS.md + README.md Skills sections.
+- **Keep AGENTS.md lean.** This file is the entry point, not the encyclopedia. When a section grows beyond a concise summary, extract the detail to an `agents/*.md` file immediately and leave a summary + link here. Rule of thumb: if a section exceeds ~10 lines of dense content, it belongs in a detail doc.
 
 ## Detail Documents
-- [`agents/technical-reference.md`](agents/technical-reference.md) — Datasets, tokenization, experiment tracking, uncertainty measurement, config system, tests listing, references
-- [`agents/design-rationale.md`](agents/design-rationale.md) — Why specific technical decisions were made (A1-B3, C scaling hypothesis, infra fixes)
-- [`agents/pipeline-guide.md`](agents/pipeline-guide.md) — Agentic HP optimization pipeline (architecture, providers, features, CLI, template HPs)
+**AGENTS.md is the entry point — not the whole picture.** It contains rules, structure, milestones, and status. The detail documents below extend it with deep technical content. Read them on demand (not every task). **Keep them fresh using the same on-the-fly principle as AGENTS.md itself:**
+- **Technical change** (new dataset, new metric, config change, new tests, figures) → update `agents/technical-reference.md`.
+- **Design decision made** (why method X, why not Y, tradeoff rationale) → update `agents/design-rationale.md`.
+- **Pipeline change** (new provider, new hook, CLI change, template HPs) → update `agents/pipeline-guide.md`.
+- **Milestone completes or new detail surfaces** (run IDs, bug fixes, interim findings) → update `agents/milestone-history.md`.
+
+| Document | What it covers | When to read |
+|----------|---------------|--------------|
+| [`agents/technical-reference.md`](agents/technical-reference.md) | Datasets, tokenization, experiment tracking, uncertainty, config, tests, figures, references | Working on data, configs, metrics, or need API details |
+| [`agents/design-rationale.md`](agents/design-rationale.md) | Why specific technical decisions were made (A1-B3, C scaling hypothesis, infra fixes) | Need to understand *why* something was built a certain way |
+| [`agents/pipeline-guide.md`](agents/pipeline-guide.md) | Agentic HP optimization pipeline (architecture, providers, features, CLI, template HPs) | Working on or running the C pipeline |
+| [`agents/milestone-history.md`](agents/milestone-history.md) | Detailed record of every milestone — results, MLflow run IDs, bug fixes, pipeline events | Investigating what happened in a specific milestone or tracing a result |
 
 ## Skills
 Two-layer architecture: **portable** `agents/skills/*/skill.md` (YAML frontmatter + full docs, repo-agnostic) + **thin wrappers** `.claude/skills/*/SKILL.md` (frontmatter + 1 line with project defaults). Portable skills use `<skill-dir>` placeholders — copy the whole directory to any project.
@@ -62,50 +80,32 @@ Two-layer architecture: **portable** `agents/skills/*/skill.md` (YAML frontmatte
 - [`agents/skills/build-latex-pdf/`](agents/skills/build-latex-pdf/skill.md) — LaTeX -> PDF via Docker + TeX Live + pdflatex. NeurIPS preprint format, Times fonts, booktabs, natbib. Self-contained (`.sty` + build scripts bundled). Prereqs: Docker.
 - [`agents/skills/build-arxiv-submission/`](agents/skills/build-arxiv-submission/skill.md) — LaTeX -> arXiv submission zip. Auto-detects figures/bib/sty, rewrites paths, verifies compilation via Docker. Scripts: `build.sh`/`build.ps1`. Prereqs: Docker (optional, for verification).
 
-## Figures & TikZ
-- **Current:** All 7 paper figures generated via matplotlib (`scripts/generate_figures.py` -> `figures/`).
-- **TikZ/PGF (deferred):** For future conference submission, convert conceptual diagrams (Fig 1-4) to TikZ for native LaTeX rendering. Use `tikzpicture` + `pgfplots`; libraries: `positioning`, `arrows.meta`, `decorations`. Data plots (Fig 5-7) fine as matplotlib. Switch when targeting NeurIPS/ICML where visual polish matters.
-
 ## Milestones
 
-- **A0: DONE** — Deterministic baseline (4L/4H/256d, 16M params). test_id_ppl=49.11.
-- **A1: DONE** — Bayesian output head. MI ratio **1.36x**. Ceiling: vocabulary-level only.
-- **A2: DONE** — Bayesian FFN. MI ratio **1.43x batch / 1.70x qual**. Best method at 4L.
-- **A3: CLOSED** — Bayesian FFN + attn V. Negative result vs A2 (4 runs, all worse).
-- **B1: DONE (NEGATIVE)** — Post-hoc Laplace on FFN. MI ratio 1.00x. Diagonal Fisher too flat.
-- **B2: DONE (WEAK POSITIVE)** — BLoB LoRA. MI ratio **1.13x**. Weaker than A2 at 4L.
-- **B3: DONE (MIXED)** — Post-hoc LoRA. **B3-TFB: 1.10x** (SVD works). **B3-LAP: 1.00x** (Laplace fails).
-- **C: DONE** — Scaled replication at 16L/8H/512d (~76M params) on The Pile (domain-split). C0 ppl=14.3, C1 MI **1.32x**, C2 MI 1.00x, C3 MI **1.53x**, C4-TFB MI **1.35x**, C4-LAP MI 1.00x. **Scaling inversion: LoRA > full-weight at 16L.**
-- **D0: DONE** — Metrics framework (AUROC, FPR@95, AUPRC, ECE, Brier, NLL, AURC) in `minigpt/uncertainty.py`. 45 tests.
-- **D1: DONE** — Eval of all 6 C checkpoints. C3 AUROC=0.916, C4-TFB=0.917, C1=0.876. Laplace dead (C2=0.536, C4-LAP=0.494). Script: `scripts/eval_c_checkpoints.py`. Spec: `specs/d1-eval-c-checkpoints.md`.
-- **D2: DONE** — Mean-weights inference. `compute_perplexity_mc()` in `evaluate.py`. Verified mean-weights PPL ≈ MC-averaged PPL: C1 diff=0.29%, C3 diff=3.93% (gate <5%). 9 tests. Script: `scripts/verify_mean_weights.py`. Spec: `specs/d2-mean-weights-spec.md`.
-- **D3: DONE** — Production benchmarks (RTX 4070). LoRA MC N=5: AUROC=0.879, 84ms, 382 MB. **N=3 is the knee** — AUROC jumps 0.50→0.86 (97% of N=20 signal). LoRA MC uses 28% less VRAM than full variational (382 vs 534 MB). Script: `scripts/benchmark_inference.py`. Spec: `specs/prod-uncertainty-approaches.md`.
-- **P1: DONE** — Bootstrap 95% CIs for all methods. `bootstrap_ci()` in `uncertainty.py`. 11 tests (288 total). `eval_c_checkpoints.py --bootstrap --save-scores`. Saved: `data/d1_scores.pt`. Fast recompute: `--from-scores data/d1_scores.pt --bootstrap`.
-- **P2: DONE** — MC Dropout baseline. `enable_dropout()` CM in `layers.py`. 6 tests. Script: `scripts/eval_mc_dropout.py`. **AUROC 0.898 [0.877, 0.917]** — surprisingly competitive with trained Bayesian methods (zero extra training). Saved: `data/mc_dropout_scores.pt`.
-- **P3: DONE** — Narrow "Laplace" → "diagonal Laplace" throughout paper. Table labels, 2×2 matrix, body text.
-- **P4: DONE** — Reframe LoRA vs full-weight claim: observational (not causal), list 3 confounds. All Section 6 "why" paragraphs rewritten as hypotheses. MC Dropout discussion added.
-- **Paper tables: DONE** — Tables 1-2 updated with bootstrap CIs + MC Dropout row. Point estimates from `data/d1_scores.pt` (self-consistent with CIs). Section 3.6 (MC Dropout method) added.
-- **References: FIXED** — 4/11 references had wrong authors (BLoB, TFB, Laplace-LoRA, ScalaBL). All verified against arXiv/proceedings. Orphaned Lakshminarayanan ref removed.
+All milestones complete. Detail: [`agents/milestone-history.md`](agents/milestone-history.md). Full results: [`report.md`](report.md).
 
-Full results and cross-scale comparison: `report.md`. Paper improvements spec: `specs/paper-improvements.md`. Reviewer concerns: `specs/paper-reviewer-concerns.md`.
+| Milestone | Method | Status | Key Result |
+|-----------|--------|--------|------------|
+| A0 | Deterministic baseline (4L) | DONE | test_id_ppl=49.1 |
+| A2 | Variational FFN (4L) | DONE | MI **1.43x**, best at 4L |
+| A3 | Variational FFN + Attn V (4L) | CLOSED | Negative vs A2 |
+| B1 | Laplace FFN (4L) | DONE | MI 1.00x, diagonal Fisher flat |
+| B2 | BLoB LoRA (4L) | DONE | MI **1.13x**, weak positive |
+| B3 | Post-hoc LoRA (4L) | DONE | TFB 1.10x, Laplace 1.00x |
+| C0-C4 | All methods at 16L scale | DONE | **Scaling inversion: LoRA > full-weight** |
+| D0-D3 | Metrics, eval, benchmarks | DONE | AUROC + CIs, N=3 knee, production recipe |
+| P1-P4 | Bootstrap CIs, MC Dropout, paper polish | DONE | MC Dropout AUROC 0.898 |
+| Paper | LaTeX + arXiv submission | DONE | 8 pages, 3 figs, 5 tables |
+
+Paper specs: `specs/paper-improvements.md`, `specs/paper-reviewer-concerns.md`.
 
 ### Paper Publishing (arXiv)
-- **Paper content: COMPLETE** — `paper/paper.md` (Abstract, 7 sections, 5 tables, 11 references).
+- **Paper: COMPLETE** — `paper/paper.tex` (NeurIPS preprint format, 8 pages, 7 sections, 5 tables, 3 figures, 11 references). `paper/references.bib`.
+- **PDF: BUILT** — `paper/paper.pdf`. Skill: `/build-latex-pdf paper/paper.tex`. Docker + TeX Live + pdflatex. Times fonts, booktabs, natbib.
+- **arXiv submission: BUILT** — `paper/arxiv-submission.zip`. Skill: `/build-arxiv-submission paper/paper.tex`. Auto-detects figures/bib/sty, rewrites paths, verifies compilation.
 - **arXiv requirements:** `docs/arxiv-requirements.md`. Target categories: `cs.LG`, cross-list `stat.ML`.
-- **Figures: GENERATED** — `scripts/generate_figures.py` produces 7 figures to `figures/`:
-  - Fig 1: Point weights vs Bayesian weight posteriors (conceptual)
-  - Fig 2: 2x2 method matrix with AUROC results
-  - Fig 3: BLoB LoRA internals (A matrix distributions, B deterministic)
-  - Fig 4: TFB vs diagonal Laplace (SVD structure vs flat Fisher)
-  - Fig 5: AUROC bar chart with 95% bootstrap CIs
-  - Fig 6: N vs AUROC curve (N=3 knee)
-  - Fig 7: Scaling inversion (4L vs 16L MI ratios)
-- **LaTeX paper: DONE** — `paper/paper.tex` (NeurIPS preprint format, 10 pages). `paper/references.bib` (11 entries). Compiled via Docker + TeX Live + pdflatex. Times fonts, booktabs tables, natbib bibliography.
-- **LaTeX PDF build:** `paper/paper.pdf` (1.4 MB, 10 pages). Skill: `/build-latex-pdf paper/paper.tex`. Self-contained skill dir with `.sty` + build scripts. Prereqs: Docker.
-- **Markdown PDF (legacy):** Replaced by LaTeX build.
-- **Figures in paper:** All 7 PNG figures from `figures/` referenced in `paper/paper.tex` with proper LaTeX figure floats and captions.
+- **Figures in paper:** 3 PNG figures in `paper/figures/` (conceptual posteriors, method matrix, BLoB architecture). Source: `scripts/generate_figures.py`.
 - **Postponed experiments:** Deep Ensembles, LoRA ablation, multi-seed runs, KFAC Laplace — all documented, none blocking publication.
-- **Next steps:** Review LaTeX PDF quality, then arXiv submission (submit `.tex` + `.bib` + `.sty` + figures).
 
 ## Environment & Tooling
 - **`uv`** for dev tooling (lint, test, deps). **Global Python** (CUDA PyTorch) for GPU training only.
@@ -115,7 +115,7 @@ Full results and cross-scale comparison: `report.md`. Paper improvements spec: `
 ## Build & Dev Commands
 ```bash
 uv sync                                          # install deps
-uv run pytest tests/ -v                          # 217 tests
+uv run pytest tests/ -v                          # 288 tests
 uv run ruff check minigpt/ experiments/ tests/   # lint
 python experiments/a0_baseline.py --config configs/a0_agnews.yaml          # A0
 python experiments/a2_bayes_ffn.py --config configs/a2_agnews.yaml         # A2
