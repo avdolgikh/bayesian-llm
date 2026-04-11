@@ -31,7 +31,7 @@ experiments/      # Runnable scripts + pipeline
   c_milestones.py      # C-specific: templates, gates, knobs, comparison report
   c_pipeline.py        # C pipeline CLI: wires hooks+policy, providers, entry point
   agent_briefing.md    # HP tuning playbook injected into agent prompts
-scripts/          # Utilities (dump_mlflow_run, compare_runs, profile_gpu, eval_checkpoint, generate_figures, benchmark_inference, eval_mc_dropout, verify_mean_weights)
+scripts/          # Utilities (dump_mlflow_run, compare_runs, profile_gpu, eval_checkpoint, generate_figures, benchmark_inference, eval_mc_dropout, verify_mean_weights, verify_references)
 tests/            # pytest (288 tests: 134 core + 83 pipeline + 71 metrics/eval)
 data/             # Local datasets + saved scores (gitignored)
 paper/            # LaTeX paper, compiled PDF, arXiv submission zip, figures/
@@ -75,7 +75,7 @@ agents/           # Detail documents, portable skills (read on demand, not every
 ## Skills
 Two-layer architecture: **portable** `agents/skills/*/skill.md` (YAML frontmatter + full docs, repo-agnostic) + **thin wrappers** `.claude/skills/*/SKILL.md` (frontmatter + 1 line with project defaults). Portable skills use `<skill-dir>` placeholders — copy the whole directory to any project.
 
-- [`agents/skills/check-paper-refs/`](agents/skills/check-paper-refs/skill.md) — Verify paper references against arXiv/Scholar. Script: `scripts/extract_refs.py`.
+- [`agents/skills/check-paper-refs/`](agents/skills/check-paper-refs/skill.md) — Verify paper references: ground truth check (CI) + live arXiv verification + multi-agent cross-review. Script: `scripts/verify_references.py`. Ground truth: `paper/references_ground_truth.json`.
 - [`agents/skills/convert-md-to-pdf/`](agents/skills/convert-md-to-pdf/skill.md) — Markdown -> PDF with MathJax + Mermaid + Puppeteer. Scripts: `build-pdf.ps1`/`.sh`, `md-to-pdf.config.js`. Prereqs: `npm install -g md-to-pdf @mermaid-js/mermaid-cli`.
 - [`agents/skills/build-latex-pdf/`](agents/skills/build-latex-pdf/skill.md) — LaTeX -> PDF via Docker + TeX Live + pdflatex. NeurIPS preprint format, Times fonts, booktabs, natbib. Self-contained (`.sty` + build scripts bundled). Prereqs: Docker.
 - [`agents/skills/build-arxiv-submission/`](agents/skills/build-arxiv-submission/skill.md) — LaTeX -> arXiv submission zip. Auto-detects figures/bib/sty, rewrites paths, verifies compilation via Docker. Scripts: `build.sh`/`build.ps1`. Prereqs: Docker (optional, for verification).

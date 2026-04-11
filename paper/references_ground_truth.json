@@ -1,0 +1,75 @@
+{
+  "_metadata": {
+    "description": "Ground truth for paper references. Verified against arXiv API / proceedings.",
+    "last_verified": "2026-04-10",
+    "howto": "Run: uv run python scripts/verify_references.py --live (verifies against arXiv)"
+  },
+  "entries": {
+    "blundell2015weight": {
+      "authors": ["Blundell, Charles", "Cornebise, Julien", "Kavukcuoglu, Koray", "Wierstra, Daan"],
+      "title": "Weight Uncertainty in Neural Networks",
+      "year": "2015",
+      "arxiv_id": "1505.05424"
+    },
+    "daxberger2021laplace": {
+      "authors": ["Daxberger, Erik", "Kristiadi, Agustinus", "Immer, Alexander", "Eschenhagen, Runa", "Bauer, Matthias", "Hennig, Philipp"],
+      "title": "Laplace Redux -- Effortless Bayesian Deep Learning",
+      "year": "2021",
+      "arxiv_id": "2106.14806"
+    },
+    "gal2016dropout": {
+      "authors": ["Gal, Yarin", "Ghahramani, Zoubin"],
+      "title": "Dropout as a Bayesian Approximation: Representing Model Uncertainty in Deep Learning",
+      "year": "2016",
+      "arxiv_id": "1506.02142"
+    },
+    "gao2020pile": {
+      "authors": ["Gao, Leo", "Biderman, Stella", "Black, Sid", "Golding, Laurence", "Hoppe, Travis", "Foster, Charles", "Phang, Jason", "He, Horace", "Thite, Anish", "Nabeshima, Noa", "Presser, Shawn", "Leahy, Connor"],
+      "title": "The Pile: An 800GB Dataset of Diverse Text for Language Modeling",
+      "year": "2020",
+      "arxiv_id": "2101.00027"
+    },
+    "graves2011practical": {
+      "authors": ["Graves, Alex"],
+      "title": "Practical Variational Inference for Neural Networks",
+      "year": "2011",
+      "arxiv_id": null
+    },
+    "hu2022lora": {
+      "authors": ["Hu, Edward J.", "Shen, Yelong", "Wallis, Phillip", "Allen-Zhu, Zeyuan", "Li, Yuanzhi", "Wang, Shean", "Wang, Lu", "Chen, Weizhu"],
+      "title": "LoRA: Low-Rank Adaptation of Large Language Models",
+      "year": "2022",
+      "arxiv_id": "2106.09685"
+    },
+    "samplawski2025scalable": {
+      "authors": ["Samplawski, Colin", "Cobb, Adam D.", "Acharya, Manoj", "Kaur, Ramneet", "Jha, Susmit"],
+      "title": "Scalable Bayesian Low-Rank Adaptation of Large Language Models via Stochastic Variational Subspace Inference",
+      "year": "2025",
+      "arxiv_id": "2506.21408"
+    },
+    "shi2025training": {
+      "authors": ["Shi, Haizhou", "Wang, Yibin", "Han, Ligong", "Zhang, Huan", "Wang, Hao"],
+      "title": "Training-Free Bayesianization for Low-Rank Adapters of Large Language Models",
+      "year": "2025",
+      "arxiv_id": "2412.05723"
+    },
+    "wang2024blob": {
+      "authors": ["Wang, Yibin", "Shi, Haizhou", "Han, Ligong", "Metaxas, Dimitris", "Wang, Hao"],
+      "title": "BLoB: Bayesian Low-Rank Adaptation by Backpropagation for Large Language Models",
+      "year": "2024",
+      "arxiv_id": "2406.11675"
+    },
+    "wen2018flipout": {
+      "authors": ["Wen, Yeming", "Vicol, Paul", "Ba, Jimmy", "Tran, Dustin", "Grosse, Roger"],
+      "title": "Flipout: Efficient Pseudo-Independent Weight Perturbations on Mini-Batches",
+      "year": "2018",
+      "arxiv_id": "1803.04386"
+    },
+    "yang2024bayesian": {
+      "authors": ["Yang, Adam X.", "Robeyns, Maxime", "Wang, Xi", "Aitchison, Laurence"],
+      "title": "Bayesian Low-Rank Adaptation for Large Language Models",
+      "year": "2024",
+      "arxiv_id": "2308.13111"
+    }
+  }
+}

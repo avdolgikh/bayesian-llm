@@ -79,7 +79,7 @@ See [`agents/pipeline-guide.md`](agents/pipeline-guide.md) and [`specs/c-pipelin
 
 Reusable agent skills in [`agents/skills/`](agents/skills/). Two-layer architecture: portable `agents/skills/*/skill.md` (repo-agnostic, full docs) + thin `.claude/skills/*/SKILL.md` wrappers (project defaults).
 
-- **[`check-paper-refs`](agents/skills/check-paper-refs/skill.md)** — Verify paper references against arXiv/Scholar. Catches wrong authors, outdated citations.
+- **[`check-paper-refs`](agents/skills/check-paper-refs/skill.md)** — Verify paper references: ground truth check (CI) + live arXiv API verification + multi-agent cross-review. Script: `scripts/verify_references.py`.
 - **[`convert-md-to-pdf`](agents/skills/convert-md-to-pdf/skill.md)** — Markdown to PDF with LaTeX math, Mermaid diagrams, and Puppeteer rendering.
 - **[`build-latex-pdf`](agents/skills/build-latex-pdf/skill.md)** — LaTeX to PDF via Docker + TeX Live. NeurIPS preprint format. Portable — copy the skill directory to any project.
 - **[`build-arxiv-submission`](agents/skills/build-arxiv-submission/skill.md)** — LaTeX to arXiv submission zip. Auto-detects figures/bib/sty, rewrites paths, verifies compilation via Docker.

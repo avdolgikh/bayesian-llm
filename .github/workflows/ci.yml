@@ -10,5 +10,7 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       - name: Lint
         run: uv run ruff check minigpt/ experiments/ tests/
+      - name: Verify references
+        run: uv run python scripts/verify_references.py
       - name: Unit tests
         run: uv run pytest tests/ -v
