@@ -3,14 +3,26 @@ name: CI
 on: [push, pull_request]
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Ruff check
+        run: uv run ruff check minigpt/ experiments/ tests/
+
+  references:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Verify references
+        run: uv run python scripts/verify_references.py
+
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
-      - name: Lint
-        run: uv run ruff check minigpt/ experiments/ tests/
-      - name: Verify references
-        run: uv run python scripts/verify_references.py
       - name: Unit tests
         run: uv run pytest tests/ -v
