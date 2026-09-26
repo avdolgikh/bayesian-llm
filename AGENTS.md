@@ -36,9 +36,15 @@ tests/            # pytest (288 tests: 134 core + 83 pipeline + 71 metrics/eval)
 data/             # Local datasets + saved scores (gitignored)
 paper/            # LaTeX paper, compiled PDF, arXiv submission zip, figures/
 figures/          # Generated paper figures (PDF/PNG) — from scripts/generate_figures.py
+research/         # Research outputs for humans, one folder per month (research/2026-09/README.md)
 specs/            # Design documents
 docs/             # arXiv requirements, metrics guide, reference PDFs
-agents/           # Detail documents, portable skills (read on demand, not every task)
+agents/           # Agent memory + detail documents (read on demand, not every task)
+  tasks/          # Alexey's dictated briefs, one .md per date
+  plans/          # roadmap.md + session-NN-plan.md (approved before execution)
+  logs/           # session step logs + request-coverage ledgers
+  memory/         # STATE.md (resume here), reminders.md, backlog.md
+  skills/         # portable skills
 ```
 
 ## Hard Rules

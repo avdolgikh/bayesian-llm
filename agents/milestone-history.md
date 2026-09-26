@@ -77,3 +77,16 @@ Pipeline = Agentic HP Optimization (THE MAIN GOAL): LLM agent (Claude/Codex as s
 - **P4 DONE** (2026-03-29): Reframe all Section 6 "why" paragraphs as hypotheses. LoRA claim observational with 3 confounds. MC Dropout discussion added.
 - **Paper tables DONE** (2026-03-29): CIs in Tables 1-2, MC Dropout row, Section 3.6, updated eval protocol. Point estimates from `data/d1_scores.pt`.
 - **References FIXED** (2026-03-29): 4/11 had wrong authors (BLoB, TFB, Laplace-LoRA, ScalaBL). All verified against arXiv. Orphaned Lakshminarayanan removed.
+
+## 2026-09-25 — Iteration 2 restart (session 01)
+
+Project restarted after a pause since 2026-04-11. Planning session only: no code, training or paper changes.
+Research outputs in `research/2026-09/`. An Opus code audit reported four potential defects that must be
+verified before the paper is edited: D1 eval split may not match the paper's stated domains; TFB sampling
+may drop the SVD rotation of B; diagonal Laplace variance may be unscaled; checkpoint resume does not
+restore optimizer state. Details: `research/2026-09/code-assessment.md`, `agents/memory/STATE.md`.
+
+Session 02 (2026-09-26): three independent refuters CONFIRMED all three defects (eval split = StackExchange vs
+arXiv only; TFB sampling drops the SVD rotation; Laplace posterior unscaled, std 1.0). Specs S0-S2 drafted in
+`specs/i2-*.md` (DRAFT, not approved).
+

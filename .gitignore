@@ -16,3 +16,9 @@ specs/post-c.md
 /mlruns/
 .env
 .pipeline-state/
+# agent memory and research outputs (iteration 2, decided 2026-09-26)
+/agents/tasks/
+/agents/plans/
+/agents/logs/
+/agents/memory/
+/research/

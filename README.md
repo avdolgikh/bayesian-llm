@@ -1,5 +1,7 @@
 # Bayesian LLM
 
+> **Under revision.** The numbers in this README, `report.md` and `paper/paper.pdf` are under revision. The paper misdescribes its evaluation set. The AUROCs come from 500 StackExchange blocks (in-distribution) and 500 blocks from 9 arXiv papers (out-of-distribution), not from HackerNews against arXiv, FreeLaw and PubMed. The TFB and Laplace samplers also need fixes. The corrected version is planned for Fri 2026-10-23.
+
 Estimating **epistemic uncertainty** in language models via Bayesian inference over weights.
 
 Replace point-estimate weights with learned posterior distributions (mean + variance per weight). Sample weights multiple times, measure prediction disagreement via **mutual information** (MI). High MI on a given input = the model knows it doesn't know.
@@ -96,7 +98,8 @@ figures/       Generated paper figures (PDF/PNG) — from scripts/generate_figur
 scripts/       Utilities (MLflow inspection, GPU profiling, checkpoint eval, figure generation)
 specs/         Design documents
 docs/          arXiv requirements, metrics guide, reference PDFs
-agents/        Detail documents, portable skills, pipeline guide
+agents/        Agent memory (tasks, plans, logs, memory), detail documents, portable skills
+research/      Research outputs for humans, one folder per month (research/2026-09/README.md)
 ```
 
 ## Quick Start
