@@ -24,8 +24,12 @@ from minigpt import evalset
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 REAL_CONFIG = REPO_ROOT / "configs" / "i2_eval.yaml"
-SPEC_PATH = REPO_ROOT / "specs" / "i2-eval-rebuild.md"
-S2_SPEC_PATH = REPO_ROOT / "specs" / "i2-posthoc-fixes.md"
+# Specs are private (agents/ is gitignored); the spec-parsing tests skip when they are absent, e.g. in CI.
+SPEC_DIR = REPO_ROOT / "agents" / "specs" / "2026-10"
+SPEC_PATH = SPEC_DIR / "i2-eval-rebuild.md"
+S2_SPEC_PATH = SPEC_DIR / "i2-posthoc-fixes.md"
+_SPECS_PRESENT = SPEC_PATH.exists() and S2_SPEC_PATH.exists()
+_needs_specs = pytest.mark.skipif(not _SPECS_PRESENT, reason="private spec files not available")
 S2_N_SAMPLES = 20  # S2 spec section 2: "For the three score sets: `n_samples` 20"
 
 # --------------------------------------------------------------------------------------------
@@ -327,6 +331,7 @@ def _s2_scoring_rows() -> dict[str, dict]:
     return rows
 
 
+@_needs_specs
 def test_s2_scoring_table_parses():
     rows = _s2_scoring_rows()
     assert list(rows) == ["c2_refit", "c4_lap_refit", "c4_tfb_fixed"]
@@ -335,6 +340,7 @@ def test_s2_scoring_table_parses():
     assert {r["sampler"] for r in rows.values()} == {"v2"}
 
 
+@_needs_specs
 def test_real_yaml_matches_spec_section_5_2():
     cfg = evalset.load_eval_config(REAL_CONFIG)
     spec = _spec_yaml_block()
