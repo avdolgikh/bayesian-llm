@@ -1,0 +1,129 @@
+# S0 timing probe (specs/i2-timing-probe.md). Every probe parameter is explicit.
+# Relative paths resolve against the repository root.
+probe:
+  output: data/i2/timing_probe.json
+  device: cuda
+  q1_backbone: b                       # a | b; a skips --part shape355m
+  vram_budget_mib: 9728                # 9.5 GiB (R4)
+  sysmem_fallback_confirmed: unknown   # yes | no | unknown; set by the operator, not measured
+  windows_update_paused: unknown       # yes | no | unknown; set by the operator
+  subprocess_timeout_s: 30             # nvidia-smi, powercfg and read-only git calls
+rescore:
+  methods: [c0, c1, c2, c3, c4_tfb, c4_lap, mc_dropout]
+  n_samples: 20
+  n_samples_c0: 1
+  block_size: 256
+  n_blocks_loaded: 160
+  batch_sizes: [1, 8, 32]
+  blocks_timed: {1: 64, 8: 128, 32: 128}
+  warmup_batches: 1
+  seed: 0
+  amp_fp16: true
+  skip_larger_after_over_budget: true  # VRAM grows with batch; a larger batch cannot fit
+  sampler_timing_warmup: 1
+  sampler_timing_draws: 5
+  nll_check: {blocks: 64, tol_nats: 0.01}
+  anchor: {warmup: 5, repeats: 20, ref_ms: 8.1, tolerance: 0.25, max_attempts: 2,
+           retry_wait_s: 60}
+finetune:
+  train_config: configs/i2_timing_probe_det_lora.yaml
+  lora_type: deterministic
+  base_checkpoint: data/checkpoints/c0/ckpt_best.pt
+  expected_trainable_params: 1310720
+  blob_reference_min: 26.9             # C3 train_time_sec 1614.1 s, MLflow run 3b22bfcf
+  n_blob_seeds: [2, 3]                 # options b1 vs roadmap S5-T2; S5 picks
+  n_det_seeds: 3
+  ca4_max_ratio: 4.0
+  eval_timing_repeats: 3
+shape355m:
+  n_layer: 24
+  n_head: 16
+  n_embd: 1024
+  block_size: 512
+  vocab_size: 50257
+  batch_size: 4
+  fallback_batch_sizes: [2, 1]
+  dropout: 0.1
+  bias: true
+  lora: {rank: 16, alpha: 32.0, target: ffn, prior_std: 0.2, init_g: 0.1}
+  expected_params: {base: 354298880, trainable: 5898240}
+  compare:
+    n_layer: 16
+    n_head: 8
+    n_embd: 512
+    expected_params: {base: 76432896, trainable: 1966080}
+  n_random_tokens: 1000000
+  amp_fp16: true
+  warmup_steps: 3
+  timed_steps: 10
+  max_step_ratio: 2.0
+  lr: 0.0003
+  weight_decay: 0.0
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  grad_clip: 1.0
+  kl_scale: 1.0e-6                     # as scripts/profile_c_gpu.py
+  ca5_range: [4.0, 5.0]
+  seed: 0
+estimate:
+  docs_per_domain: 1000
+  blocks_per_doc: [1, 2, 3]
+  sets_all_methods: 5
+  sets_lora_only: 1
+  lora_methods: [c3, c4_tfb, c4_lap]
+  cap_gpu_h: 10.0
+  low_end_gpu_h: 1.0
+  night_gpu_h: 8.0
+  ca10_sum_s: 2.1216
+  repro: {blocks: 1000, runs: 2, methods: [mc_dropout, c1, c3, c4_tfb]}
+# --dry-run: tiny random CPU models, no data/ reads, a separate output file.
+dry_run:
+  device: cpu
+  checkpoint_dir: data/i2/dry_run/det_lora
+  vocab_size: 128
+  model: {n_layer: 2, n_head: 2, n_embd: 32, block_size: 16, dropout: 0.1, bias: true}
+  lora: {rank: 4, alpha: 8.0, target: ffn, prior_std: 0.2, init_g: 0.1}
+  bayes_ffn: {enabled: true, prior_std: 1.0, init_rho: -5.0}
+  posthoc_std: 0.01                    # Gaussian stand-in for the post-hoc samplers
+  n_train_tokens: 4096                 # random tokens for the fine-tune dry run
+  val_fraction: 0.1
+  overrides:                           # dotted keys applied to the sections above
+    probe.output: data/i2/dry_run/timing_probe.json
+    rescore.n_samples: 3
+    rescore.block_size: 16
+    rescore.n_blocks_loaded: 12
+    rescore.batch_sizes: [1, 4]
+    rescore.blocks_timed: {1: 4, 4: 8}
+    rescore.sampler_timing_draws: 2
+    rescore.nll_check: {blocks: 8, tol_nats: 0.01}
+    rescore.anchor: {warmup: 1, repeats: 2, ref_ms: 8.1, tolerance: 0.25, max_attempts: 2,
+                     retry_wait_s: 0}
+    finetune.expected_trainable_params: 2560
+    finetune.eval_timing_repeats: 1
+    shape355m.n_layer: 2
+    shape355m.n_head: 2
+    shape355m.n_embd: 32
+    shape355m.block_size: 16
+    shape355m.vocab_size: 128
+    shape355m.batch_size: 2
+    shape355m.fallback_batch_sizes: [1]
+    shape355m.lora: {rank: 4, alpha: 8.0, target: ffn, prior_std: 0.2, init_g: 0.1}
+    shape355m.expected_params: null
+    shape355m.compare: {n_layer: 1, n_head: 2, n_embd: 16, expected_params: null}
+    shape355m.n_random_tokens: 4096
+    shape355m.warmup_steps: 1
+    shape355m.timed_steps: 3
+  finetune_overrides:                  # dotted keys applied to the fine-tune YAML
+    model.n_layer: 2
+    model.n_head: 2
+    model.n_embd: 32
+    model.block_size: 16
+    lora.rank: 4
+    lora.alpha: 8.0
+    train.steps: 20
+    train.batch_size: 4
+    train.block_size: 16
+    train.warmup_steps: 2
+    train.eval_interval: 10
+    train.eval_iters: 2
+    train.device: cpu
