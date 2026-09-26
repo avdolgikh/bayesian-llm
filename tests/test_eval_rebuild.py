@@ -24,7 +24,8 @@ from minigpt import evalset
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 REAL_CONFIG = REPO_ROOT / "configs" / "i2_eval.yaml"
-# Specs are private (agents/ is gitignored); the spec-parsing tests skip when they are absent, e.g. in CI.
+# Specs are private (agents/ is gitignored); the spec-parsing tests skip when they are
+# absent, for example in CI.
 SPEC_DIR = REPO_ROOT / "agents" / "specs" / "2026-10"
 SPEC_PATH = SPEC_DIR / "i2-eval-rebuild.md"
 S2_SPEC_PATH = SPEC_DIR / "i2-posthoc-fixes.md"
