@@ -21,6 +21,8 @@ minigpt/          # Python package — all model code
   laplace.py      # Post-hoc Laplace: curvature fitting, sampling, context manager
   lora.py         # LoRA: BLoBLoRALinear, DeterministicLoRALinear, LoRAConfig, inject_lora()
   tfb.py          # TFB: Training-Free Bayesianization (SVD variance search, sampling)
+  evalset.py      # Iteration 2: eval-set builder with document ids, freeze hash (specs/i2-eval-rebuild.md)
+  posthoc_refit.py # Iteration 2: TFB/Laplace refits with held-out sigma/lambda search (specs/i2-posthoc-fixes.md)
 configs/          # YAML config files per experiment (a0–b3 AG News, c0–c4 Pile)
 experiments/      # Runnable scripts + pipeline
   experiment_setup.py  # Shared setup: CLI parsing, config, data, model, device
@@ -140,6 +142,7 @@ GitHub Actions (`.github/workflows/ci.yml`): `ruff check` → `pytest`. No GPU i
 
 ## Commit Guidelines
 One-line messages, Conventional Commits (`feat:`, `fix:`, `docs:`, etc.).
+**Agents commit and push only to a feature branch (never master); Alexey merges to master.**
 **Never mention AI assistants** in commits, comments, PRs, or code.
 
 ## Security
