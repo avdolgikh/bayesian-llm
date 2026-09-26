@@ -31,8 +31,8 @@ experiments/      # Runnable scripts + pipeline
   c_milestones.py      # C-specific: templates, gates, knobs, comparison report
   c_pipeline.py        # C pipeline CLI: wires hooks+policy, providers, entry point
   agent_briefing.md    # HP tuning playbook injected into agent prompts
-scripts/          # Utilities (dump_mlflow_run, compare_runs, profile_gpu, eval_checkpoint, generate_figures, benchmark_inference, eval_mc_dropout, verify_mean_weights, verify_references)
-tests/            # pytest (288 tests: 134 core + 83 pipeline + 71 metrics/eval)
+scripts/          # Utilities (dump_mlflow_run, compare_runs, profile_gpu, eval_checkpoint, generate_figures, benchmark_inference, eval_mc_dropout, verify_mean_weights, verify_references, timing_probe, build_eval_set, check_eval_rebuild, refit_posthoc)
+tests/            # pytest (594 tests: 220 core + 83 pipeline + 291 metrics/eval)
 data/             # Local datasets + saved scores (gitignored)
 paper/            # LaTeX paper, compiled PDF, arXiv submission zip, figures/
 figures/          # Generated paper figures (PDF/PNG) — from scripts/generate_figures.py
@@ -121,7 +121,7 @@ Paper specs: `specs/paper-improvements.md`, `specs/paper-reviewer-concerns.md`.
 ## Build & Dev Commands
 ```bash
 uv sync                                          # install deps
-uv run pytest tests/ -v                          # 288 tests
+uv run pytest tests/ -v                          # 594 tests
 uv run ruff check minigpt/ experiments/ tests/   # lint
 python experiments/a0_baseline.py --config configs/a0_agnews.yaml          # A0
 python experiments/a2_bayes_ffn.py --config configs/a2_agnews.yaml         # A2

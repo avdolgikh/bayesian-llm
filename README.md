@@ -91,11 +91,12 @@ Reusable agent skills in [`agents/skills/`](agents/skills/). Two-layer architect
 ```
 minigpt/       Model, training, Bayesian layers, LoRA, Laplace, TFB, uncertainty metrics
 experiments/   Experiment scripts (A0-B3) + agentic pipeline (C0-C4)
-tests/         288 tests (134 core + 83 pipeline + 71 metrics/eval)
+tests/         594 tests (220 core + 83 pipeline + 291 metrics/eval)
 configs/       YAML configs per experiment
 paper/         LaTeX paper, compiled PDF, arXiv submission zip
 figures/       Generated paper figures (PDF/PNG) — from scripts/generate_figures.py
-scripts/       Utilities (MLflow inspection, GPU profiling, checkpoint eval, figure generation)
+scripts/       Utilities (MLflow inspection, GPU profiling, checkpoint eval, figure generation,
+               timing probes, eval-set build/checks, post-hoc refits)
 specs/         Design documents
 docs/          arXiv requirements, metrics guide, reference PDFs
 agents/        Agent memory (tasks, plans, logs, memory), detail documents, portable skills
@@ -106,7 +107,7 @@ research/      Research outputs for humans, one folder per month (research/2026-
 
 ```bash
 uv sync                                          # install dependencies
-uv run pytest tests/ -v                          # 288 tests
+uv run pytest tests/ -v                          # 594 tests
 uv run ruff check minigpt/ experiments/ tests/   # lint
 
 # Example experiments (require CUDA):
