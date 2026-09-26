@@ -163,6 +163,7 @@ def tfb_phase(cfg, model, tokenizer, datasets, device, use_mlflow):
             model,
             datasets["train"],
             block_size=train_cfg.block_size,
+            sampler_version="v1_legacy",
             batch_size=train_cfg.batch_size,
             n_batches=tfb_cfg["n_anchor_batches"],
             epsilon=tfb_cfg["epsilon"],

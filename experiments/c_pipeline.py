@@ -278,6 +278,7 @@ def _posthoc_fit(model, cfg, data, device):
         state = fit_tfb(
             model, train_data.to(device),
             block_size=block_size,
+            sampler_version="v1_legacy",
             batch_size=batch_size,
             n_batches=n_anchor_batches,
             epsilon=epsilon,

@@ -1,0 +1,57 @@
+# S2 refit, C4-LAP (specs/i2-posthoc-fixes.md, Sections 3 and 5.5). Needs the C4-TFB record.
+#   python scripts/refit_posthoc.py --config configs/i2_posthoc_c4_lap.yaml
+# Base: the C3 BLoB posterior mean (lora_A <- lora_A_mu). Posterior: diagonal empirical
+# Fisher on LoRA A, precision N_seq T^2 F_hat + lambda. Same base and fit set as C4-TFB, so
+# the Delta-NLL target equals Delta-NLL_TFB.
+method: laplace
+cell: c4_lap
+out_dir: data/checkpoints/i2_posthoc/c4_lap
+device: cuda
+autocast: fp16                 # the Delta-NLL passes and l_0; the curvature pass is fp32
+base:
+  base_checkpoint: data/checkpoints/c3/ckpt_best.pt
+  base_kind: blob_mean
+model:
+  block_size: 256
+  n_layer: 16
+  n_head: 8
+  n_embd: 512
+  dropout: 0.1
+  bias: true
+lora:
+  rank: 16
+  alpha: 32.0
+  target: ffn
+data:
+  dataset: pile
+  pile_id_domains: [hackernews]
+  pile_ood_domains: [arxiv, freelaw, pubmed_abstracts]
+  pile_id_tokens: 100000000
+  pile_ood_tokens: 10000000
+  val_fraction: 0.1
+  test_fraction: 0.1
+  data_seed: 1337
+fit:
+  manifest_path: data/eval_i2/manifest.jsonl
+  fit_split: val
+  fit_domain: hackernews
+  n_fit_blocks: 640
+  max_blocks_per_doc: 3
+  fit_seed: 0
+  batch_size: 32
+laplace:
+  selection_mode: lora
+  n_curvature_batches: 30      # 30 x 32 = 960 windows of data["train"]
+  curvature_batch_size: 32
+  curvature_seed: 0
+  n_data_seqs: 312500          # 80M HackerNews training tokens / 256
+  tokens_per_seq: 256
+  prior_prec_grid: [1.0, 10.0, 100.0, 1000.0, 10000.0, 100000.0, 1000000.0, 10000000.0]
+  grid_extension: [100000000.0]
+  bisect_max_steps: 8
+  match_tol: 0.10
+  tfb_record_path: data/checkpoints/i2_posthoc/c4_tfb/fit_record.json
+  n_delta_samples: 20
+  se_threshold: 0.05
+  se_max_doublings: 1
+  reference_state_path: data/checkpoints/c4_lap/laplace_state.pt   # read-only; median check
