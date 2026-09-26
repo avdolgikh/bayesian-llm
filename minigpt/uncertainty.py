@@ -11,9 +11,17 @@ Evaluation metrics (D0):
 - Calibration: ECE, NLL, Brier score
 - Selective prediction: risk-coverage curve, AURC
 - Sequence-level aggregation (mean, max, proportion)
+
+Iteration 2 (specs/i2-eval-rebuild.md, sections 3, 5.5 and 5.6):
+- Realized-token Jensen gap g_t and its block mean G
+- Document-weighted AUROC / FPR@95 (optional ``sample_weight``)
+- Document-clustered, class-stratified bootstrap and paired contrast
+- Holm step-down correction
 """
 
-from collections.abc import Callable
+import math
+from collections.abc import Callable, Sequence
+from typing import Any
 
 import numpy as np
 import torch
@@ -216,6 +224,36 @@ def score_sequence(
         return _stream_metrics(model, h, n_samples)
 
 
+def realized_token_gap(logp_real: torch.Tensor) -> dict[str, torch.Tensor]:
+    """Realized-token Jensen gap (specs/i2-eval-rebuild.md, section 3).
+
+    With per-sample log-probs of the realized token ell_{s,t}:
+        log p_bar(y_t) = logsumexp_s ell_{s,t} - log N
+        g_t = log p_bar(y_t) - mean_s ell_{s,t}   (>= 0 by Jensen)
+        G = mean_t g_t   (all positions, no skip)
+
+    Computed in float64 and returned in the input dtype.
+
+    Args:
+        logp_real: (..., N, T) per-sample log-probs of the realized tokens
+            (the score file's ``logp_real`` is [B, N, T]).
+
+    Returns dict with ``log_pbar`` (..., T), ``g`` (..., T) and ``G`` (...).
+    """
+    if logp_real.dim() < 2:
+        raise ValueError(f"logp_real must be (..., N, T), got shape {tuple(logp_real.shape)}")
+    lp = logp_real.double()
+    n = lp.shape[-2]
+    log_pbar = torch.logsumexp(lp, dim=-2) - math.log(n)
+    g = log_pbar - lp.mean(dim=-2)
+    out_dtype = logp_real.dtype
+    return {
+        "log_pbar": log_pbar.to(out_dtype),
+        "g": g.to(out_dtype),
+        "G": g.mean(dim=-1).to(out_dtype),
+    }
+
+
 # ---------------------------------------------------------------------------
 # D0: OOD detection metrics
 # ---------------------------------------------------------------------------
@@ -227,32 +265,50 @@ def _to_numpy(x) -> np.ndarray:
     return np.asarray(x)
 
 
-def auroc(scores, labels) -> float:
+def auroc(scores, labels, sample_weight=None) -> float:
     """Area Under ROC Curve for OOD detection.
 
     Args:
         scores: uncertainty scores (higher = more likely OOD).
         labels: binary labels (0=ID, 1=OOD).
+        sample_weight: optional per-row weights (e.g. 1/k_d per block, so each
+            document counts once). None keeps the unweighted value.
 
     Returns:
         AUROC in [0, 1]. 1.0 = perfect, 0.5 = random.
     """
     from sklearn.metrics import roc_auc_score
+    if sample_weight is not None:
+        return float(roc_auc_score(
+            _to_numpy(labels), _to_numpy(scores),
+            sample_weight=_to_numpy(sample_weight).astype(np.float64),
+        ))
     return float(roc_auc_score(_to_numpy(labels), _to_numpy(scores)))
 
 
-def fpr_at_tpr(scores, labels, target_tpr: float = 0.95) -> float:
+def fpr_at_tpr(scores, labels, target_tpr: float = 0.95, sample_weight=None) -> float:
     """False Positive Rate at a given True Positive Rate.
 
     Args:
         scores: uncertainty scores (higher = more likely OOD).
         labels: binary labels (0=ID, 1=OOD).
         target_tpr: TPR threshold (default 0.95).
+        sample_weight: optional per-row weights. When given, the weighted rule of
+            specs/i2-eval-rebuild.md section 5.6 applies: the full curve
+            (``drop_intermediate=False``) and the first point with TPR >= target.
+            None keeps the unweighted rule and its values unchanged.
 
     Returns:
         FPR in [0, 1]. Lower is better.
     """
     from sklearn.metrics import roc_curve
+    if sample_weight is not None:
+        fpr, tpr, _ = roc_curve(
+            _to_numpy(labels), _to_numpy(scores),
+            sample_weight=_to_numpy(sample_weight).astype(np.float64),
+            drop_intermediate=False,
+        )
+        return float(fpr[np.argmax(tpr >= target_tpr)])
     fpr, tpr, _ = roc_curve(_to_numpy(labels), _to_numpy(scores))
     # Find the FPR at the first threshold where TPR >= target
     idx = np.searchsorted(tpr, target_tpr)
@@ -474,3 +530,266 @@ def bootstrap_ci(
     lo = float(np.percentile(boot_values, 100 * alpha / 2))
     hi = float(np.percentile(boot_values, 100 * (1 - alpha / 2)))
     return point, lo, hi
+
+
+# ---------------------------------------------------------------------------
+# Document-clustered bootstrap (specs/i2-eval-rebuild.md, section 5.6)
+# ---------------------------------------------------------------------------
+
+_DOC_BOOT_CHUNK = 256  # resamples per vectorized chunk (memory: chunk x n_blocks float64)
+
+
+def _percentile_ci(values: np.ndarray, level: float) -> tuple[float, float]:
+    """Two-sided percentile CI with numpy's default linear method."""
+    lo_q = round(50.0 * (1.0 - level), 10)
+    hi_q = round(50.0 * (1.0 + level), 10)
+    lo, hi = np.percentile(values, [lo_q, hi_q])
+    return float(lo), float(hi)
+
+
+def _doc_boot_inputs(
+    scores: dict[str, Any], labels, doc_ids, weights,
+) -> tuple[dict[str, np.ndarray], np.ndarray, np.ndarray, np.ndarray, int, int]:
+    """Validate inputs; map each block to its document position.
+
+    Document positions: ID documents first, then OOD documents, each group in
+    numpy's lexicographic order (``np.unique``), as in section 5.6.
+    """
+    y = _to_numpy(labels).astype(np.int64)
+    docs = np.asarray(doc_ids if isinstance(doc_ids, np.ndarray) else list(doc_ids))
+    w = _to_numpy(weights).astype(np.float64)
+    n = y.shape[0]
+    if y.ndim != 1 or docs.shape != (n,) or w.shape != (n,):
+        raise ValueError(
+            f"labels, doc_ids and weights must be 1-D of equal length; got "
+            f"{y.shape}, {docs.shape}, {w.shape}"
+        )
+    if not np.isin(y, (0, 1)).all():
+        raise ValueError("labels must be 0 (ID) or 1 (OOD)")
+    if not (np.isfinite(w).all() and (w >= 0).all()):
+        raise ValueError("weights must be finite and non-negative")
+    s_np: dict[str, np.ndarray] = {}
+    for name, s in scores.items():
+        arr = _to_numpy(s).astype(np.float64)
+        if arr.shape != (n,):
+            raise ValueError(f"score {name!r} has shape {arr.shape}, expected ({n},)")
+        if not np.isfinite(arr).all():
+            raise ValueError(f"score {name!r} has non-finite values")
+        s_np[name] = arr
+    id_mask = y == 0
+    id_docs = np.unique(docs[id_mask])
+    ood_docs = np.unique(docs[~id_mask])
+    n_id, n_ood = int(id_docs.size), int(ood_docs.size)
+    if n_id == 0 or n_ood == 0:
+        raise ValueError("need at least one ID and one OOD document")
+    if np.intersect1d(id_docs, ood_docs).size > 0:
+        raise ValueError("a document ID appears in both classes")
+    block_doc = np.empty(n, dtype=np.int64)
+    block_doc[id_mask] = np.searchsorted(id_docs, docs[id_mask])
+    block_doc[~id_mask] = n_id + np.searchsorted(ood_docs, docs[~id_mask])
+    return s_np, y, w, block_doc, n_id, n_ood
+
+
+def _draw_doc_counts(
+    rng: np.random.Generator, n_id: int, n_ood: int, n_draws: int,
+) -> np.ndarray:
+    """(n_draws, n_id + n_ood) draw counts; per resample, ID drawn first, then OOD."""
+    counts = np.empty((n_draws, n_id + n_ood), dtype=np.float64)
+    for r in range(n_draws):
+        di = rng.integers(0, n_id, size=n_id)
+        do = rng.integers(0, n_ood, size=n_ood)
+        counts[r, :n_id] = np.bincount(di, minlength=n_id)
+        counts[r, n_id:] = np.bincount(do, minlength=n_ood)
+    return counts
+
+
+class _WeightedROC:
+    """Weighted ROC for fixed scores under many weight vectors.
+
+    Mirrors sklearn's ``roc_curve`` (stable descending sort, float64 cumulative
+    sums, TPR = tps / tps[-1]), so FPR@TPR equals the weighted ``fpr_at_tpr``
+    rule and AUROC equals ``roc_auc_score`` up to rounding.
+    """
+
+    def __init__(self, scores: np.ndarray, labels: np.ndarray):
+        self.order = np.argsort(-scores, kind="stable")
+        s_sorted = scores[self.order]
+        self.y_pos = labels[self.order].astype(np.float64)
+        self.y_neg = 1.0 - self.y_pos
+        self.ends = np.r_[np.flatnonzero(np.diff(s_sorted)), s_sorted.size - 1]
+
+    def curves(self, w_matrix: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """(fpr, tpr), each (R, n_thresholds + 1), starting at (0, 0)."""
+        w_sorted = w_matrix[:, self.order]
+        tps = np.cumsum(w_sorted * self.y_pos, axis=1)[:, self.ends]
+        fps = np.cumsum(w_sorted * self.y_neg, axis=1)[:, self.ends]
+        zeros = np.zeros((w_matrix.shape[0], 1))
+        tpr = np.concatenate([zeros, tps / tps[:, -1:]], axis=1)
+        fpr = np.concatenate([zeros, fps / fps[:, -1:]], axis=1)
+        return fpr, tpr
+
+    @staticmethod
+    def auroc(fpr: np.ndarray, tpr: np.ndarray) -> np.ndarray:
+        return np.sum(np.diff(fpr, axis=1) * (tpr[:, 1:] + tpr[:, :-1]) / 2.0, axis=1)
+
+    @staticmethod
+    def fpr_at(fpr: np.ndarray, tpr: np.ndarray, target_tpr: float) -> np.ndarray:
+        idx = np.argmax(tpr >= target_tpr, axis=1)
+        return fpr[np.arange(fpr.shape[0]), idx]
+
+
+def _doc_boot_resamples(
+    s_np: dict[str, np.ndarray],
+    y: np.ndarray,
+    w: np.ndarray,
+    block_doc: np.ndarray,
+    n_id: int,
+    n_ood: int,
+    n_resamples: int,
+    seed: int | Sequence[int],
+    target_tpr: float | None,
+) -> dict[str, tuple[np.ndarray, np.ndarray | None]]:
+    """Per score: (AUROC_w resamples, FPR_w resamples or None), on shared draws."""
+    rng = np.random.default_rng(seed)
+    rocs = {name: _WeightedROC(s, y) for name, s in s_np.items()}
+    auc_out = {name: np.empty(n_resamples) for name in s_np}
+    fpr_out = {name: np.empty(n_resamples) for name in s_np}
+    for start in range(0, n_resamples, _DOC_BOOT_CHUNK):
+        stop = min(start + _DOC_BOOT_CHUNK, n_resamples)
+        counts = _draw_doc_counts(rng, n_id, n_ood, stop - start)
+        w_matrix = w[None, :] * counts[:, block_doc]  # w_b^(r) = w_b * c_d(b)
+        for name, roc in rocs.items():
+            fpr, tpr = roc.curves(w_matrix)
+            auc_out[name][start:stop] = roc.auroc(fpr, tpr)
+            if target_tpr is not None:
+                fpr_out[name][start:stop] = roc.fpr_at(fpr, tpr, target_tpr)
+    return {
+        name: (auc_out[name], fpr_out[name] if target_tpr is not None else None)
+        for name in s_np
+    }
+
+
+def doc_bootstrap_auroc(
+    scores: dict[str, Any],
+    labels,
+    doc_ids,
+    weights,
+    n_resamples: int,
+    seed: int | Sequence[int],
+    level: float,
+    *,
+    target_tpr: float = 0.95,
+) -> dict[str, dict[str, Any]]:
+    """Document-clustered, class-stratified bootstrap of weighted AUROC and FPR@TPR.
+
+    Rules (specs/i2-eval-rebuild.md, section 5.6):
+    - ID documents = ``np.unique(doc_ids[labels == 0])``; OOD documents likewise.
+    - ``rng = np.random.default_rng(seed)``; per resample, in this order:
+      ``di = rng.integers(0, n_I, size=n_I)``, then ``do = rng.integers(0, n_O, size=n_O)``.
+    - The resampled block weight is w_b * c_d(b), with c_d the draw count of document d.
+    - Every score in ``scores`` uses the same draws, so comparisons are paired.
+    - Point estimates use the original weights. CI = linear percentiles.
+
+    Args:
+        scores: name -> per-block scores (higher = more OOD), all on the same blocks.
+        labels: per-block labels (0 = ID, 1 = OOD).
+        doc_ids: per-block document IDs (strings).
+        weights: per-block weights, 1/k_d, so each document counts once.
+        n_resamples: number of bootstrap resamples B.
+        seed: seed for ``np.random.default_rng`` (an int, or [seed, i_id, i_ood]).
+        level: CI level (0.95 gives the 2.5 and 97.5 percentiles).
+        target_tpr: TPR for FPR@TPR (the YAML ``analysis.fpr_target_tpr``).
+
+    Returns:
+        name -> {``auroc``, ``auroc_ci``, ``fpr95``, ``fpr95_ci``, ``auroc_resamples``,
+        ``fpr95_resamples``, ``n_id_docs``, ``n_ood_docs``}.
+    """
+    s_np, y, w, block_doc, n_id, n_ood = _doc_boot_inputs(scores, labels, doc_ids, weights)
+    boot = _doc_boot_resamples(
+        s_np, y, w, block_doc, n_id, n_ood, n_resamples, seed, target_tpr,
+    )
+    out: dict[str, dict[str, Any]] = {}
+    for name, s in s_np.items():
+        auc_r, fpr_r = boot[name]
+        out[name] = {
+            "auroc": auroc(s, y, sample_weight=w),
+            "auroc_ci": _percentile_ci(auc_r, level),
+            "fpr95": fpr_at_tpr(s, y, target_tpr, sample_weight=w),
+            "fpr95_ci": _percentile_ci(fpr_r, level),
+            "auroc_resamples": auc_r,
+            "fpr95_resamples": fpr_r,
+            "n_id_docs": n_id,
+            "n_ood_docs": n_ood,
+        }
+    return out
+
+
+def paired_doc_bootstrap(
+    scores: dict[str, Any],
+    labels,
+    doc_ids,
+    weights,
+    pairs: Sequence[tuple[str, str]],
+    n_resamples: int,
+    seed: int | Sequence[int],
+    level: float,
+) -> dict[tuple[str, str], dict[str, Any]]:
+    """Paired document bootstrap of Delta = AUROC_w(a) - AUROC_w(b) for listed pairs.
+
+    Uses the same draws as ``doc_bootstrap_auroc`` with the same seed. Two-sided
+    p-value with a floor of 2/(B+1):
+    p = min(1, 2 (1 + min(#{Delta_r <= 0}, #{Delta_r >= 0})) / (B + 1)).
+
+    Args:
+        scores: name -> per-block scores, all on the same blocks.
+        labels: per-block labels (0 = ID, 1 = OOD).
+        doc_ids: per-block document IDs (strings).
+        weights: per-block weights, 1/k_d.
+        pairs: (a, b) score-name pairs; Delta = AUROC_w(a) - AUROC_w(b).
+        n_resamples: number of bootstrap resamples B.
+        seed: seed for ``np.random.default_rng`` (an int, or [seed, i_id, i_ood]).
+        level: CI level.
+
+    Returns:
+        (a, b) -> {``delta``, ``ci``, ``p``, ``resamples``}.
+    """
+    needed: list[str] = []
+    for pair in pairs:
+        for name in pair:
+            if name not in scores:
+                raise KeyError(f"score {name!r} is not in scores")
+            if name not in needed:
+                needed.append(name)
+    s_np, y, w, block_doc, n_id, n_ood = _doc_boot_inputs(
+        {name: scores[name] for name in needed}, labels, doc_ids, weights,
+    )
+    boot = _doc_boot_resamples(s_np, y, w, block_doc, n_id, n_ood, n_resamples, seed, None)
+    points = {name: auroc(s, y, sample_weight=w) for name, s in s_np.items()}
+    out: dict[tuple[str, str], dict[str, Any]] = {}
+    for a, b in pairs:
+        delta_r = boot[a][0] - boot[b][0]
+        n_le = int(np.count_nonzero(delta_r <= 0))
+        n_ge = int(np.count_nonzero(delta_r >= 0))
+        out[(a, b)] = {
+            "delta": points[a] - points[b],
+            "ci": _percentile_ci(delta_r, level),
+            "p": min(1.0, 2.0 * (1 + min(n_le, n_ge)) / (n_resamples + 1)),
+            "resamples": delta_r,
+        }
+    return out
+
+
+def holm(pvalues) -> np.ndarray:
+    """Holm step-down adjusted p-values, returned in the input order.
+
+    Sort ascending (stable); p~_(i) = max_{j <= i} min(1, (m - j + 1) p_(j)).
+    """
+    p = np.asarray(pvalues, dtype=np.float64).reshape(-1)
+    if not (np.isfinite(p).all() and (p >= 0).all() and (p <= 1).all()):
+        raise ValueError("p-values must be finite and in [0, 1]")
+    m = p.size
+    order = np.argsort(p, kind="stable")
+    adj_sorted = np.maximum.accumulate(np.minimum(1.0, (m - np.arange(m)) * p[order]))
+    out = np.empty(m, dtype=np.float64)
+    out[order] = adj_sorted
+    return out

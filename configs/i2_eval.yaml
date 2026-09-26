@@ -1,0 +1,118 @@
+# Iteration 2 eval set, scoring and pre-registered analysis (specs/i2-eval-rebuild.md, section 5.2).
+# The `analysis` block is frozen at approval: its sha256 goes to data/scores_i2/prereg.json.
+# Additions to the spec text, all outside `analysis`: `stripped_copy: false` on the domains
+# without a stripped copy, `eval_set.seen_dir`, and `checks.arxiv_old_d1_tokens`.
+eval_set:
+  name: i2_v1
+  source: {dataset: ArmelR/the-pile-splitted, split: train, shuffle_seed: 1337, shuffle_buffer: 10000}
+  train_configs: {base: configs/c0.yaml, adapter: configs/c3_phase2.yaml}
+  domains:                       # list order = bootstrap seed index (section 5.6)
+    - {key: stackexchange, role: id_base, cache_tokens: 100000000, max_stream_tokens: 110000000,
+       stripped_copy: false}
+    - {key: hackernews, role: id_adapter, cache_tokens: 100000000, max_stream_tokens: 120000000,
+       stripped_copy: false}
+    - {key: arxiv, role: ood, cache_tokens: 10000000, max_stream_tokens: 50000000,
+       stripped_copy: true}
+    - {key: freelaw, role: ood, cache_tokens: 10000000, max_stream_tokens: 30000000,
+       stripped_copy: false}
+    - {key: pubmed_abstracts, role: ood, cache_tokens: 10000000, max_stream_tokens: 15000000,
+       stripped_copy: false}
+  seen_dir: data/pile            # where the cached tensors live (minigpt/data.py:194)
+  seen_tensors: [wikipedia_en_100000000, stackexchange_100000000, hackernews_100000000,
+                 arxiv_10000000, freelaw_10000000, pubmed_abstracts_10000000,
+                 wikipedia_en_50000, stackexchange_50000, arxiv_10000, freelaw_10000,
+                 pubmed_abstracts_10000]
+  splits: [test, val]            # no dev split
+  block_size: 256
+  min_doc_tokens: 257            # asserted equal to block_size + 1
+  max_blocks_per_doc: 3          # 1 if S0-T4 puts m4 above 10 GPU h
+  n_test_docs: 1000
+  candidate_pool_factor: 1.2
+  offset_seed: 0
+  unseen_check:
+    window_tokens: 32
+    hash_base: 1000003
+    checker_hash_base: 1000000007
+    chunk_tokens: 10000000       # chunks overlap by window_tokens - 1
+    near_dup_window_frac: 0.5
+    report_drop_frac: 0.05
+    report_top_prefixes: 10
+  strip:
+    math_envs: [equation, equation*, align, align*, eqnarray, eqnarray*, gather, gather*,
+                multline, multline*, displaymath, math]
+  out_dir: data/eval_i2
+scoring:
+  # c2_refit, c4_lap_refit and c4_tfb_fixed are S2's refits (specs/i2-posthoc-fixes.md,
+  # sections 2 and 5.5). They load data/checkpoints/i2_posthoc/<cell>/, which
+  # scripts/refit_posthoc.py writes. Until then, the scorer refuses them before it scores
+  # anything, so S1's runs on test and test_hn pass --score-set with the S1 sets.
+  seed_base: 0
+  seed_offsets: {legacy_d1: 0, test: 100000, test_hn: 200000, arxiv_stripped: 300000}
+  n_samples: {c0: 1, mc_dropout: 20, c1: 20, c3: 20, c4_tfb: 20,
+              c2_refit: 20, c4_lap_refit: 20, c4_tfb_fixed: 20}
+  score_sets:
+    legacy_d1: [c0, mc_dropout, c1, c3, c4_tfb]
+    test: [c0, mc_dropout, c1, c3, c4_tfb, c2_refit, c4_lap_refit, c4_tfb_fixed]
+    arxiv_stripped: [c0, mc_dropout, c1, c3, c4_tfb]
+    test_hn: [c3, c4_tfb, c4_lap_refit, c4_tfb_fixed]
+  labels:
+    c0: {display: "C0 deterministic", sampler: none, adapter_source: none}
+    mc_dropout: {display: "MC dropout (C0)", sampler: dropout, adapter_source: none}
+    c1: {display: "C1 variational FFN", sampler: variational, adapter_source: none}
+    c3: {display: "C3 BLoB LoRA", sampler: variational, adapter_source: blob}
+    c4_tfb: {display: "BLoB-mean + TFB (pre-fix)", sampler: pre-fix, adapter_source: blob_mean}
+    c2_refit: {display: "C2 diag. Laplace FFN (scaled)", sampler: v2, adapter_source: none}
+    c4_lap_refit: {display: "BLoB-mean + diag. Laplace LoRA-A (scaled)", sampler: v2,
+                   adapter_source: blob_mean}
+    c4_tfb_fixed: {display: "BLoB-mean + TFB (fixed)", sampler: v2, adapter_source: blob_mean}
+  batch_size: {legacy_d1: 1, test: 1, test_hn: 1, arxiv_stripped: 1}   # S0-T1 sets the last 3
+  amp_fp16: true
+  determinism: {use_deterministic_algorithms: true, warn_only: true, cudnn_deterministic: true,
+                cudnn_benchmark: false, cublas_workspace_config: ":4096:8"}
+  out_dir: data/scores_i2
+analysis:                        # frozen at approval; sha256 goes to data/scores_i2/prereg.json
+  primary_score: blk_g
+  contrast_score: blk_mi
+  secondary_scores: [blk_tu, blk_au, blk_nll, blk_maxprob_unc]
+  aggregation: mean_all_positions
+  ood_domains: [arxiv, freelaw, pubmed_abstracts]
+  fpr_target_tpr: 0.95
+  bootstrap: {resamples: 10000, seed: 0, level: 0.95, unit: document, stratify_by_class: true,
+              percentile_method: linear}
+  margin_auroc: 0.02
+  alpha: 0.05
+  families:                      # rows = [score_set, id_domain]; cells = rows x ood_domains
+    F1_s1_primary: [[mc_dropout, stackexchange], [c1, stackexchange], [c3, hackernews]]
+    F2_s1_lora_on_se: [[c3, stackexchange]]
+    F3_s2_primary: [[c2_refit, stackexchange], [c4_lap_refit, hackernews],
+                    [c4_tfb_fixed, hackernews]]
+    F4_s2_lora_on_se: [[c4_lap_refit, stackexchange], [c4_tfb_fixed, stackexchange]]
+  descriptive:
+    rows: [[c4_tfb, hackernews], [c4_tfb, stackexchange]]
+    stripped_rows: [[mc_dropout, stackexchange], [c1, stackexchange], [c3, hackernews],
+                    [c4_tfb, hackernews]]
+    replication:
+      id: stackexchange
+      ood: arxiv
+      old_point: {mc_dropout: 0.8976, c1: 0.8739, c3: 0.9085, c4_tfb: 0.9173}
+      old_cluster_ci: {mc_dropout: [0.858, 0.931], c1: [0.835, 0.910], c3: [0.881, 0.934],
+                       c4_tfb: [0.888, 0.942]}
+checks:
+  repro:
+    mi_auroc_target: {mc_dropout: 0.8976, c1: 0.8739, c3: 0.9085, c4_tfb: 0.9173}
+    mi_auroc_tol: 0.010
+    c0_maxprob_target: 0.5911
+    c0_maxprob_tol: 0.002
+    spearman_min: 0.99
+    spearman_pairs: {c0: [blk_tu, pred_ent], c4_tfb: [blk_mi, mi]}
+    rerun_block_ids: "0-99,500-599"
+    spread_seed_bases: [1000000, 2000000]
+    spread_max_miss: 0.030
+    old_ratio_target: {c1: 1.2637, c3: 1.4051, c4_tfb: 1.3443, mc_dropout: 1.3049}
+    old_ratio_tol: 0.0001
+    new_ratio_tol_c4_tfb: 0.01
+    batch_c0_max_abs: 0.001
+    batch_mi_auroc_tol: 0.01
+  arxiv_old_d1_docs: 9
+  arxiv_old_d1_tokens: 128001    # the old D1 eval read arxiv[0:128001] (500 x 256 + 1 tokens)
+  rederive_tol: 1.0e-6
