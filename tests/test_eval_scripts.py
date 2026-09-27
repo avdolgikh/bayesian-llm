@@ -44,7 +44,7 @@ from minigpt.lora import DeterministicLoRALinear, inject_lora
 from minigpt.model import MiniGPT
 from minigpt.tfb import load_tfb_state, sample_tfb_params
 
-_MODULE_T0 = time.perf_counter()
+_MODULE_T0 = time.perf_counter()   # reset at the module's first test (_start_module_clock)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = REPO_ROOT / "scripts"
@@ -67,6 +67,13 @@ TFB_SIGMA_Q = 0.05
 LAPLACE_SAMPLE_SCALE = 0.05
 LORA_B_SCALE = 0.5
 TIME_BUDGET_S = 60.0
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _start_module_clock():
+    """T5h times this module only: pytest imports every test module before running any test."""
+    global _MODULE_T0
+    _MODULE_T0 = time.perf_counter()
 PREREG_FROZEN_AT = "2026-09-26T00:00:00+00:00"
 
 MODEL_OVERRIDES = {
