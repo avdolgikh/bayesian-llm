@@ -20,11 +20,13 @@ import warnings
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 import yaml
 
 import minigpt.data as data_mod
+from minigpt import evalset
 from minigpt import posthoc_refit as pr
 from minigpt.laplace import fit_laplace, load_laplace_state, save_laplace_state, select_params
 from minigpt.lora import DeterministicLoRALinear, LoRAConfig, inject_lora
@@ -923,8 +925,6 @@ def test_real_configs_pass_the_check_and_hold_the_frozen_values(cell, method, ki
 # Manifest schema shared with the eval-set builder (S1 spec section 5.2: c_i, L_d). Rows come from
 # the builder's own row function, so the refit and the builder cannot drift apart again (defect D8).
 def _builder_test_row(domain: str, index: int, start: int, n_tokens: int) -> dict:
-    import numpy as np
-    from minigpt import evalset
     cand = evalset.Candidate(key=domain, index=index, start=start,
                              doc_id=f"{domain}/{index:09d}/builder", text_sha1="0" * 40,
                              tokens=np.zeros(n_tokens, dtype=np.int32), n_blocks=1, offset=0)
