@@ -440,6 +440,7 @@ def scripts():
 @pytest.fixture(scope="module")
 def world(tmp_path_factory, scripts):
     ecc, mcd = scripts.ecc, scripts.mcd
+    ecc_load = _load_script("eval_c_load")  # CKPT_DIR and the loaders of eval_c_checkpoints
     root = tmp_path_factory.mktemp("s1_t5")
     real_build = ecc.build_milestone_config
     cfgs = {}
@@ -456,7 +457,7 @@ def world(tmp_path_factory, scripts):
     ckpt, ckpt_sigma0 = root / "ckpt", root / "ckpt_sigma0"
     saved_det = _determinism_state()
     mp = pytest.MonkeyPatch()
-    for mod in (ecc, mcd):
+    for mod in (ecc_load, mcd):
         mp.setattr(mod, "CKPT_DIR", ckpt)
         mp.setattr(mod, "build_milestone_config", fake_build)
         mp.setattr(mod, "get_tokenizer", lambda: SimpleNamespace(n_vocab=VOCAB))
@@ -488,9 +489,9 @@ def world(tmp_path_factory, scripts):
         run("ecc", "test_hn", "main")
         run("ecc", "arxiv_stripped", "main")
         run("mcd", "arxiv_stripped", "main")
-        mp.setattr(ecc, "CKPT_DIR", ckpt_sigma0)
+        mp.setattr(ecc_load, "CKPT_DIR", ckpt_sigma0)
         run("ecc", "test", "sigma0", "--score-set", "c4_tfb")
-        mp.setattr(ecc, "CKPT_DIR", ckpt)
+        mp.setattr(ecc_load, "CKPT_DIR", ckpt)
         analyze_stdout = _run_main(ecc.main, ["--eval-config", str(yaml_path), "--analyze"])
         scoring_seconds = time.perf_counter() - t0
         yield SimpleNamespace(
@@ -1581,6 +1582,13 @@ def test_t5b_checker_imports_no_scorer_code():
             names.add(node.module)
     forbidden = ("minigpt", "eval_c_checkpoints", "eval_mc_dropout", "scripts")
     assert not [n for n in names for f in forbidden if n == f or n.startswith(f + ".")]
+
+
+def test_code_hash_covers_every_scoring_module():
+    # The scorer is split into eval_c_*.py modules; the provenance hash must cover all of them.
+    ecc = _load_script("eval_c_checkpoints")
+    names = {Path(p).name for p in ecc.scoring_code_paths(SCRIPTS_DIR / "eval_c_checkpoints.py")}
+    assert {p.name for p in SCRIPTS_DIR.glob("eval_c_*.py")} <= names
 
 
 # ---------------------------------------------------------------------------
