@@ -176,7 +176,7 @@ this project scores with *g* and MI (section 1).
   - Many modern LLMs are trained without dropout, so there is nothing to switch on. Dropout can be added inside a LoRA adapter instead (BayesLoRA).
 - **When and why.** 2015-2016. Dropout was already in almost every network, so this gave uncertainty "for free" from models people already had.
 - **Key papers.** Gal and Ghahramani 2016; Doyle 2025 (dropout in LoRA adapters).
-- **This project.** Compared. Pythia was trained without dropout, so we apply dropout inside a small adapter.
+- **This project.** Compared. If the chosen model was trained without dropout (as Pythia was), dropout goes inside a small adapter.
 
 ### 3.2 Variational inference on full weights (Bayes by Backprop, IVON)
 
@@ -349,7 +349,7 @@ erratic and memory-hungry.
 **Where this project fits.** It is a self-contained comparison, not a replacement for the work above.
 
 - Seven methods on one pretrained backbone: MC dropout, variational FFN weights, diagonal Laplace on FFN weights, BLoB, TFB, diagonal Laplace on LoRA and a 3-adapter LoRA ensemble (ScalaBL if time allows). Full-weight and LoRA posteriors sit side by side on the same model.
-- The planned models are Pythia-410M for all methods, then Pythia-1B. Both were trained on The Pile, whose composition is documented, and Pythia's exact training data and order were released, so we know which text the models saw.
+- The planned models are pretrained open models with public training data, so we know which text they saw. The leading candidate (not final) is Pythia-410M for all methods, then Pythia-1B, trained on The Pile; Pythia's exact training data and order were released.
 - The main test scores human-written free text: held-out documents from the kind of text the model saw, against text from sources outside its training data.
 - Cheap baselines, sanity checks and the lessons from an earlier 76M pilot are in the [metrics guide](metrics-guide.md) (sections 5 and 7).
 - Cost per method is reported next to its score.

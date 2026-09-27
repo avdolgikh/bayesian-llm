@@ -35,8 +35,8 @@ dropout, variational inference on the feed-forward (FFN) weights, Laplace on the
 small adapter trained on top of frozen weights): BLoB (trained), TFB (noise added to a trained LoRA, no extra
 training) and Laplace-LoRA. The seventh, an ensemble of 3 LoRAs, is not Bayesian by derivation but is a common
 reference in Bayesian-LoRA papers [Wang 2024]. The [methods overview](methods-overview.md) explains them all. The
-planned models are Pythia-410M and Pythia-1B [Biderman 2023], trained on The Pile, a public dataset, so we know
-exactly what text they saw. Every method is scored on the same texts.
+planned models are pretrained open models whose training data is public, so we know what text they saw. The
+leading candidate (not final) is Pythia-410M and 1B [Biderman 2023], trained on The Pile. Every method is scored on the same texts.
 
 One principle shapes the metrics: **we measure; the people who deploy the model decide.** What to do with a high
 score (warn, abstain, ask a human) is their choice. So the first test of a measure is whether it tracks what the
@@ -293,7 +293,7 @@ Why these matter:
 |---|---|
 | Time per text | Milliseconds to score one window with N samples, same GPU and batch size; also as a ratio to one plain pass |
 | Peak GPU memory | Whether the method fits on your card |
-| Training or fitting time | One-off cost: one adapter training run for dropout (Pythia was trained without dropout, so dropout goes inside a small LoRA adapter); a short search or fit for after-training methods; full training runs for variational methods and ensembles |
+| Training or fitting time | One-off cost: one adapter training run for dropout (if the model was trained without dropout, as Pythia was, dropout goes inside a small LoRA adapter); a short search or fit for after-training methods; full training runs for variational methods and ensembles |
 | Extra stored parameters | Disk and memory for the Bayesian part |
 | Number of weight samples N | How AUROC grows with N, so you can pick the cheapest N that works |
 
