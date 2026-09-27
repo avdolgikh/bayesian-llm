@@ -84,7 +84,7 @@ paper/         LaTeX paper, compiled PDF, arXiv submission zip
 figures/       Generated paper figures (PDF/PNG) — from scripts/generate_figures.py
 scripts/       Utilities (MLflow inspection, GPU profiling, checkpoint eval, figure generation,
                timing probes, eval-set build/checks, post-hoc refits, reference verification)
-docs/          arXiv requirements, metrics guide, paper notes
+docs/          arXiv requirements, metrics guide, methods overview
 ```
 
 ## Quick Start
