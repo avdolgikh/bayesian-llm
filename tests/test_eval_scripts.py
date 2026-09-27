@@ -1573,13 +1573,16 @@ def test_t5b_check_eval_rebuild_rederives_the_tables(world):
 def test_t5b_checker_imports_no_scorer_code():
     import ast
 
-    tree = ast.parse((SCRIPTS_DIR / "check_eval_rebuild.py").read_text(encoding="utf-8"))
+    # The checker is split into check_eval_*.py modules; every one of them must stay independent.
+    paths = sorted(SCRIPTS_DIR.glob("check_eval_*.py"))
+    assert SCRIPTS_DIR / "check_eval_rebuild.py" in paths
     names = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            names |= {a.name for a in node.names}
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            names.add(node.module)
+    for path in paths:
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Import):
+                names |= {a.name for a in node.names}
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                names.add(node.module)
     forbidden = ("minigpt", "eval_c_checkpoints", "eval_mc_dropout", "scripts")
     assert not [n for n in names for f in forbidden if n == f or n.startswith(f + ".")]
 

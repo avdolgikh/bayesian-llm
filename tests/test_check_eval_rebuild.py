@@ -761,17 +761,22 @@ def test_unbuilt_checks_exit_with_code_2(cer, work):
 
 
 def test_checker_imports_no_scorer_code():
-    tree = ast.parse(SCRIPT_PATH.read_text(encoding="utf-8"))
+    # The checker is split into check_eval_*.py modules; they may import only each other.
+    paths = sorted(SCRIPT_PATH.parent.glob("check_eval_*.py"))
+    assert SCRIPT_PATH in paths
+    siblings = {p.stem for p in paths}
     names = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            names.update(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom):
-            names.add(node.module or "")
+    for path in paths:
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Import):
+                names.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                names.add(node.module or "")
     top = {n.split(".")[0] for n in names}
     assert not any(n.startswith("minigpt") for n in names)
     assert not top & {"eval_c_checkpoints", "eval_mc_dropout", "scripts", "experiments"}
-    third_party = top - set(sys.stdlib_module_names) - {"__future__"}
+    third_party = top - set(sys.stdlib_module_names) - {"__future__"} - siblings
     assert third_party <= {"numpy", "torch", "yaml", "sklearn"}
-    source = SCRIPT_PATH.read_text(encoding="utf-8")
-    assert "import_module" not in source and "__import__" not in source
+    for path in paths:
+        source = path.read_text(encoding="utf-8")
+        assert "import_module" not in source and "__import__" not in source
