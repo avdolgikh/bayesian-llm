@@ -1,4 +1,4 @@
-# Bayesian Methods for LLM Uncertainty: A Plain-English Overview
+# Bayesian Methods for LLM Uncertainty: An Overview
 
 This page explains the main ways to estimate **epistemic uncertainty** in language models by treating
 the weights as uncertain. It groups dozens of papers into a few method families, compares them on
