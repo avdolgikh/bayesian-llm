@@ -71,40 +71,28 @@ The 16L experiments use an autonomous HP optimization pipeline (`experiments/c_p
 - **Success gates** per milestone (e.g., MI ratio > 1.2x for C1)
 - **Patience early-stop** + NaN detection + OOM recovery
 
-The agent receives full context (AGENTS.md + briefing) and produces evidence-based reasoning — citing prior results, KL scaling math, and cross-experiment history.
-
-See [`agents/pipeline-guide.md`](agents/pipeline-guide.md) and [`specs/c-pipeline-spec.md`](specs/c-pipeline-spec.md) for details.
-
-## Skills
-
-Reusable agent skills in [`agents/skills/`](agents/skills/). Two-layer architecture: portable `agents/skills/*/skill.md` (repo-agnostic, full docs) + thin `.claude/skills/*/SKILL.md` wrappers (project defaults).
-
-- **[`check-paper-refs`](agents/skills/check-paper-refs/skill.md)** — Verify paper references: ground truth check (CI) + live arXiv API verification + multi-agent cross-review. Script: `scripts/verify_references.py`.
-- **[`convert-md-to-pdf`](agents/skills/convert-md-to-pdf/skill.md)** — Markdown to PDF with LaTeX math, Mermaid diagrams, and Puppeteer rendering.
-- **[`build-latex-pdf`](agents/skills/build-latex-pdf/skill.md)** — LaTeX to PDF via Docker + TeX Live. NeurIPS preprint format. Portable — copy the skill directory to any project.
-- **[`build-arxiv-submission`](agents/skills/build-arxiv-submission/skill.md)** — LaTeX to arXiv submission zip. Auto-detects figures/bib/sty, rewrites paths, verifies compilation via Docker.
+The agent receives the experiment briefing (`experiments/agent_briefing.md`) and produces evidence-based reasoning — citing prior results, KL scaling math, and cross-experiment history.
 
 ## Repository Structure
 
 ```
-minigpt/       Model, training, Bayesian layers, LoRA, Laplace, TFB, uncertainty metrics
+minigpt/       Model, training, Bayesian layers, LoRA, Laplace, TFB, uncertainty metrics, eval-set builder, post-hoc refits
 experiments/   Experiment scripts (A0-B3) + agentic pipeline (C0-C4)
-tests/         288 tests (134 core + 83 pipeline + 71 metrics/eval)
+tests/         594 tests
 configs/       YAML configs per experiment
 paper/         LaTeX paper, compiled PDF, arXiv submission zip
 figures/       Generated paper figures (PDF/PNG) — from scripts/generate_figures.py
-scripts/       Utilities (MLflow inspection, GPU profiling, checkpoint eval, figure generation)
-specs/         Design documents
-docs/          arXiv requirements, metrics guide, reference PDFs
-agents/        Detail documents, portable skills, pipeline guide
+scripts/       Utilities (MLflow inspection, GPU profiling, checkpoint eval, figure generation,
+               timing probes, eval-set build/checks, post-hoc refits, reference verification)
+docs/          arXiv requirements, metrics guide, methods overview
 ```
 
 ## Quick Start
 
 ```bash
 uv sync                                          # install dependencies
-uv run pytest tests/ -v                          # 288 tests
-uv run ruff check minigpt/ experiments/ tests/   # lint
+uv run pytest tests/ -v                          # 594 tests
+uv run ruff check minigpt/ experiments/ tests/ scripts/   # lint
 
 # Example experiments (require CUDA):
 python experiments/a0_baseline.py --config configs/a0_agnews.yaml       # deterministic baseline
@@ -117,6 +105,7 @@ python scripts/eval_c_checkpoints.py --from-scores data/d1_scores.pt --bootstrap
 python scripts/benchmark_inference.py                                              # latency/VRAM
 python scripts/eval_mc_dropout.py                                                  # MC Dropout baseline
 python scripts/generate_figures.py --png                                           # paper figures
+python scripts/verify_references.py                                                # check paper references
 ```
 
 Requires Python 3.11+ and CUDA-enabled PyTorch for GPU training.

@@ -4,6 +4,10 @@ Tests are written BEFORE implementation (TDD Stage #2).
 They target the planned `minigpt/laplace.py` module.
 """
 
+import os
+from pathlib import Path
+
+import pytest
 import torch
 
 from minigpt.layers import BayesConfig
@@ -75,9 +79,13 @@ class TestCurvatureShapes:
 
 class TestDampingStability:
     def test_damping_makes_posterior_finite_and_stable(self):
-        """With damping > 0, posterior variance = 1/(curvature + damping) is finite & positive."""
+        """With damping > 0, posterior variance = 1/(curvature + damping) is finite & positive.
+
+        This is the legacy formula, so the test is pinned to a ``v1_legacy`` state.
+        """
         model, config, data = _make_model_and_data()
         selected, state = _fit_ffn(model, config, data, damping=1.0)
+        assert state.sampler_version == "v1_legacy"
 
         for name in selected:
             variance = 1.0 / (state.curvature[name] + state.damping)
@@ -718,3 +726,329 @@ class TestLaplaceLoRA:
             logits_sampled, _ = model(x)
 
         assert not torch.allclose(logits_map, logits_sampled)
+
+
+# ---------------------------------------------------------------------------
+# 16. S2 (specs/i2-posthoc-fixes.md): versioned sampler, v2 scaling, S2-T3
+# ---------------------------------------------------------------------------
+
+_CKPT_DIR = Path(__file__).resolve().parents[1] / "data" / "checkpoints"
+
+
+def _require_posthoc_file(path: Path) -> Path:
+    """Skip when a saved post-hoc file is absent; fail instead if REQUIRE_POSTHOC_DATA=1."""
+    if path.exists():
+        return path
+    if os.environ.get("REQUIRE_POSTHOC_DATA") == "1":
+        pytest.fail(f"{path} is missing and REQUIRE_POSTHOC_DATA=1")
+    pytest.skip(f"{path} is absent")
+
+
+def _flat_median(tensors: dict[str, torch.Tensor]) -> float:
+    """Median over all entries. torch.quantile fails above 2**24 entries; torch.median does not."""
+    flat = torch.cat([t.detach().flatten().float().cpu() for t in tensors.values()])
+    return torch.median(flat).item()
+
+
+def _synthetic_v1_state(curvature_value: float | None = None, seed: int = 0):
+    """Two-tensor legacy state with positive curvature (no model needed)."""
+    from minigpt.laplace import LaplaceState
+
+    g = torch.Generator().manual_seed(seed)
+    names = ["blocks.0.mlp.fc.linear.weight", "blocks.0.mlp.proj.linear.weight"]
+    shapes = [(8, 4), (4, 8)]
+    phi = {n: torch.randn(s, generator=g) * 0.02 for n, s in zip(names, shapes)}
+    if curvature_value is None:
+        curv = {n: torch.rand(s, generator=g) * 1e-6 + 1e-8 for n, s in zip(names, shapes)}
+    else:
+        curv = {n: torch.full(s, curvature_value) for n, s in zip(names, shapes)}
+    return LaplaceState(
+        param_names=names, phi_hat=phi, curvature=curv,
+        damping=1.0, sample_scale=1.0, sampler_version="v1_legacy",
+    )
+
+
+class TestSamplerVersionV1Legacy:
+    def test_fit_laplace_returns_v1_legacy_state(self):
+        """fit_laplace keeps its estimator and returns an unscaled v1_legacy state."""
+        model, config, data = _make_model_and_data()
+        _, state = _fit_ffn(model, config, data)
+        assert state.sampler_version == "v1_legacy"
+        assert state.n_data_seqs is None
+        assert state.tokens_per_seq is None
+        assert state.prior_prec is None
+
+    def test_v1_posterior_std_is_exact_legacy_expression(self):
+        """v1_legacy std is (1 / (curvature + damping)).sqrt() * sample_scale, bitwise."""
+        from minigpt.laplace import posterior_std
+
+        state = _synthetic_v1_state()
+        state.damping = 1.5
+        state.sample_scale = 0.8
+        std = posterior_std(state)
+        for name in state.param_names:
+            expected = (1.0 / (state.curvature[name] + state.damping)).sqrt() * 0.8
+            assert torch.equal(std[name], expected)
+
+    def test_v1_state_rejects_scaling_fields(self):
+        """A v1_legacy state must not carry v2 scaling fields (they would be ignored)."""
+        from minigpt.laplace import LaplaceState
+
+        with pytest.raises(ValueError, match="v1_legacy"):
+            LaplaceState(
+                param_names=[], phi_hat={}, curvature={}, damping=1.0,
+                sampler_version="v1_legacy", prior_prec=1.0,
+            )
+
+
+class TestScaleLaplaceState:
+    def test_returns_v2_state_with_fields(self):
+        """scale_laplace_state returns a v2 state; damping is set to 0.0 (ignored by v2)."""
+        from minigpt.laplace import scale_laplace_state
+
+        v1 = _synthetic_v1_state()
+        v2 = scale_laplace_state(v1, n_data_seqs=1000, tokens_per_seq=4, prior_prec=2.0)
+        assert v2.sampler_version == "v2"
+        assert v2.n_data_seqs == 1000
+        assert v2.tokens_per_seq == 4
+        assert v2.prior_prec == 2.0
+        assert v2.damping == 0.0
+        assert v2.sample_scale == 1.0
+        assert v2.param_names == v1.param_names
+        for name in v1.param_names:
+            assert torch.equal(v2.phi_hat[name], v1.phi_hat[name])
+            assert torch.equal(v2.curvature[name], v1.curvature[name])
+        # The input state is left as it was
+        assert v1.sampler_version == "v1_legacy"
+        assert v1.damping == 1.0
+        assert v1.prior_prec is None
+
+    def test_synthetic_posterior_std_s2_t3c(self):
+        """S2-T3(c): F=1e-6, N_seq=1000, T=4, lambda=2 -> sigma = 2.016^-1/2 = 0.704295."""
+        from minigpt.laplace import posterior_std, scale_laplace_state
+
+        v1 = _synthetic_v1_state(curvature_value=1e-6)
+        v2 = scale_laplace_state(v1, n_data_seqs=1000, tokens_per_seq=4, prior_prec=2.0)
+        std = posterior_std(v2)
+        for name in v2.param_names:
+            assert std[name].shape == v2.phi_hat[name].shape
+            assert torch.allclose(
+                std[name], torch.full_like(std[name], 0.704295), rtol=0.0, atol=1e-6,
+            )
+
+    def test_v2_posterior_std_formula(self):
+        """v2 std is (N_seq * T^2 * F + lambda)^-1/2 entrywise, on random curvature."""
+        from minigpt.laplace import posterior_std, scale_laplace_state
+
+        v1 = _synthetic_v1_state()
+        v2 = scale_laplace_state(v1, n_data_seqs=312_500, tokens_per_seq=256, prior_prec=10.0)
+        std = posterior_std(v2)
+        for name in v2.param_names:
+            prec = 312_500 * 256**2 * v1.curvature[name].double() + 10.0
+            expected = prec.rsqrt().to(std[name].dtype)
+            assert torch.allclose(std[name], expected, rtol=1e-6, atol=0.0)
+
+    def test_prior_prec_sweep_is_monotone(self):
+        """Lambda-sweep support: re-scaling a v2 state with a larger lambda shrinks every std."""
+        from minigpt.laplace import posterior_std, scale_laplace_state
+
+        v1 = _synthetic_v1_state()
+        prev = None
+        base = scale_laplace_state(v1, n_data_seqs=1000, tokens_per_seq=16, prior_prec=1.0)
+        for lam in [1.0, 1e2, 1e4, 1e6]:
+            # Re-scale the v2 state (curvature stays the raw F-hat)
+            state = scale_laplace_state(base, n_data_seqs=1000, tokens_per_seq=16, prior_prec=lam)
+            assert state.prior_prec == lam
+            std = posterior_std(state)
+            if prev is not None:
+                for name in state.param_names:
+                    assert (std[name] < prev[name]).all()
+            prev = std
+
+    def test_zero_prior_prec_valid_without_zero_curvature(self):
+        """lambda=0 is valid when no curvature entry is zero; the std is then finite."""
+        from minigpt.laplace import posterior_std, scale_laplace_state
+
+        v2 = scale_laplace_state(
+            _synthetic_v1_state(), n_data_seqs=10, tokens_per_seq=4, prior_prec=0.0,
+        )
+        for std in posterior_std(v2).values():
+            assert torch.isfinite(std).all()
+
+    def test_zero_prior_prec_with_zero_curvature_raises(self):
+        """lambda=0 with a zero curvature entry gives an infinite std: refuse it."""
+        from minigpt.laplace import scale_laplace_state
+
+        v1 = _synthetic_v1_state()
+        v1.curvature[v1.param_names[0]][0, 0] = 0.0
+        with pytest.raises(ValueError, match="zero curvature"):
+            scale_laplace_state(v1, n_data_seqs=10, tokens_per_seq=4, prior_prec=0.0)
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"n_data_seqs": 0, "tokens_per_seq": 4, "prior_prec": 1.0},
+            {"n_data_seqs": 10, "tokens_per_seq": 0, "prior_prec": 1.0},
+            {"n_data_seqs": 10, "tokens_per_seq": 4, "prior_prec": -1.0},
+        ],
+    )
+    def test_invalid_arguments_raise(self, kwargs):
+        from minigpt.laplace import scale_laplace_state
+
+        with pytest.raises(ValueError):
+            scale_laplace_state(_synthetic_v1_state(), **kwargs)
+
+    def test_arguments_are_keyword_only(self):
+        from minigpt.laplace import scale_laplace_state
+
+        with pytest.raises(TypeError):
+            scale_laplace_state(_synthetic_v1_state(), 10, 4, 1.0)
+
+    def test_base_checkpoint_provenance_is_kept(self):
+        """The v2 state can record which base checkpoint (path and SHA-256) it was fitted on."""
+        from minigpt.laplace import scale_laplace_state
+
+        v2 = scale_laplace_state(
+            _synthetic_v1_state(), n_data_seqs=10, tokens_per_seq=4, prior_prec=1.0,
+            base_checkpoint="data/checkpoints/c0/ckpt_best.pt", base_sha256="ab" * 32,
+        )
+        assert v2.base_checkpoint == "data/checkpoints/c0/ckpt_best.pt"
+        assert v2.base_sha256 == "ab" * 32
+
+    def test_v2_state_requires_scaling_fields(self):
+        """A v2 state without N_seq, T or lambda cannot be built."""
+        from minigpt.laplace import LaplaceState
+
+        with pytest.raises(ValueError, match="v2"):
+            LaplaceState(
+                param_names=[], phi_hat={}, curvature={}, damping=0.0,
+                sampler_version="v2", n_data_seqs=10, tokens_per_seq=4,
+            )
+
+
+class TestSampleLaplaceV2:
+    def test_v2_sample_matches_pinned_rng_order(self):
+        """v2 draw: one device generator seeded once, one randn per name in param_names order."""
+        from minigpt.laplace import posterior_std, sample_laplace_params, scale_laplace_state
+
+        v2 = scale_laplace_state(
+            _synthetic_v1_state(), n_data_seqs=1000, tokens_per_seq=16, prior_prec=5.0,
+        )
+        std = posterior_std(v2)
+        gen = torch.Generator(device="cpu")
+        gen.manual_seed(7)
+        expected = {}
+        for name in v2.param_names:
+            phi = v2.phi_hat[name]
+            eps = torch.randn(phi.shape, generator=gen, dtype=phi.dtype, device=phi.device)
+            expected[name] = phi + std[name] * eps
+        sampled = sample_laplace_params(v2, seed=7)
+        assert set(sampled) == set(v2.param_names)
+        for name in v2.param_names:
+            assert torch.equal(sampled[name], expected[name])
+
+    def test_v2_same_seed_same_sample_different_seed_differs(self):
+        from minigpt.laplace import sample_laplace_params, scale_laplace_state
+
+        v2 = scale_laplace_state(
+            _synthetic_v1_state(), n_data_seqs=1000, tokens_per_seq=16, prior_prec=5.0,
+        )
+        a = sample_laplace_params(v2, seed=3)
+        b = sample_laplace_params(v2, seed=3)
+        c = sample_laplace_params(v2, seed=4)
+        for name in v2.param_names:
+            assert torch.equal(a[name], b[name])
+            assert not torch.equal(a[name], c[name])
+
+    def test_v2_empirical_std_matches_posterior_std(self):
+        """Sample deviations from phi_hat have the v2 posterior std (200k entries)."""
+        from minigpt.laplace import LaplaceState, sample_laplace_params, scale_laplace_state
+
+        name = "blocks.0.mlp.fc.linear.weight"
+        v1 = LaplaceState(
+            param_names=[name],
+            phi_hat={name: torch.zeros(400, 500)},
+            curvature={name: torch.full((400, 500), 3.5e-7)},
+            damping=1.0, sampler_version="v1_legacy",
+        )
+        v2 = scale_laplace_state(v1, n_data_seqs=312_500, tokens_per_seq=256, prior_prec=0.0)
+        target = (312_500 * 256**2 * 3.5e-7) ** -0.5  # about 0.0118 (spec Section 5.2 check)
+        dev = sample_laplace_params(v2, seed=0)[name] - v2.phi_hat[name]
+        assert abs(dev.std().item() / target - 1.0) < 0.01
+        assert abs(dev.mean().item()) < 0.01 * target
+
+    @pytest.mark.parametrize("scale", [0.0, 0.5, 2.0])
+    def test_v2_sample_scale_not_one_raises(self, scale):
+        """v2 has no temperature: sample_scale != 1.0 raises in posterior_std and sampling."""
+        from minigpt.laplace import posterior_std, sample_laplace_params, scale_laplace_state
+
+        v2 = scale_laplace_state(
+            _synthetic_v1_state(), n_data_seqs=10, tokens_per_seq=4, prior_prec=1.0,
+        )
+        v2.sample_scale = scale
+        with pytest.raises(ValueError, match="sample_scale"):
+            posterior_std(v2)
+        with pytest.raises(ValueError, match="sample_scale"):
+            sample_laplace_params(v2, seed=0)
+
+    def test_v2_sampling_perturbs_logits_less_at_larger_prior_prec(self):
+        """End to end on a tiny model: a larger lambda moves the logits less from the MAP."""
+        from minigpt.laplace import apply_sampled_params, sample_laplace_params, scale_laplace_state
+
+        model, config, data = _make_model_and_data()
+        model.eval()
+        _, v1 = _fit_ffn(model, config, data)
+        x = data[: config.block_size].unsqueeze(0)
+        with torch.no_grad():
+            logits_map, _ = model(x)
+        shifts = []
+        for lam in [1e2, 1e5]:
+            v2 = scale_laplace_state(v1, n_data_seqs=1000, tokens_per_seq=32, prior_prec=lam)
+            sampled = sample_laplace_params(v2, seed=0)
+            with torch.no_grad(), apply_sampled_params(model, sampled):
+                logits, _ = model(x)
+            shifts.append((logits - logits_map).abs().mean().item())
+        assert shifts[0] > shifts[1] > 0.0
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+    def test_v2_noise_is_drawn_on_the_parameter_device(self):
+        from minigpt.laplace import sample_laplace_params, scale_laplace_state
+
+        v1 = _synthetic_v1_state()
+        v1.phi_hat = {n: t.cuda() for n, t in v1.phi_hat.items()}
+        v1.curvature = {n: t.cuda() for n, t in v1.curvature.items()}
+        v2 = scale_laplace_state(v1, n_data_seqs=10, tokens_per_seq=4, prior_prec=1.0)
+        a = sample_laplace_params(v2, seed=0)
+        b = sample_laplace_params(v2, seed=0)
+        for name in v2.param_names:
+            assert a[name].is_cuda
+            assert torch.equal(a[name], b[name])
+
+
+class TestSavedStatesS2T3:
+    """S2-T3(a)-(b) on the saved pre-fix states. No sampling is done."""
+
+    @pytest.mark.parametrize(
+        ("cell", "n_data_seqs", "expected_median", "n_entries"),
+        [
+            ("c4_lap", 312_500, 0.0118, 655_360),
+            ("c2", 625_000, 0.0140, 33_554_432),
+        ],
+    )
+    def test_saved_state_scaled_median_std(self, cell, n_data_seqs, expected_median, n_entries):
+        from minigpt.laplace import load_laplace_state, posterior_std, scale_laplace_state
+
+        path = _require_posthoc_file(_CKPT_DIR / cell / "laplace_state.pt")
+        v1 = load_laplace_state(path, map_location="cpu")
+        assert v1.sampler_version == "v1_legacy"
+        assert sum(t.numel() for t in v1.curvature.values()) == n_entries
+
+        # (b) legacy: median of (F + 1)^-1/2 is 1.00 +- 0.01
+        legacy = {n: (v1.curvature[n] + 1.0).rsqrt() for n in v1.param_names}
+        assert abs(_flat_median(legacy) - 1.0) <= 0.01
+        assert abs(_flat_median(posterior_std(v1)) - 1.0) <= 0.01
+
+        # (a) v2 at lambda = 0: median of (N_seq T^2 F)^-1/2
+        v2 = scale_laplace_state(v1, n_data_seqs=n_data_seqs, tokens_per_seq=256, prior_prec=0.0)
+        median = _flat_median(posterior_std(v2))
+        assert abs(median - expected_median) <= 0.002, f"{cell}: median std {median:.5f}"

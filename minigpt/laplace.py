@@ -3,10 +3,20 @@
 Fits a diagonal Gaussian posterior around MAP weights using empirical Fisher
 (squared gradients), then provides sampling and context-manager APIs for
 uncertainty evaluation via MC forward passes.
+
+Two sampler versions exist (specs/i2-posthoc-fixes.md, Section 5.4):
+
+- ``v1_legacy``: std = sample_scale / sqrt(F_hat + damping). F_hat is the mean squared
+  gradient of the token-mean loss, so it is never scaled to the data size. Kept only so
+  that the pre-fix states reproduce bitwise.
+- ``v2``: precision tau = N_seq * T^2 * F_hat + prior_prec, std = tau^(-1/2). The curvature
+  tensor always holds the raw F_hat; the scaling lives in the state fields.
 """
 
+import warnings
+from collections.abc import Callable
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import torch
@@ -15,15 +25,43 @@ from torch import nn
 from minigpt.train import get_batch
 from minigpt.uncertainty import mc_metrics_single
 
+SAMPLER_VERSIONS = ("v1_legacy", "v2")
+_V2_FIELDS = ("n_data_seqs", "tokens_per_seq", "prior_prec")
+
 
 @dataclass
 class LaplaceState:
-    """Fitted Laplace posterior state."""
+    """Fitted Laplace posterior state.
+
+    ``curvature`` is the raw diagonal empirical Fisher F_hat in both versions. A ``v2``
+    state also holds ``n_data_seqs`` (N_seq), ``tokens_per_seq`` (T) and ``prior_prec``
+    (lambda); a ``v1_legacy`` state holds none of them. ``base_checkpoint`` and
+    ``base_sha256`` optionally record the base model the curvature was fitted on.
+    """
     param_names: list[str]
     phi_hat: dict[str, torch.Tensor]
     curvature: dict[str, torch.Tensor]
     damping: float
     sample_scale: float = 1.0
+    sampler_version: str = field(kw_only=True)
+    n_data_seqs: int | None = field(default=None, kw_only=True)
+    tokens_per_seq: int | None = field(default=None, kw_only=True)
+    prior_prec: float | None = field(default=None, kw_only=True)
+    base_checkpoint: str | None = field(default=None, kw_only=True)
+    base_sha256: str | None = field(default=None, kw_only=True)
+
+    def __post_init__(self) -> None:
+        if self.sampler_version not in SAMPLER_VERSIONS:
+            raise ValueError(
+                f"Unknown sampler_version {self.sampler_version!r}; "
+                f"expected one of {SAMPLER_VERSIONS}"
+            )
+        present = [name for name in _V2_FIELDS if getattr(self, name) is not None]
+        if self.sampler_version == "v1_legacy" and present:
+            raise ValueError(f"A v1_legacy state must not set {present}; they are v2 fields")
+        if self.sampler_version == "v2" and len(present) != len(_V2_FIELDS):
+            missing = [name for name in _V2_FIELDS if name not in present]
+            raise ValueError(f"A v2 state needs {missing}")
 
 
 def select_params(model: nn.Module, mode: str) -> dict[str, torch.Tensor]:
@@ -93,7 +131,8 @@ def fit_laplace(
         sample_scale: scaling factor for posterior samples (0 = MAP).
 
     Returns:
-        LaplaceState with MAP weights, curvature diagonal, and config.
+        LaplaceState with MAP weights, curvature diagonal, and config. The state is
+        ``v1_legacy`` because F_hat is unscaled; ``scale_laplace_state`` makes a v2 state.
     """
     device = next(model.parameters()).device
     was_training = model.training
@@ -134,16 +173,105 @@ def fit_laplace(
         curvature=curvature_acc,
         damping=damping,
         sample_scale=sample_scale,
+        sampler_version="v1_legacy",
     )
+
+
+def scale_laplace_state(
+    state: LaplaceState,
+    *,
+    n_data_seqs: int,
+    tokens_per_seq: int,
+    prior_prec: float,
+    base_checkpoint: str | None = None,
+    base_sha256: str | None = None,
+) -> LaplaceState:
+    """Build a v2 state: precision tau = n_data_seqs * tokens_per_seq^2 * F_hat + prior_prec.
+
+    The input may be ``v1_legacy`` (from ``fit_laplace``) or ``v2`` (a lambda sweep re-scales
+    the same F_hat). The curvature stays the raw F_hat. The returned state shares the input's
+    tensors (no copy) and sets ``damping`` to 0.0, which v2 ignores. The input is not changed.
+
+    Args:
+        state: fitted state whose ``curvature`` is the raw F_hat.
+        n_data_seqs: N_seq, the number of training sequences (training tokens / T).
+        tokens_per_seq: T, the tokens per sequence of the token-mean loss behind F_hat.
+        prior_prec: lambda >= 0. lambda = 0 needs every curvature entry to be positive.
+        base_checkpoint: optional path of the base checkpoint the curvature was fitted on.
+        base_sha256: optional SHA-256 of that checkpoint's bytes.
+
+    Returns:
+        A new ``v2`` LaplaceState.
+    """
+    if int(n_data_seqs) != n_data_seqs or n_data_seqs <= 0:
+        raise ValueError(f"n_data_seqs must be a positive integer, got {n_data_seqs!r}")
+    if int(tokens_per_seq) != tokens_per_seq or tokens_per_seq <= 0:
+        raise ValueError(f"tokens_per_seq must be a positive integer, got {tokens_per_seq!r}")
+    if not prior_prec >= 0.0:
+        raise ValueError(f"prior_prec must be >= 0, got {prior_prec!r}")
+    if prior_prec == 0.0:
+        for name in state.param_names:
+            if (state.curvature[name] <= 0).any():
+                raise ValueError(
+                    f"prior_prec 0 with a zero curvature entry in {name} gives an infinite std"
+                )
+    return LaplaceState(
+        param_names=list(state.param_names),
+        phi_hat=dict(state.phi_hat),
+        curvature=dict(state.curvature),
+        damping=0.0,
+        sample_scale=1.0,
+        sampler_version="v2",
+        n_data_seqs=int(n_data_seqs),
+        tokens_per_seq=int(tokens_per_seq),
+        prior_prec=float(prior_prec),
+        base_checkpoint=base_checkpoint if base_checkpoint is not None else state.base_checkpoint,
+        base_sha256=base_sha256 if base_sha256 is not None else state.base_sha256,
+    )
+
+
+def _std_fn(state: LaplaceState) -> Callable[[str], torch.Tensor]:
+    """Validate the state once and return name -> std, computed one tensor at a time."""
+    if state.sampler_version == "v1_legacy":
+        def legacy_std(name: str) -> torch.Tensor:
+            # Exact legacy expression, so the pre-fix samples stay bitwise equal
+            variance = 1.0 / (state.curvature[name] + state.damping)
+            return variance.sqrt() * state.sample_scale
+        return legacy_std
+    if state.sampler_version == "v2":
+        if state.sample_scale != 1.0:
+            raise ValueError(
+                f"A v2 Laplace state needs sample_scale 1.0, got {state.sample_scale!r}"
+            )
+        data_scale = state.n_data_seqs * state.tokens_per_seq**2
+
+        def v2_std(name: str) -> torch.Tensor:
+            return (data_scale * state.curvature[name] + state.prior_prec).rsqrt()
+        return v2_std
+    raise ValueError(f"Unknown sampler_version {state.sampler_version!r}")
+
+
+def posterior_std(state: LaplaceState) -> dict[str, torch.Tensor]:
+    """Per-entry posterior std of the diagonal Laplace posterior.
+
+    v1_legacy: sqrt(1 / (curvature + damping)) * sample_scale (the exact legacy expression).
+    v2: (n_data_seqs * tokens_per_seq^2 * curvature + prior_prec)^(-1/2); v2 has no
+    temperature, so ``sample_scale`` must be 1.0 (ValueError otherwise).
+    """
+    std_of = _std_fn(state)
+    return {name: std_of(name) for name in state.param_names}
 
 
 def sample_laplace_params(
     state: LaplaceState,
     seed: int | None = None,
 ) -> dict[str, torch.Tensor]:
-    """Sample parameters from the Laplace posterior.
+    """Sample parameters from the Laplace posterior: phi ~ N(phi_hat, diag(std^2)).
 
-    phi ~ N(phi_hat, diag(sample_scale^2 / (curvature + damping)))
+    std comes from ``posterior_std``. v1_legacy draws the noise on the CPU from one
+    generator (bitwise equal to the pre-fix sampler) and warns. v2 draws it on the
+    parameter's device from ``torch.Generator(device=phi.device)`` seeded with ``seed``,
+    one ``randn`` per name in ``param_names`` order, so v2 samples depend on the device.
 
     Args:
         state: fitted LaplaceState.
@@ -152,23 +280,58 @@ def sample_laplace_params(
     Returns:
         dict mapping param name -> sampled tensor.
     """
+    if state.sampler_version == "v1_legacy":
+        warnings.warn(
+            "Sampling a v1_legacy Laplace state: its std is unscaled (about 1 for real "
+            "models); use scale_laplace_state for a v2 state",
+            UserWarning,
+            stacklevel=2,
+        )
+        return _sample_v1_legacy(state, seed)
+    if state.sampler_version == "v2":
+        return _sample_v2(state, seed)
+    raise ValueError(f"Unknown sampler_version {state.sampler_version!r}")
+
+
+def _sample_v1_legacy(state: LaplaceState, seed: int | None) -> dict[str, torch.Tensor]:
+    """Pre-fix sampler, unchanged: CPU generator, same RNG call order."""
     if seed is not None:
         gen = torch.Generator()
         gen.manual_seed(seed)
     else:
         gen = None
 
+    std_of = _std_fn(state)
     sampled = {}
     for name in state.param_names:
         phi = state.phi_hat[name]
         if state.sample_scale == 0.0:
             sampled[name] = phi.clone()
         else:
-            variance = 1.0 / (state.curvature[name] + state.damping)
-            std = variance.sqrt() * state.sample_scale
+            std = std_of(name)
             # Generate on CPU (generator is CPU-only) then move to device
             eps = torch.randn(phi.shape, generator=gen, dtype=phi.dtype)
             sampled[name] = phi + std * eps.to(phi.device)
+
+    return sampled
+
+
+def _sample_v2(state: LaplaceState, seed: int | None) -> dict[str, torch.Tensor]:
+    """v2 sampler: noise drawn on the parameter's device, one generator per device."""
+    std_of = _std_fn(state)
+    generators: dict[torch.device, torch.Generator] = {}
+    sampled = {}
+    for name in state.param_names:
+        phi = state.phi_hat[name]
+        gen = None
+        if seed is not None:
+            gen = generators.get(phi.device)
+            if gen is None:
+                gen = torch.Generator(device=phi.device)
+                gen.manual_seed(seed)
+                generators[phi.device] = gen
+        eps = torch.randn(phi.shape, generator=gen, dtype=phi.dtype, device=phi.device)
+        sampled[name] = phi + std_of(name) * eps
 
     return sampled
 
@@ -211,18 +374,28 @@ def apply_sampled_params(
 
 
 def save_laplace_state(state: LaplaceState, path: str | Path) -> None:
-    """Save LaplaceState to disk."""
+    """Save LaplaceState to disk, including the sampler version and the v2 fields."""
     torch.save({
         "param_names": state.param_names,
         "phi_hat": state.phi_hat,
         "curvature": state.curvature,
         "damping": state.damping,
         "sample_scale": state.sample_scale,
+        "sampler_version": state.sampler_version,
+        "n_data_seqs": state.n_data_seqs,
+        "tokens_per_seq": state.tokens_per_seq,
+        "prior_prec": state.prior_prec,
+        "base_checkpoint": state.base_checkpoint,
+        "base_sha256": state.base_sha256,
     }, path)
 
 
 def load_laplace_state(path: str | Path, map_location=None) -> LaplaceState:
-    """Load LaplaceState from disk."""
+    """Load LaplaceState from disk.
+
+    A file without ``sampler_version`` (every pre-fix file) loads as ``v1_legacy``.
+    An unknown ``sampler_version`` raises ValueError.
+    """
     data = torch.load(path, weights_only=False, map_location=map_location)
     return LaplaceState(
         param_names=data["param_names"],
@@ -230,6 +403,12 @@ def load_laplace_state(path: str | Path, map_location=None) -> LaplaceState:
         curvature=data["curvature"],
         damping=data["damping"],
         sample_scale=data["sample_scale"],
+        sampler_version=data.get("sampler_version", "v1_legacy"),
+        n_data_seqs=data.get("n_data_seqs"),
+        tokens_per_seq=data.get("tokens_per_seq"),
+        prior_prec=data.get("prior_prec"),
+        base_checkpoint=data.get("base_checkpoint"),
+        base_sha256=data.get("base_sha256"),
     )
 
 

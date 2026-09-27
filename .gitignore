@@ -16,3 +16,6 @@ specs/post-c.md
 /mlruns/
 .env
 .pipeline-state/
+AGENTS.md
+/agents/
+/research/

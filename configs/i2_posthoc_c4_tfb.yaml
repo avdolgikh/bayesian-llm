@@ -1,0 +1,51 @@
+# S2 refit, C4-TFB (specs/i2-posthoc-fixes.md, Sections 3 and 5.5). Run it first: the two
+# Laplace refits read its fit record for the budget rho_TFB.
+#   python scripts/refit_posthoc.py --config configs/i2_posthoc_c4_tfb.yaml
+# Base: the C3 BLoB posterior mean (lora_A <- lora_A_mu), so this cell is "BLoB-mean + TFB".
+# Fit set: 640 blocks of the held-out HackerNews val documents [80M, 90M) in S1's manifest.
+method: tfb
+cell: c4_tfb
+out_dir: data/checkpoints/i2_posthoc/c4_tfb
+device: cuda
+autocast: fp16                 # the Delta-NLL passes and l_0, as in the scorer
+base:
+  base_checkpoint: data/checkpoints/c3/ckpt_best.pt
+  base_kind: blob_mean
+model:
+  block_size: 256
+  n_layer: 16
+  n_head: 8
+  n_embd: 512
+  dropout: 0.1
+  bias: true
+lora:
+  rank: 16
+  alpha: 32.0
+  target: ffn
+data:
+  dataset: pile
+  pile_id_domains: [hackernews]
+  pile_ood_domains: [arxiv, freelaw, pubmed_abstracts]
+  pile_id_tokens: 100000000
+  pile_ood_tokens: 10000000
+  val_fraction: 0.1
+  test_fraction: 0.1
+  data_seed: 1337              # the Pile shuffle seed, passed to load_pile_data as train.seed
+fit:
+  manifest_path: data/eval_i2/manifest.jsonl
+  fit_split: val
+  fit_domain: hackernews
+  n_fit_blocks: 640
+  max_blocks_per_doc: 3
+  fit_seed: 0
+  batch_size: 32
+tfb:
+  sampler_version: v2
+  epsilon_rel: 0.003           # |l_bar - l_0| <= 0.003 l_0, two-sided (TFB Appendix E)
+  n_search_samples: 10         # seeds 0-9 at every search step
+  search_min: 1.0e-4
+  search_max: 1.0              # the pre-check: must be rejected
+  search_precision: 1.0e-5     # 17 bisection steps
+  n_delta_samples: 20          # Delta-NLL_TFB(sigma_q*) at seeds 0-19
+  se_threshold: 0.05
+  se_max_doublings: 1

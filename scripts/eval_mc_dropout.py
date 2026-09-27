@@ -4,7 +4,15 @@ Applies MC Dropout to the C0 deterministic checkpoint — enables dropout at
 inference time and runs N forward passes to compute MI-based OOD detection.
 Reports the same metrics as eval_c_checkpoints.py for direct comparison.
 
-Usage:
+I2 path (specs/i2-eval-rebuild.md, section 5.7): with ``--eval-set`` this script writes the
+``mc_dropout`` score file of that eval set with the engine of scripts/eval_c_checkpoints.py
+(same flags, same score-file format, same seeding and freeze check):
+    python scripts/eval_mc_dropout.py --eval-config configs/i2_eval.yaml \
+        --eval-set legacy_d1 --run-tag main
+The other score sets listed for the eval set, S2's v2 sets included, are named from the
+shared registry and left to scripts/eval_c_checkpoints.py; an unregistered name is refused.
+
+D1 usage (no ``--eval-set``):
     python scripts/eval_mc_dropout.py                         # default: N=20, 500 seqs
     python scripts/eval_mc_dropout.py --n-samples 5           # fewer MC passes
     python scripts/eval_mc_dropout.py --n-sequences 200       # fewer test sequences
@@ -22,16 +30,18 @@ import time
 from pathlib import Path
 
 import torch
-from torch.nn import functional as F
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+SCRIPTS_DIR = Path(__file__).resolve().parent
+for _path in (REPO_ROOT, SCRIPTS_DIR):
+    if str(_path) not in sys.path:
+        sys.path.insert(0, str(_path))
+
+import eval_c_checkpoints as i2
 
 from experiments.c_milestones import OOD_DOMAINS, build_milestone_config
 from minigpt.config import build_gpt_config
 from minigpt.data import get_tokenizer, load_pile_data
-from minigpt.layers import enable_dropout
 from minigpt.model import MiniGPT
 from minigpt.train import load_checkpoint
 from minigpt.uncertainty import (
@@ -47,6 +57,7 @@ from minigpt.uncertainty import (
 BLOCK_SIZE = 256
 CKPT_DIR = Path("data/checkpoints")
 N_VALUES = [1, 3, 5, 10, 20]
+MC_DROPOUT_SCORE_SET = "mc_dropout"
 
 
 # ---------------------------------------------------------------------------
@@ -63,18 +74,30 @@ def _extract_sequences(data: torch.Tensor, block_size: int, n: int):
     return seqs
 
 
-def load_eval_data(n_sequences: int):
+def _legacy_split() -> tuple[torch.Tensor, list[tuple[str, torch.Tensor]], str]:
+    """C0's D1 split: (test_id, [(ood_domain, tensor), ...], id_domain)."""
     cfg = build_milestone_config("c0")
-    tokenizer = get_tokenizer()
-    data = load_pile_data(cfg, tokenizer)
-    test_id = data["test_id"]
-    ood_parts = [data[f"test_ood_{d}"] for d in OOD_DOMAINS if f"test_ood_{d}" in data]
-    test_ood = torch.cat(ood_parts) if ood_parts else data.get("test_ood")
-    id_seqs = _extract_sequences(test_id, BLOCK_SIZE, n_sequences)
-    ood_seqs = _extract_sequences(test_ood, BLOCK_SIZE, n_sequences)
+    data = load_pile_data(cfg, get_tokenizer())
+    ood_parts = [(d, data[f"test_ood_{d}"]) for d in OOD_DOMAINS if f"test_ood_{d}" in data]
+    if not ood_parts:
+        ood_parts = [("ood", data["test_ood"])]
+    return data["test_id"], ood_parts, cfg["data"]["pile_id_domains"][-1]
+
+
+def load_eval_data(n_sequences: int, block_size: int = BLOCK_SIZE):
+    test_id, ood_parts, _ = _legacy_split()
+    test_ood = torch.cat([t for _, t in ood_parts])
+    id_seqs = _extract_sequences(test_id, block_size, n_sequences)
+    ood_seqs = _extract_sequences(test_ood, block_size, n_sequences)
     print(f"Loaded {len(id_seqs)} ID + {len(ood_seqs)} OOD sequences "
-          f"(block_size={BLOCK_SIZE})")
+          f"(block_size={block_size})")
     return id_seqs, ood_seqs
+
+
+def load_legacy_blocks(n_sequences: int, block_size: int) -> i2.BlockSet:
+    """The legacy_d1 blocks (same windows as ``load_eval_data``)."""
+    test_id, ood_parts, id_domain = _legacy_split()
+    return i2.build_legacy_blocks(test_id, ood_parts, id_domain, n_sequences, block_size)
 
 
 # ---------------------------------------------------------------------------
@@ -104,44 +127,21 @@ def score_sequence_mc_dropout(
     n_samples: int,
     device: torch.device,
 ) -> dict[str, torch.Tensor]:
-    """MC Dropout scoring: N forward passes with dropout enabled."""
-    eps = 1e-10
-    x_dev = x.unsqueeze(0).to(device)
-    targets_dev = targets.to(device)
-    seq_len = x.size(0)
-    vocab_size = model.config.vocab_size
-    use_amp = device.type == "cuda"
+    """MC Dropout scoring: N forward passes with dropout enabled (unseeded D1 path).
 
-    p_sum = torch.zeros(seq_len, vocab_size, device=device)
-    entropy_sum = torch.zeros(seq_len, device=device)
-
-    with enable_dropout(model):
-        for _ in range(n_samples):
-            with torch.amp.autocast(
-                device_type=device.type, dtype=torch.float16, enabled=use_amp,
-            ):
-                logits, _ = model(x_dev)
-            probs = F.softmax(logits[0].float(), dim=-1)
-            p_sum.add_(probs)
-            entropy_sum.add_(-(probs * torch.log(probs + eps)).sum(dim=-1))
-
-    p_bar = p_sum / n_samples
-    pred_entropy = -(p_bar * torch.log(p_bar + eps)).sum(dim=-1)
-    exp_entropy = entropy_sum / n_samples
-    mi = pred_entropy - exp_entropy
-    max_prob = p_bar.max(dim=-1).values
-
-    correct = (p_bar.argmax(dim=-1) == targets_dev).float()
-    p_true = p_bar[torch.arange(seq_len, device=device), targets_dev]
-    sum_p_sq = (p_bar ** 2).sum(dim=-1)
-
+    Runs through the shared I2 scorer (``score_block_batch``, method ``dropout``).
+    """
+    out = i2.score_block_batch(
+        model, x.unsqueeze(0), targets.unsqueeze(0), n_samples, device, "dropout", None,
+        seed_b=None, amp=device.type == "cuda",
+    )
     return {
-        "mi": mi.cpu(),
-        "predictive_entropy": pred_entropy.cpu(),
-        "max_prob": max_prob.cpu(),
-        "correct": correct.cpu(),
-        "p_true": p_true.cpu(),
-        "sum_p_sq": sum_p_sq.cpu(),
+        "mi": out["tok_mi"][0],
+        "predictive_entropy": out["tok_tu"][0],
+        "max_prob": out["tok_maxprob"][0],
+        "correct": out["tok_correct"][0].float(),
+        "p_true": out["tok_pbar_true"][0],
+        "sum_p_sq": out["tok_sum_p_sq"][0],
     }
 
 
@@ -306,7 +306,7 @@ def print_results(results: dict, ci: dict | None = None):
 # Main
 # ---------------------------------------------------------------------------
 
-def main():
+def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(description="P2: MC Dropout baseline evaluation")
     p.add_argument("--n-samples", type=int, default=20,
                    help="MC forward passes (default: 20)")
@@ -320,9 +320,26 @@ def main():
                    help="Save per-sequence scores to .pt file")
     p.add_argument("--auroc-vs-n", action="store_true",
                    help="Run AUROC vs N sweep (Table 4 equivalent)")
-    args = p.parse_args()
+    i2.add_i2_arguments(p)
+    args = p.parse_args(argv)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # --- I2 path: the mc_dropout score file of one eval set ---
+    if args.eval_set is not None:
+        i2.run_i2(
+            args,
+            script_path=Path(__file__),
+            owned={MC_DROPOUT_SCORE_SET},
+            # The shared registry, S2's v2 score sets included, names what the other script
+            # scores; any other name is refused before scoring.
+            scored_elsewhere=lambda name: ("scripts/eval_c_checkpoints.py"
+                                           if name in i2.SCORE_SET_REGISTRY else None),
+            load_score_set=lambda name, device: (load_c0_model(device), "dropout", None),
+            checkpoint_paths=lambda name: [CKPT_DIR / "c0/ckpt_best.pt"],
+            load_legacy=load_legacy_blocks,
+        )
+        return
+
+    device = i2._resolve_device(args.device)
     print(f"Device: {device}")
 
     ckpt_path = CKPT_DIR / "c0/ckpt_best.pt"
