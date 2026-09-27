@@ -36,7 +36,7 @@ small adapter trained on top of frozen weights): BLoB (trained), TFB (noise adde
 training) and Laplace-LoRA. The seventh, an ensemble of 3 LoRAs, is not Bayesian by derivation but is a common
 reference in Bayesian-LoRA papers [Wang 2024]. The [methods overview](methods-overview.md) explains them all. The
 planned models are pretrained open models whose training data is public, so we know what text they saw. The
-leading candidate (not final) is Pythia-410M and 1B [Biderman 2023], trained on The Pile. Every method is scored on the same texts.
+chosen models are Pythia-410M and Pythia-1.4B [Biderman 2023], trained on The Pile. Every method is scored on the same texts.
 
 One principle shapes the metrics: **we measure; the people who deploy the model decide.** What to do with a high
 score (warn, abstain, ask a human) is their choice. So the first test of a measure is whether it tracks what the

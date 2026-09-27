@@ -349,7 +349,7 @@ erratic and memory-hungry.
 **Where this project fits.** It is a self-contained comparison, not a replacement for the work above.
 
 - Seven methods on one pretrained backbone: MC dropout, variational FFN weights, diagonal Laplace on FFN weights, BLoB, TFB, diagonal Laplace on LoRA and a 3-adapter LoRA ensemble (ScalaBL if time allows). Full-weight and LoRA posteriors sit side by side on the same model.
-- The planned models are pretrained open models with public training data, so we know which text they saw. The leading candidate (not final) is Pythia-410M for all methods, then Pythia-1B, trained on The Pile; Pythia's exact training data and order were released.
+- The planned models are pretrained open models with public training data, so we know which text they saw. The chosen models are Pythia-410M for all methods, then Pythia-1.4B, trained on The Pile; Pythia's exact training data and order were released.
 - The main test scores human-written free text: held-out documents from the kind of text the model saw, against text from sources outside its training data.
 - Cheap baselines, sanity checks and the lessons from an earlier 76M pilot are in the [metrics guide](metrics-guide.md) (sections 5 and 7).
 - Cost per method is reported next to its score.
