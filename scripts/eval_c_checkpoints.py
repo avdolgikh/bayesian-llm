@@ -405,8 +405,9 @@ def score_block_batch(
             p_sum.add_(probs)
             entropy_sum.add_(-(probs * torch.log(probs + PROB_EPS)).sum(dim=-1))
             ell[:, s, :] = lp.gather(-1, y_dev.unsqueeze(-1)).squeeze(-1)
+            del logits, lp, probs      # free vocab-sized tensors before the next forward pass
 
-    p_bar = p_sum / n_samples
+    p_bar = p_sum.div_(n_samples)     # in place: one vocab-sized buffer instead of two
     pred_entropy = -(p_bar * torch.log(p_bar + PROB_EPS)).sum(dim=-1)
     exp_entropy = entropy_sum / n_samples
     mi = pred_entropy - exp_entropy
