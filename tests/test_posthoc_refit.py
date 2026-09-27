@@ -422,7 +422,7 @@ def test_t2d_missing_key_raises_keyerror_before_any_helper(fx, section, key, mon
     def _must_not_load(*args, **kwargs):
         raise AssertionError("data was loaded before the config check")
 
-    monkeypatch.setattr(pr, "load_pile_data", _must_not_load)
+    monkeypatch.setattr("minigpt.refit_data.load_pile_data", _must_not_load)
     cfg = _tfb_cfg(fx, cell="tfb_missing_key")
     del cfg[section][key]
     with pytest.raises(KeyError, match=key):
