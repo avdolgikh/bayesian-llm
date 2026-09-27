@@ -113,6 +113,6 @@ checks:
     new_ratio_tol_c4_tfb: 0.01
     batch_c0_max_abs: 0.001
     batch_mi_auroc_tol: 0.01
-  arxiv_old_d1_docs: 9
+  arxiv_old_d1_docs: 11   # exact count from the real re-stream (cache matches token for token); the audit estimated 9
   arxiv_old_d1_tokens: 128001    # the old D1 eval read arxiv[0:128001] (500 x 256 + 1 tokens)
   rederive_tol: 1.0e-6
