@@ -103,8 +103,8 @@ def _doc_row(domain: str, idx: int, start: int, n_tokens: int, split: str) -> di
         "split": split,
         "variant": "raw",
         "stream_index": idx,
-        "token_start": start,
-        "n_tokens": n_tokens,
+        "c_i": start,
+        "L_d": n_tokens,
         "text_sha1": sha,
         "token_sha1": sha,
         "offset": 0 if split == "test" else None,
@@ -371,8 +371,8 @@ def test_t2c_blocks_inside_val_docs_and_no_test_ids(tfb_runs):
     per_doc: dict[str, int] = {}
     for doc_id, start in blocks:
         doc = by_id[doc_id]
-        assert doc["token_start"] <= start
-        assert start + BLOCK + 1 <= doc["token_start"] + doc["n_tokens"]
+        assert doc["c_i"] <= start
+        assert start + BLOCK + 1 <= doc["c_i"] + doc["L_d"]
         per_doc[doc_id] = per_doc.get(doc_id, 0) + 1
     assert max(per_doc.values()) <= 3
     assert not set(per_doc) & test_ids
@@ -402,7 +402,7 @@ def test_t2c_eval_document_in_fit_set_exits_nonzero(fx, corruption, capsys):
     if corruption == "shared_id":
         test_hn[0]["doc_id"] = val[3]["doc_id"]
     else:
-        test_hn[0]["token_start"] = val[5]["token_start"] + 10
+        test_hn[0]["c_i"] = val[5]["c_i"] + 10
     cfg = _tfb_cfg(fx, cell=f"tfb_{corruption}")
     cfg["fit"]["manifest_path"] = str(
         _write_manifest(fx.root / "eval" / f"manifest_{corruption}.jsonl", rows))
@@ -648,7 +648,7 @@ def test_laplace_n_data_seqs_mismatch_exits_nonzero(fx, tfb_runs, capsys):
 def test_curvature_isolation_detects_eval_doc_in_train_slice():
     rows = _manifest_rows()
     rows[-1]["domain"] = "hackernews"
-    rows[-1]["token_start"] = 100
+    rows[-1]["c_i"] = 100
     with pytest.raises(pr.RefitCheckError, match="eval document in curvature set"):
         pr.check_curvature_isolation(rows, {"hackernews": (0, VAL_RANGE[0])})
     pr.check_curvature_isolation(_manifest_rows(), {"hackernews": (0, VAL_RANGE[0])})
@@ -918,3 +918,30 @@ def test_real_configs_pass_the_check_and_hold_the_frozen_values(cell, method, ki
         assert lap["n_curvature_batches"] == 30
         assert lap["curvature_batch_size"] == (32 if cell == "c4_lap" else 16)
         assert lap["selection_mode"] == ("lora" if cell == "c4_lap" else "ffn")
+
+
+# Manifest schema shared with the eval-set builder (S1 spec section 5.2: c_i, L_d). Rows come from
+# the builder's own row function, so the refit and the builder cannot drift apart again (defect D8).
+def _builder_test_row(domain: str, index: int, start: int, n_tokens: int) -> dict:
+    import numpy as np
+    from minigpt import evalset
+    cand = evalset.Candidate(key=domain, index=index, start=start,
+                             doc_id=f"{domain}/{index:09d}/builder", text_sha1="0" * 40,
+                             tokens=np.zeros(n_tokens, dtype=np.int32), n_blocks=1, offset=0)
+    return evalset._test_rows(cand, "main", "raw")
+
+
+def test_fit_isolation_reads_builder_manifest_rows():
+    test_rows = [_builder_test_row("hackernews", 7, start=1000, n_tokens=500)]
+    fit_row = dict(test_rows[0], doc_id="hackernews/000000003/val", split="val", eval_set=None,
+                   c_i=1200, L_d=300)
+    with pytest.raises(pr.RefitCheckError, match="eval document in fit set"):
+        pr.check_fit_isolation([fit_row], test_rows)
+    clear_row = dict(fit_row, c_i=5000)
+    pr.check_fit_isolation([clear_row], test_rows)
+
+
+def test_curvature_isolation_reads_builder_manifest_rows():
+    rows = [_builder_test_row("hackernews", 7, start=1000, n_tokens=500)]
+    with pytest.raises(pr.RefitCheckError, match="eval document in curvature set"):
+        pr.check_curvature_isolation(rows, {"hackernews": (0, 1200)})

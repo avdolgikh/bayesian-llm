@@ -416,8 +416,8 @@ def _test_intervals(test_rows: list[dict]) -> dict[str, tuple[np.ndarray, np.nda
     for r in test_rows:
         by_domain.setdefault(r["domain"], []).append(r)
     return {
-        dom: (np.array([r["token_start"] for r in rs], dtype=np.int64),
-              np.array([r["token_start"] + r["n_tokens"] for r in rs], dtype=np.int64),
+        dom: (np.array([r["c_i"] for r in rs], dtype=np.int64),
+              np.array([r["c_i"] + r["L_d"] for r in rs], dtype=np.int64),
               [r["doc_id"] for r in rs])
         for dom, rs in by_domain.items()
     }
@@ -444,12 +444,12 @@ def check_fit_isolation(fit_rows: list[dict], test_rows: list[dict]) -> None:
                               f"are also test IDs, e.g. {shared[0]}")
     intervals = _test_intervals(test_rows)
     for r in fit_rows:
-        start = r["token_start"]
-        hit = _first_overlap(intervals, r["domain"], start, start + r["n_tokens"])
+        start = r["c_i"]
+        hit = _first_overlap(intervals, r["domain"], start, start + r["L_d"])
         if hit is not None:
             name = r["doc_id"] if r["doc_id"] is not None else "the val token range"
             raise RefitCheckError(f"eval document in fit set: {name} "
-                                  f"[{start}, {start + r['n_tokens']}) overlaps test document "
+                                  f"[{start}, {start + r['L_d']}) overlaps test document "
                                   f"{hit} in {r['domain']}")
 
 
@@ -459,7 +459,7 @@ def check_curvature_isolation(rows: list[dict], train_ranges: dict[str, tuple[in
         if r["domain"] not in train_ranges:
             continue
         a, b = train_ranges[r["domain"]]
-        start, end = r["token_start"], r["token_start"] + r["n_tokens"]
+        start, end = r["c_i"], r["c_i"] + r["L_d"]
         if a < b and start < b and end > a:
             raise RefitCheckError(f"eval document in curvature set: {r['doc_id']} "
                                   f"[{start}, {end}) overlaps the {r['domain']} train slice "
@@ -520,23 +520,23 @@ def build_fit_blocks(rows: list[dict], data: RefitData, cfg: dict) -> FitSet:
         units = "document"
         check_fit_isolation(fit_rows, test_rows)
         outside = [r for r in fit_rows
-                   if not (a <= r["token_start"] and r["token_start"] + r["n_tokens"] <= b)]
+                   if not (a <= r["c_i"] and r["c_i"] + r["L_d"] <= b)]
         if outside:
             raise RefitCheckError(f"val document {outside[0]['doc_id']} lies outside the "
                                   f"{data.fit_domain} val range [{a}, {b})")
-        eligible = [r for r in fit_rows if r["n_tokens"] >= T + 1]
+        eligible = [r for r in fit_rows if r["L_d"] >= T + 1]
         for idx in rng.permutation(len(eligible)):
             r = eligible[int(idx)]
-            k = min(f["max_blocks_per_doc"], (r["n_tokens"] - 1) // T, n - len(blocks))
-            o = int(rng.integers(0, r["n_tokens"] - k * T))
-            blocks += [(r["doc_id"], r["token_start"] + o + j * T) for j in range(k)]
+            k = min(f["max_blocks_per_doc"], (r["L_d"] - 1) // T, n - len(blocks))
+            o = int(rng.integers(0, r["L_d"] - k * T))
+            blocks += [(r["doc_id"], r["c_i"] + o + j * T) for j in range(k)]
             if len(blocks) == n:
                 break
     else:
         units = "token_range"
         print(f"[refit] no val document IDs for {data.fit_domain}: drawing blocks from the "
               f"val token range [{a}, {b}) (fit_units: token_range)")
-        pseudo = {"doc_id": None, "domain": data.fit_domain, "token_start": a, "n_tokens": b - a}
+        pseudo = {"doc_id": None, "domain": data.fit_domain, "c_i": a, "L_d": b - a}
         check_fit_isolation([pseudo], test_rows)
         n_slots = (b - a - 1) // T
         if n_slots >= n:
@@ -577,7 +577,7 @@ def check_fit_blocks(fit: FitSet, rows: list[dict], data: RefitData, cfg: dict) 
             r = val_by_id.get(doc_id)
             if r is None or doc_id in test_ids:
                 return False
-            if not (r["token_start"] <= start and end <= r["token_start"] + r["n_tokens"]):
+            if not (r["c_i"] <= start and end <= r["c_i"] + r["L_d"]):
                 return False
             per_doc[doc_id] = per_doc.get(doc_id, 0) + 1
     if per_doc and max(per_doc.values()) > cfg["fit"]["max_blocks_per_doc"]:
