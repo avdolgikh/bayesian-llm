@@ -3,7 +3,8 @@
 
 Each check's right answer comes from outside the code under test: math, saved results,
 sklearn or a brute-force pair loop. CPU only, except T1 (GPU, opt-in). Exit code 0 only
-when no check FAILs; a SKIP is always printed with its reason.
+when no check FAILs; a SKIP is always printed with its reason. Run it from the repo with the
+dev dependencies installed: T8 imports the S1 builder fixture from tests/test_eval_rebuild.py.
 
     python scripts/sanity.py                 # T2-T9 on the CPU
     python scripts/sanity.py --only T2,T6    # a subset
@@ -17,7 +18,6 @@ import contextlib
 import copy
 import functools
 import io
-import json
 import math
 import os
 import subprocess
@@ -37,10 +37,12 @@ import numpy as np
 import torch
 import yaml
 
-PLANT_ENV = "SANITY_PLANT_ERROR"  # any value: T2 adds 0.1 to the identical-sample MI (T9)
+PLANT_ENV = "SANITY_PLANT_ERROR"  # any value: T2 runs the scorer with a wrong log epsilon (T9)
+PLANTED_EPS = 0.1  # the scorer's PROB_EPS is 1e-10
 TOL_ZERO, TOL_G, TOL_COV, TOL_SCALE, TOL_AUROC, TOL_REPRO = 1e-6, 1e-4, 0.05, 0.05, 1e-9, 0.01
-GATE_MARGIN = 3.0  # T7 screens for gross scale errors only: D3 was about 700x over budget
-GATE_BLOCKS, GATE_SEEDS = 4, 3
+TOL_CORR = 0.9  # T5: per-entry correlation of the precision with the Hessian diagonal
+MI_TWO = math.log(2) + 0.9 * math.log(0.9) + 0.1 * math.log(0.1)  # log 2 - H(0.9, 0.1) nats
+GATE_BLOCKS, GATE_SEEDS, GATE_N_SE = 4, 8, 2.0  # T7: noise allowance = GATE_N_SE x SE
 CPU = torch.device("cpu")
 
 
@@ -78,8 +80,12 @@ def check_t1(with_gpu: bool) -> Result:
         return Result("T1", proves, "SKIP", "GPU check, opt-in: run with --with-gpu (~48 GPU min)")
     if not torch.cuda.is_available() or not cfg_path.exists():
         return Result("T1", proves, "SKIP", f"no CUDA device or no {cfg_path}")
+    with tempfile.TemporaryDirectory(prefix="sanity_t1_", ignore_cleanup_errors=True) as tmp:
+        return _check_t1_in(Path(tmp), cfg_path, proves)
+
+
+def _check_t1_in(out: Path, cfg_path: Path, proves: str) -> Result:
     from sklearn.metrics import roc_auc_score
-    out = Path(tempfile.mkdtemp(prefix="sanity_t1_"))
     cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
     cfg["scoring"]["out_dir"] = str(out)
     (out / "repro.yaml").write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
@@ -103,23 +109,65 @@ def check_t1(with_gpu: bool) -> Result:
                     f"new - saved AUROC: {diffs} (tolerance {TOL_REPRO})")
 
 
+class _LogitModel(torch.nn.Module):
+    """Predicts the same token distribution, softmax(logits), at every position."""
+
+    def __init__(self, vocab: int):
+        super().__init__()
+        self.config = argparse.Namespace(vocab_size=vocab)
+        self.logits = torch.nn.Parameter(torch.zeros(vocab))
+
+    def forward(self, x):
+        return self.logits.expand(*x.shape, -1).clone(), None  # a new tensor, as a real model
+
+
+def _score(model, tok: torch.Tensor, n: int, sampler, plant: bool) -> dict:
+    """The real scorer, with `sampler` as its parameter sampler (so apply_sampled_params
+    runs) and, if `plant`, a wrong log epsilon planted in the scorer module (T9)."""
+    from unittest import mock
+
+    import eval_c_checkpoints as ecc
+    with mock.patch.dict(ecc.PARAM_SAMPLERS, {"sanity": sampler}), \
+            mock.patch.object(ecc, "PROB_EPS", PLANTED_EPS if plant else ecc.PROB_EPS):
+        return ecc.score_block_batch(model, tok[:, :-1], tok[:, 1:], n, CPU, "sanity", None,
+                                     seed_b=0, amp=False)
+
+
+def two_sample_mi(plant: bool) -> dict[str, float]:
+    """MI when the two samples give the token distributions (0.9, 0.1) and (0.1, 0.9)."""
+    from minigpt.uncertainty import mc_metrics_single
+    two = torch.tensor([[0.9, 0.1], [0.1, 0.9]]).log()
+    out = _score(_LogitModel(2), torch.zeros(1, 5, dtype=torch.long), 2,
+                 lambda state, seed: {"logits": two[seed % 2]}, plant)
+    unc = mc_metrics_single(lambda s: two[s].expand(1, 4, 2), 2, 4, 2, CPU)["mi"]
+    return {"scorer": out["tok_mi"].mean().item(), "uncertainty": unc.mean().item()}
+
+
 def check_t2(plant: bool | None = None) -> Result:
-    from eval_c_checkpoints import realized_token_scores, score_block_batch
+    from eval_c_checkpoints import realized_token_scores
 
     from minigpt.uncertainty import mc_metrics_single
     plant = bool(os.environ.get(PLANT_ENV)) if plant is None else plant
     model = _tiny_gpt(vocab=64, block=16, n_embd=32, seed=0)
+    name = "blocks.0.mlp.fc.linear.weight"
+    gen = torch.Generator().manual_seed(1)
     with torch.no_grad():
         model.token_emb.weight.mul_(50.0)  # peaked, far-from-uniform predictions
-    tok = torch.randint(0, 64, (3, 17), generator=torch.Generator().manual_seed(1))
-    out = score_block_batch(model, tok[:, :-1], tok[:, 1:], 8, CPU, "deterministic", None,
-                            seed_b=0, amp=False)
+        w = dict(model.named_parameters())[name]
+        fixed = {name: w + 0.1 * torch.randn(w.shape, generator=gen)}  # the same every draw
+    tok = torch.randint(0, 64, (3, 17), generator=gen)
+    out = _score(model, tok, 8, lambda state, seed: fixed, plant)
     logits = torch.randn(1, 16, 64, generator=torch.Generator().manual_seed(2)) * 5.0
     mi_raw = mc_metrics_single(lambda s: logits, 8, 16, 64, CPU)["mi"]
-    mi = max(out["tok_mi"].abs().max().item(), mi_raw.abs().max().item()) + 0.1 * plant
+    mi = max(out["tok_mi"].abs().max().item(), mi_raw.abs().max().item())
     g = realized_token_scores(out["logp_real"])["G"].abs().max().item()
-    return _verdict("T2", "N identical samples give MI = 0 and G = 0 (math)",
-                    mi < TOL_ZERO and g < TOL_ZERO, f"max |MI| {mi:.1e}, max |G| {g:.1e}")
+    two = two_sample_mi(plant)
+    err = max(abs(v - MI_TWO) for v in two.values())
+    return _verdict("T2", "MI = G = 0 for identical samples; MI = log 2 - H(0.9) for two (math)",
+                    mi < TOL_ZERO and g < TOL_ZERO and err < TOL_G,
+                    f"identical: max |MI| {mi:.1e}, max |G| {g:.1e}; two: MI scorer "
+                    f"{two['scorer']:.5f}, uncertainty {two['uncertainty']:.5f}, "
+                    f"by hand {MI_TWO:.5f}")
 
 
 def check_t3() -> Result:
@@ -156,9 +204,14 @@ def check_t4() -> Result:
                     v2 < TOL_COV <= v1, f"error v2 {v2:.1%}, v1_legacy {v1:.1%} (8,192 draws)")
 
 
-@functools.cache  # deterministic; the tests and check_t5 share one run
 def laplace_scale_ratios(tokens_per_seq: int | None = None) -> dict[str, float]:
-    """Per group: sum of (v2 precision - prior) / sum of the exact Hessian diagonal.
+    return {k: r for k, (r, _) in laplace_hessian_check(tokens_per_seq).items()}
+
+
+@functools.cache  # deterministic; the tests and check_t5 share one run
+def laplace_hessian_check(tokens_per_seq: int | None = None) -> dict[str, tuple[float, float]]:
+    """Per group: (sum of (v2 precision - prior) / sum of the exact Hessian diagonal, and the
+    per-entry correlation of the two, so an error that moves curvature between entries shows).
 
     The tiny model is a bigram (no position embedding, zero attention output) and its data
     is sampled from itself, so the empirical Fisher and the Hessian agree in expectation.
@@ -193,21 +246,24 @@ def laplace_scale_ratios(tokens_per_seq: int | None = None) -> dict[str, float]:
         nll = torch.nn.functional.cross_entropy(model(x)[0].reshape(-1, V), y.reshape(-1),
                                                 reduction="sum")
     grads = torch.autograd.grad(nll, list(sel.values()), create_graph=True)
-    ratios = {}
+    std, out = posterior_std(v2), {}
     for (name, p), g in zip(sel.items(), grads):
         flat = g.reshape(-1)
-        h = sum(torch.autograd.grad(flat[i], p, retain_graph=True)[0].reshape(-1)[i].item()
-                for i in range(flat.numel()))
-        ratios[name] = float((posterior_std(v2)[name] ** -2 - prior).sum()) / h
-    return ratios
+        h = np.array([torch.autograd.grad(flat[i], p, retain_graph=True)[0].reshape(-1)[i].item()
+                      for i in range(flat.numel())])
+        prec = (std[name] ** -2 - prior).reshape(-1).double().numpy()
+        out[name] = (float(prec.sum() / h.sum()), float(np.corrcoef(prec, h)[0, 1]))
+    return out
 
 
 def check_t5() -> Result:
-    ratios = laplace_scale_ratios()
-    worst = max(ratios.values(), key=lambda r: abs(r - 1.0))
+    res = laplace_hessian_check()
+    worst = max((r for r, _ in res.values()), key=lambda r: abs(r - 1.0))
+    corr = min(c for _, c in res.values())
     return _verdict("T5", "Laplace precision N T^2 F_hat = exact Hessian diagonal (autograd)",
-                    all(abs(r - 1.0) < TOL_SCALE for r in ratios.values()),
-                    f"{len(ratios)} parameter groups, worst ratio {worst:.3f}")
+                    all(abs(r - 1.0) < TOL_SCALE and c > TOL_CORR for r, c in res.values()),
+                    f"{len(res)} parameter groups, worst sum ratio {worst:.3f}, lowest "
+                    f"per-entry correlation {corr:.3f}")
 
 
 def brute_force_auroc(scores, labels, weights) -> float:
@@ -236,29 +292,49 @@ def check_t6() -> Result:
                     err < TOL_AUROC, f"max |diff| {err:.1e} over {', '.join(errs)}")
 
 
-def within_budget(delta_nll: float, ell0: float, budget_rel: float) -> bool:
-    return delta_nll / ell0 <= GATE_MARGIN * budget_rel
+def within_budget(delta_nll: float, ell0: float, budget_rel: float, se: float) -> bool:
+    """The refit rule, |Delta-NLL| <= budget x l_0, plus GATE_N_SE standard errors of this
+    measurement for sampling noise. No other margin."""
+    return abs(delta_nll) <= budget_rel * ell0 + GATE_N_SE * se
 
 
 def _budget(cfg: dict) -> float:
-    """TFB: epsilon_rel. Laplace: rho_TFB from the TFB record (if absent: its ceiling
-    epsilon_rel from the TFB YAML) times 1 + match_tol."""
+    """TFB: epsilon_rel. Laplace: rho_TFB from the TFB record, read and checked by the refit's
+    own rule (if absent: its ceiling epsilon_rel from the TFB YAML), times 1 + match_tol."""
     if cfg["method"] == "tfb":
         return cfg["tfb"]["epsilon_rel"]
+    from minigpt.posthoc_refit import _read_tfb_budget
     rec = REPO / cfg["laplace"]["tfb_record_path"]
-    tfb = yaml.safe_load((REPO / "configs/i2_posthoc_c4_tfb.yaml").read_text(encoding="utf-8"))
-    rho = json.loads(rec.read_text())["rho_tfb"] if rec.exists() else tfb["tfb"]["epsilon_rel"]
+    if rec.exists():
+        rho = _read_tfb_budget(rec)["rho_tfb"]
+    else:
+        tfb = yaml.safe_load((REPO / "configs/i2_posthoc_c4_tfb.yaml").read_text("utf-8"))
+        rho = tfb["tfb"]["epsilon_rel"]
     return rho * (1.0 + cfg["laplace"]["match_tol"])
 
 
-def _familiar_batches(cfg: dict) -> list:
-    """GATE_BLOCKS windows from the start of the base model's own ID val slice."""
+def _familiar_batches(cfg: dict, pile_dir: Path | None = None) -> list:
+    """GATE_BLOCKS windows from the start of the base model's own ID val slice, split from the
+    real cache lengths the way load_pile_data joins the domains."""
     d, T = cfg["data"], cfg["model"]["block_size"]
-    per = d["pile_id_tokens"]
-    start = int(per * len(d["pile_id_domains"]) * (1 - d["val_fraction"] - d["test_fraction"]))
-    t = torch.load(REPO / "data/pile" / f"{d['pile_id_domains'][start // per]}_{per}.pt",
-                   mmap=True, weights_only=True)
-    w = torch.stack([t[start % per + 4 * T * i:][: T + 1].long() for i in range(GATE_BLOCKS)])
+    pile_dir = pile_dir or REPO / "data/pile"
+    caches = [torch.load(pile_dir / f"{dom}_{d['pile_id_tokens']}.pt", mmap=True,
+                         weights_only=True) for dom in d["pile_id_domains"]]
+    total = sum(len(t) for t in caches)
+    start = int(total * (1 - d["val_fraction"] - d["test_fraction"]))
+    if start + 4 * T * (GATE_BLOCKS - 1) + T + 1 > int(total * (1 - d["test_fraction"])):
+        raise ValueError("the ID val slice is too short for the T7 blocks")
+
+    def tokens(a: int, b: int) -> torch.Tensor:  # [a, b) of the joined caches
+        parts, off = [], 0
+        for t in caches:
+            if max(a - off, 0) < min(b - off, len(t)):
+                parts.append(t[max(a - off, 0):min(b - off, len(t))])
+            off += len(t)
+        return torch.cat(parts).long()
+
+    w = torch.stack([tokens(start + 4 * T * i, start + 4 * T * i + T + 1)
+                     for i in range(GATE_BLOCKS)])
     return [(w[i:i + 2, :-1], w[i:i + 2, 1:]) for i in range(0, GATE_BLOCKS, 2)]
 
 
@@ -285,11 +361,13 @@ def check_t7(check: str, cases: list[GateCase], proves: str = "") -> Result:
             m = measure_delta_nll(model, lambda s: sampler(state, seed=s),
                                   _familiar_batches(cfg), range(GATE_SEEDS))
         budget = _budget(cfg)
-        within = within_budget(m["delta_nll"], m["ell0"], budget)
+        within = within_budget(m["delta_nll"], m["ell0"], budget, m["se"])
         ok &= c.expect_within is None or within == c.expect_within
-        notes.append(f"{c.label}: NLL {m['ell0']:.2f}->{m['mean_nll']:.2f}, "
-                     f"{'inside' if within else 'over'} {GATE_MARGIN:g}x{budget:.4f}")
-    return _verdict(check, proves, ok, "; ".join(notes))
+        notes.append(f"{c.label}: NLL {m['ell0']:.2f}->{m['mean_nll']:.2f} (SE {m['se']:.3f}), "
+                     f"{'inside' if within else 'over'} budget {budget:.4f}"
+                     + (" (reported, not judged)" if c.expect_within is None else ""))
+    return _verdict(check, proves, ok, f"{GATE_BLOCKS} val blocks, {GATE_SEEDS} draws, rule "
+                    f"|dNLL| <= budget x l0 + {GATE_N_SE:g} SE: " + "; ".join(notes))
 
 
 def _gate_cases() -> dict[str, list[GateCase]]:
@@ -332,10 +410,14 @@ def check_t8() -> Result:
     sys.path.insert(0, str(REPO / "tests"))
     from test_eval_rebuild import ID_CACHE, OOD_CACHE, Fixture  # the S1 builder fixture
 
+    with tempfile.TemporaryDirectory(prefix="sanity_t8_", ignore_cleanup_errors=True) as tmp:
+        return _check_t8_in(Path(tmp), proves, Fixture, ID_CACHE, OOD_CACHE)
+
+
+def _check_t8_in(tmp: Path, proves: str, Fixture, ID_CACHE: int, OOD_CACHE: int) -> Result:
     from minigpt import data as data_mod
     from minigpt.laplace import fit_laplace, save_laplace_state, select_params
     from minigpt.posthoc_refit import load_posthoc_base, load_refit_data, run_refit
-    tmp = Path(tempfile.mkdtemp(prefix="sanity_t8_"))
     fx = Fixture(tmp)
     report = fx.build()
     if report["status"] != "PASS":
@@ -386,7 +468,7 @@ def check_t8() -> Result:
 
 def check_t9() -> Result:
     r = check_t2(plant=True)
-    return _verdict("T9", "a planted error (identical-sample MI + 0.1) turns T2 into FAIL",
+    return _verdict("T9", "a bug planted in the scorer (log epsilon 0.1) turns T2 into FAIL",
                     r.status == "FAIL", f"planted T2: {r.status}, {r.reason}")
 
 
