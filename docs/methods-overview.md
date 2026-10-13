@@ -57,9 +57,9 @@ their experience (epistemic).
 ### How this project turns weight versions into a score
 
 Most methods in section 3 differ mainly in **how they produce the N weight versions**. This project
-scores all of them the same way. The main score is the realized-token disagreement *g*: how much the
-versions disagree about the token that actually comes next. Next to it we report the classic
-disagreement score, mutual information (MI):
+scores all of them the same way. The main score is the classic disagreement score, mutual information
+(MI). Next to it we report a second score, the realized-token disagreement *g*: how much the versions
+disagree about the token that actually comes next. MI is:
 
 $$\mathrm{MI} = H\Big[\tfrac{1}{N}\textstyle\sum_{i} p_i\Big] - \tfrac{1}{N}\textstyle\sum_{i} H[p_i]$$
 
