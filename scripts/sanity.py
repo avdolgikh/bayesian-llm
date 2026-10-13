@@ -8,7 +8,7 @@ dev dependencies installed: T8 imports the S1 builder fixture from tests/test_ev
 
     python scripts/sanity.py                 # T2-T9 on the CPU
     python scripts/sanity.py --only T2,T6    # a subset
-    python scripts/sanity.py --with-gpu      # also T1: re-score the old D1 blocks (~48 GPU min)
+    python scripts/sanity.py --with-gpu      # also T1: re-score the old D1 blocks (~76 GPU min)
 """
 # ruff: noqa: E402
 from __future__ import annotations
@@ -77,7 +77,7 @@ def check_t1(with_gpu: bool) -> Result:
     proves = "the scorer with v1_legacy samplers reproduces the 7 saved D1 AUROCs"
     cfg_path = REPO / "data/i2/repro/i2_eval_repro.yaml"
     if not with_gpu:
-        return Result("T1", proves, "SKIP", "GPU check, opt-in: run with --with-gpu (~48 GPU min)")
+        return Result("T1", proves, "SKIP", "GPU check, opt-in: run with --with-gpu (~76 GPU min)")
     if not torch.cuda.is_available() or not cfg_path.exists():
         return Result("T1", proves, "SKIP", f"no CUDA device or no {cfg_path}")
     with tempfile.TemporaryDirectory(prefix="sanity_t1_", ignore_cleanup_errors=True) as tmp:
