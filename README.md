@@ -78,7 +78,7 @@ The agent receives the experiment briefing (`experiments/agent_briefing.md`) and
 ```
 minigpt/       Model, training, Bayesian layers, LoRA, Laplace, TFB, uncertainty metrics, eval-set builder, post-hoc refits
 experiments/   Experiment scripts (A0-B3) + agentic pipeline (C0-C4)
-tests/         599 tests
+tests/         600 tests
 configs/       YAML configs per experiment
 paper/         LaTeX paper, compiled PDF, arXiv submission zip
 figures/       Generated paper figures (PDF/PNG) — from scripts/generate_figures.py
@@ -91,7 +91,7 @@ docs/          arXiv requirements, metrics guide, methods overview
 
 ```bash
 uv sync                                          # install dependencies
-uv run pytest tests/ -v                          # 599 tests
+uv run pytest tests/ -v                          # 600 tests
 uv run ruff check minigpt/ experiments/ tests/ scripts/   # lint
 
 # Example experiments (require CUDA):
