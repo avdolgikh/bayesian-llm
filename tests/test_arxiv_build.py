@@ -1,12 +1,14 @@
 """arXiv source package checks (spec: agents/specs/2026-10/arxiv-submission-build.md, R7, R9).
 
-arXiv compiles the LaTeX source itself, runs no BibTeX and runs on Linux. So the zip must hold the
-real style file, the .bbl, and entry names with forward slashes. Its metadata form refuses non-ASCII
-characters, so the build also writes the form text as plain ASCII (R9).
+arXiv compiles the LaTeX source itself, on Linux, with the shipped .bbl by default. So the zip must
+hold the real style file, the .bbl, and entry names with forward slashes, and match its sources.
+Its metadata form refuses non-ASCII characters, so the build also writes the form text as plain
+ASCII (R9).
 """
 
 import hashlib
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -168,6 +170,29 @@ def _check_zip_invariants(zip_path: Path) -> zipfile.ZipFile:
     return zf
 
 
+def _lf(data: bytes) -> bytes:
+    """build.sh R3b: CRLF, then any lone CR, become LF."""
+    return data.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+
+
+def _staged_tex(data: bytes) -> bytes:
+    """build.sh R4 on the repo tex: \\graphicspath{{figures/}}, then \\pdfoutput=1 as line 1."""
+    text = data.decode("utf-8")
+    text = re.sub(r"\\graphicspath\{\{[^}]*\}\}", lambda m: r"\graphicspath{{figures/}}", text)
+    first = text.lstrip().splitlines()[0] if text.strip() else ""
+    if not first.startswith(r"\pdfoutput"):  # build.sh: when all figures are PNG, JPG or PDF
+        text = "\\pdfoutput=1\n" + text
+    return text.encode("utf-8")
+
+
+def _source_of(name: str) -> bytes:
+    """AT7d: the bytes build.sh would zip as `name`, made from today's repo files."""
+    if name.startswith("figures/"):
+        return (ROOT / name).read_bytes()  # copied byte for byte
+    data = (PAPER_DIR / name).read_bytes()  # paper.tex, paper.bbl, references.bib, the .sty
+    return _lf(_staged_tex(data) if name == TEX.name else data)
+
+
 def _run_metadata(*args: str) -> subprocess.CompletedProcess:
     """Run metadata.py with the test's Python (it needs only the standard library)."""
     return subprocess.run(
@@ -231,10 +256,15 @@ def test_build_script_makes_valid_zip(tmp_path):
 
 
 def test_committed_zip_is_valid():
-    """R7 test 2: the committed arXiv source package (runs in CI)."""
+    """R7 test 2: the committed package is valid and matches its sources (AT7d). Runs in CI."""
     if not COMMITTED_ZIP.exists():
         pytest.skip("paper/arxiv-submission.zip absent")
-    _check_zip_invariants(COMMITTED_ZIP).close()
+    with _check_zip_invariants(COMMITTED_ZIP) as zf:
+        stale = [name for name in zf.namelist() if zf.read(name) != _source_of(name)]
+        sty = zf.read("neurips_2024.sty")
+    assert not stale, f"zip older than its sources: rebuild (skill section 2 step 4): {stale}"
+    if REFERENCE_STY.exists():  # AT1 too, where agents/ is present (never in CI)
+        assert sty == _lf(REFERENCE_STY.read_bytes())
 
 
 def test_committed_style_file_is_real():
@@ -278,7 +308,7 @@ def test_metadata_script_writes_ascii_form_text(tmp_path):
 
 
 def test_committed_metadata_is_ascii(tmp_path):
-    """R9 test 2: the committed form text is ASCII in four blocks (CI too) and, locally, current."""
+    """R9 test 2: ASCII, four blocks and a page count (CI too); locally, also current."""
     if not COMMITTED_METADATA.exists():
         pytest.skip("paper/arxiv-metadata.txt absent")
     data = COMMITTED_METADATA.read_bytes()
@@ -287,6 +317,9 @@ def test_committed_metadata_is_ascii(tmp_path):
     blocks = _metadata_blocks(text)
     assert list(blocks) == METADATA_LABELS and all(blocks.values()), blocks
     assert len(blocks["Abstract"]) <= ABSTRACT_LIMIT
+    assert re.match(r"\d+ pages, ", blocks["Comments"]), (  # a --no-verify file has "? pages"
+        "no page count: rebuild with Docker (skill section 2 step 4)"
+    )
     if not METADATA_PY.exists():
         return  # CI: the script lives in agents/, which CI cannot see
     pages = blocks["Comments"].split(" pages")[0]

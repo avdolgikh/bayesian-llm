@@ -12,7 +12,7 @@ A comparative study of 4 Bayesian methods in a 2x2 matrix — (variational vs po
 
 - [`paper/paper.pdf`](paper/paper.pdf) — compiled paper (NeurIPS preprint format, 8 pages)
 - [`paper/paper.tex`](paper/paper.tex) — LaTeX source
-- [`paper/arxiv-submission.zip`](paper/arxiv-submission.zip) — arXiv source package: `paper.tex` (with `\pdfoutput=1`), `paper.bbl` (arXiv runs no BibTeX), `references.bib`, `neurips_2024.sty` and the 3 figures the paper uses. It is compiled from the unpacked zip with pdflatex in TeX Live (Docker) before upload; `uv run pytest tests/test_arxiv_build.py` checks its contents
+- [`paper/arxiv-submission.zip`](paper/arxiv-submission.zip) — arXiv source package: `paper.tex` (with `\pdfoutput=1`), `paper.bbl` (arXiv Submission v1.5 can run BibTeX but uses a kept `.bbl` by default, so the package ships it), `references.bib`, `neurips_2024.sty` and the 3 figures the paper uses. It is compiled from the unpacked zip with pdflatex in TeX Live (Docker) before upload; `uv run pytest tests/test_arxiv_build.py` checks its contents
 - [`paper/arxiv-metadata.txt`](paper/arxiv-metadata.txt) — the arXiv form text (title, authors, abstract, comments) in plain ASCII, made from `paper.tex`: arXiv refuses non-ASCII characters (em-dashes, ×, §) in the abstract
 
 ## Results
