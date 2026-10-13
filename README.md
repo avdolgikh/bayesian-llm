@@ -13,6 +13,7 @@ A comparative study of 4 Bayesian methods in a 2x2 matrix — (variational vs po
 - [`paper/paper.pdf`](paper/paper.pdf) — compiled paper (NeurIPS preprint format, 8 pages)
 - [`paper/paper.tex`](paper/paper.tex) — LaTeX source
 - [`paper/arxiv-submission.zip`](paper/arxiv-submission.zip) — arXiv source package: `paper.tex` (with `\pdfoutput=1`), `paper.bbl` (arXiv runs no BibTeX), `references.bib`, `neurips_2024.sty` and the 3 figures the paper uses. It is compiled from the unpacked zip with pdflatex in TeX Live (Docker) before upload; `uv run pytest tests/test_arxiv_build.py` checks its contents
+- [`paper/arxiv-metadata.txt`](paper/arxiv-metadata.txt) — the arXiv form text (title, authors, abstract, comments) in plain ASCII, made from `paper.tex`: arXiv refuses non-ASCII characters (em-dashes, ×, §) in the abstract
 
 ## Results
 
@@ -78,9 +79,9 @@ The agent receives the experiment briefing (`experiments/agent_briefing.md`) and
 ```
 minigpt/       Model, training, Bayesian layers, LoRA, Laplace, TFB, uncertainty metrics, eval-set builder, post-hoc refits
 experiments/   Experiment scripts (A0-B3) + agentic pipeline (C0-C4)
-tests/         600 tests
+tests/         602 tests
 configs/       YAML configs per experiment
-paper/         LaTeX paper, compiled PDF, arXiv submission zip
+paper/         LaTeX paper, compiled PDF, arXiv submission zip and its ASCII metadata
 figures/       Generated paper figures (PDF/PNG) — from scripts/generate_figures.py
 scripts/       Utilities (MLflow inspection, GPU profiling, checkpoint eval, figure generation,
                timing probes, eval-set build/checks, post-hoc refits, reference verification)
@@ -91,7 +92,7 @@ docs/          arXiv requirements, metrics guide, methods overview
 
 ```bash
 uv sync                                          # install dependencies
-uv run pytest tests/ -v                          # 600 tests
+uv run pytest tests/ -v                          # 602 tests
 uv run ruff check minigpt/ experiments/ tests/ scripts/   # lint
 
 # Example experiments (require CUDA):

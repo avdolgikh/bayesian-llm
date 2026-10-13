@@ -1,0 +1,11 @@
+Title:
+Epistemic Uncertainty in Language Models
+
+Authors:
+Oleksiy Dolgykh
+
+Abstract:
+We present a comparison of four Bayesian approaches to epistemic uncertainty estimation in language models, variational and post-hoc inference across full weights and LoRA adapters, plus a Monte Carlo (MC) Dropout baseline. All methods are evaluated on the same 76M-parameter GPT-2-style architecture trained on The Pile with domain-split OOD evaluation. We report three main findings. First, LoRA-based Bayesian methods achieved the strongest OOD detection in our setup: BLoB (Bayesian Low-Rank Adaptation by Backpropagation) LoRA (AUROC 0.909) and TFB (Training-Free Bayesianization) (0.917) outperform full-weight variational inference (0.874) with 17x fewer Bayesian parameters, though this comparison is confounded by differences in training procedure and backbone quality. Second, diagonal Laplace approximation fails for language model OOD detection, the diagonal Fisher curvature is flat at convergence regardless of parameterization (full weights or LoRA). Third, MC Dropout applied to the deterministic checkpoint (zero extra training) achieves AUROC 0.898, competitive with trained Bayesian methods (overlapping confidence intervals with BLoB). TFB, also requiring no Bayesian training, matches the best trained methods at AUROC 0.917. Production benchmarks show N=3 MC samples capture 97% of the full signal.
+
+Comments:
+8 pages, 3 figures. Code: https://github.com/avdolgikh/bayesian-llm
