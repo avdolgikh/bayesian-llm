@@ -1,0 +1,85 @@
+\begin{thebibliography}{11}
+\providecommand{\natexlab}[1]{#1}
+\providecommand{\url}[1]{\texttt{#1}}
+\expandafter\ifx\csname urlstyle\endcsname\relax
+  \providecommand{\doi}[1]{doi: #1}\else
+  \providecommand{\doi}{doi: \begingroup \urlstyle{rm}\Url}\fi
+
+\bibitem[Blundell et~al.(2015)Blundell, Cornebise, Kavukcuoglu, and
+  Wierstra]{blundell2015weight}
+Charles Blundell, Julien Cornebise, Koray Kavukcuoglu, and Daan Wierstra.
+\newblock Weight uncertainty in neural networks.
+\newblock In \emph{International Conference on Machine Learning (ICML)}, 2015.
+
+\bibitem[Daxberger et~al.(2021)Daxberger, Kristiadi, Immer, Eschenhagen, Bauer,
+  and Hennig]{daxberger2021laplace}
+Erik Daxberger, Agustinus Kristiadi, Alexander Immer, Runa Eschenhagen,
+  Matthias Bauer, and Philipp Hennig.
+\newblock Laplace redux -- effortless {B}ayesian deep learning.
+\newblock In \emph{Advances in Neural Information Processing Systems
+  (NeurIPS)}, 2021.
+
+\bibitem[Gal and Ghahramani(2016)]{gal2016dropout}
+Yarin Gal and Zoubin Ghahramani.
+\newblock Dropout as a {B}ayesian approximation: Representing model uncertainty
+  in deep learning.
+\newblock In \emph{International Conference on Machine Learning (ICML)}, 2016.
+
+\bibitem[Gao et~al.(2020)Gao, Biderman, Black, Golding, Hoppe, Foster, Phang,
+  He, Thite, Nabeshima, Presser, and Leahy]{gao2020pile}
+Leo Gao, Stella Biderman, Sid Black, Laurence Golding, Travis Hoppe, Charles
+  Foster, Jason Phang, Horace He, Anish Thite, Noa Nabeshima, Shawn Presser,
+  and Connor Leahy.
+\newblock The {P}ile: An 800{GB} dataset of diverse text for language modeling.
+\newblock \emph{arXiv preprint arXiv:2101.00027}, 2020.
+
+\bibitem[Graves(2011)]{graves2011practical}
+Alex Graves.
+\newblock Practical variational inference for neural networks.
+\newblock In \emph{Advances in Neural Information Processing Systems
+  (NeurIPS)}, 2011.
+
+\bibitem[Hu et~al.(2022)Hu, Shen, Wallis, Allen-Zhu, Li, Wang, Wang, and
+  Chen]{hu2022lora}
+Edward~J. Hu, Yelong Shen, Phillip Wallis, Zeyuan Allen-Zhu, Yuanzhi Li, Shean
+  Wang, Lu~Wang, and Weizhu Chen.
+\newblock {LoRA}: Low-rank adaptation of large language models.
+\newblock In \emph{International Conference on Learning Representations
+  (ICLR)}, 2022.
+
+\bibitem[Samplawski et~al.(2025)Samplawski, Cobb, Acharya, Kaur, and
+  Jha]{samplawski2025scalable}
+Colin Samplawski, Adam~D. Cobb, Manoj Acharya, Ramneet Kaur, and Susmit Jha.
+\newblock Scalable {B}ayesian low-rank adaptation of large language models via
+  stochastic variational subspace inference.
+\newblock In \emph{Conference on Uncertainty in Artificial Intelligence (UAI)},
+  2025.
+
+\bibitem[Shi et~al.(2025)Shi, Wang, Han, Zhang, and Wang]{shi2025training}
+Haizhou Shi, Yibin Wang, Ligong Han, Huan Zhang, and Hao Wang.
+\newblock Training-free {B}ayesianization for low-rank adapters of large
+  language models.
+\newblock In \emph{Advances in Neural Information Processing Systems
+  (NeurIPS)}, 2025.
+
+\bibitem[Wang et~al.(2024)Wang, Shi, Han, Metaxas, and Wang]{wang2024blob}
+Yibin Wang, Haizhou Shi, Ligong Han, Dimitris Metaxas, and Hao Wang.
+\newblock {BLoB}: {B}ayesian low-rank adaptation by backpropagation for large
+  language models.
+\newblock In \emph{Advances in Neural Information Processing Systems
+  (NeurIPS)}, 2024.
+
+\bibitem[Wen et~al.(2018)Wen, Vicol, Ba, Tran, and Grosse]{wen2018flipout}
+Yeming Wen, Paul Vicol, Jimmy Ba, Dustin Tran, and Roger Grosse.
+\newblock Flipout: Efficient pseudo-independent weight perturbations on
+  mini-batches.
+\newblock In \emph{International Conference on Learning Representations
+  (ICLR)}, 2018.
+
+\bibitem[Yang et~al.(2024)Yang, Robeyns, Wang, and Aitchison]{yang2024bayesian}
+Adam~X. Yang, Maxime Robeyns, Xi~Wang, and Laurence Aitchison.
+\newblock {B}ayesian low-rank adaptation for large language models.
+\newblock In \emph{International Conference on Learning Representations
+  (ICLR)}, 2024.
+
+\end{thebibliography}
