@@ -74,6 +74,11 @@ def _check_zip_invariants(zip_path: Path) -> zipfile.ZipFile:
     sty = zf.read("neurips_2024.sty")
     assert len(sty) > 0
     assert PROVIDES in sty
+
+    # AT3c: arXiv runs on Linux; text entries use LF even when git checked them out as CRLF.
+    for name in names:
+        if not name.endswith(".png"):
+            assert b"\r" not in zf.read(name), f"CR byte in {name}"
     return zf
 
 
@@ -96,8 +101,8 @@ def test_build_script_makes_valid_zip(tmp_path):
     assert _sha256(TEX) == tex_hash_before  # AT4c
 
     zf = _check_zip_invariants(out_zip)
-    if REFERENCE_STY.exists():  # AT1
-        assert zf.read("neurips_2024.sty") == REFERENCE_STY.read_bytes()
+    if REFERENCE_STY.exists():  # AT1 (the reference may be CRLF on a Windows checkout)
+        assert zf.read("neurips_2024.sty") == REFERENCE_STY.read_bytes().replace(b"\r\n", b"\n")
     zf.close()
 
 
