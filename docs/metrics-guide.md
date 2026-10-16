@@ -8,9 +8,9 @@ and use some metrics dropped here. Section 7 lists what changed and why.
 
 ## At a glance
 
-- **Main score (Section 2):** the realized-token disagreement, called *g*. For each token of a text, the weight
+- **Main score (Section 2):** mutual information (MI), the classic disagreement measure over the whole vocabulary.
+- **Second score (Section 2):** the realized-token disagreement, called *g*. For each token of a text, the weight
   samples say how likely the actual next token is, and *g* measures how much they disagree. A text's score is the mean.
-- **Companion score (Section 2):** mutual information (MI), the classic disagreement measure over the whole vocabulary.
 - **Main test (Section 3):** AUROC for telling familiar from unfamiliar text, reported separately per unfamiliar source.
 - **Honest error bars (Section 4):** bootstrap by document, paired comparisons, Holm correction, rules fixed in advance.
 - **Bars to beat (Section 5):** the plain model's perplexity, a hidden-state distance, a character count, matched noise.
@@ -84,7 +84,7 @@ Worked example with two samples and only two possible tokens (values in nats):
 Row 2 is pure aleatoric uncertainty: both samples say "it's a coin flip". Row 3 is epistemic: each sample is sure,
 but they are sure of different things. TU is 0.69 in both rows. Only the split into AU and MI tells them apart.
 
-**Realized-token disagreement (the main score).** When we score existing text, we know which token actually comes
+**Realized-token disagreement (the second score).** When we score existing text, we know which token actually comes
 next. Call it $y_t$. Each sample *s* gives it a log-probability $\ell_{s,t} = \log p_s(y_t)$.
 
 $$g_t = \log\Big(\frac{1}{N}\sum_{s=1}^{N} p_s(y_t)\Big) - \frac{1}{N}\sum_{s=1}^{N}\ell_{s,t}$$
@@ -97,17 +97,22 @@ Worked example: sample A gives the actual token 0.9, sample B gives it 0.1. The 
 log 0.5 = -0.69. The average of the logs is (-0.11 - 2.30) / 2 = -1.20. So *g* = -0.69 + 1.20 = 0.51 nats.
 If both samples gave 0.1, *g* would be 0: the model is surprised, but its versions agree. Surprise is not disagreement.
 
-Why *g* is the main score:
-- It needs only N numbers per token (the probability of the actual token), not N full distributions over a
-  vocabulary of about 50,000 tokens. It is cheap to store and simple to compute once the N forward passes are done
-  (the passes themselves cost the same as for MI).
-- Like MI, it works for every method (variational, Laplace, dropout, ensembles), and it applies unchanged when,
+Why MI is the main score, and why *g* stays:
+- MI is the standard epistemic score since [Malinin 2021], so readers already know it.
+- MI uses the whole next-token distribution. It is available before a token is chosen, so it can be used at
+  inference time, while the model writes.
+- *g* adds the view at the token that actually came. It also gives an exact identity: the NLL of the averaged
+  model equals the mean sample NLL minus *g*.
+- *g* is cheap. It needs only N numbers per token (the probability of the actual token), not N full distributions
+  over a vocabulary of about 50,000 tokens. It is simple to compute once the N forward passes are done (the passes
+  themselves cost the same as for MI).
+- Like MI, *g* works for every method (variational, Laplace, dropout, ensembles), and it applies unchanged when,
   later, we score the model's own generated answers.
 - It has a known relative: on tokens sampled from the averaged model, its average equals the "reverse mutual
   information" of [Malinin 2021]. On human-written text, and on greedy answers later, the tokens are not sampled
   that way, so here *g* is its own score, not an estimate of reverse MI.
 
-MI is reported next to *g* for every method, because MI is the standard score in the literature.
+*g* is reported next to MI for every method.
 
 ### From tokens to one score per text
 
@@ -358,8 +363,8 @@ seen. More in the [methods overview](methods-overview.md#7-open-problems).
 
 | Metric | Question it answers | Good value | Role |
 |---|---|---|---|
-| *g* (realized-token disagreement), per text | Do the weight samples disagree about the actual text? | Higher on unfamiliar text | Main score |
-| MI | Do the weight samples disagree about the next token, over the whole vocabulary? | Higher on unfamiliar text | Companion score |
+| MI | Do the weight samples disagree about the next token, over the whole vocabulary? | Higher on unfamiliar text | Main score |
+| *g* (realized-token disagreement), per text | Do the weight samples disagree about the actual text? | Higher on unfamiliar text | Second score |
 | AUROC, per source | How well does the score rank unfamiliar text above familiar text? | 1.0 (0.5 is chance) | Main test |
 | FPR95; TPR at 5% FPR | How many familiar texts are wrongly flagged; how many unfamiliar texts are caught? | 0%; 100% | Secondary |
 | AUPRC at a realistic mix | Are flagged texts really unfamiliar when unfamiliar text is rare? | 1.0 | Optional |
