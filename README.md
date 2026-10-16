@@ -80,11 +80,13 @@ The agent receives the experiment briefing (`experiments/agent_briefing.md`) and
 minigpt/       Model, training, Bayesian layers, LoRA, Laplace, TFB, uncertainty metrics, eval-set builder, post-hoc refits
 experiments/   Experiment scripts (A0-B3) + agentic pipeline (C0-C4)
 tests/         602 tests
+tests/         614 tests
 configs/       YAML configs per experiment
 paper/         LaTeX paper, compiled PDF, arXiv submission zip and its ASCII metadata
 figures/       Generated paper figures (PDF/PNG) — from scripts/generate_figures.py
 scripts/       Utilities (MLflow inspection, GPU profiling, checkpoint eval, figure generation,
-               timing probes, eval-set build/checks, post-hoc refits, reference verification)
+               timing probes, eval-set build/checks, post-hoc refits, trust checks (sanity.py),
+               reference verification)
 docs/          arXiv requirements, metrics guide, methods overview
 ```
 
@@ -107,6 +109,7 @@ python scripts/benchmark_inference.py                                           
 python scripts/eval_mc_dropout.py                                                  # MC Dropout baseline
 python scripts/generate_figures.py --png                                           # paper figures
 python scripts/verify_references.py                                                # check paper references
+uv run python scripts/sanity.py                                                    # 9 trust checks
 ```
 
 Requires Python 3.11+ and CUDA-enabled PyTorch for GPU training.
